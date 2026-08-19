@@ -1,0 +1,322 @@
+"""NEXUS bridge: adapts NEXUS runtime into the multiplayer workspace context."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+from datetime import timedelta
+from pathlib import Path
+from typing import Any
+
+from ..domain.models import (
+    AgentInstance,
+    AgentStatus,
+    DomainError,
+    Execution,
+    Session,
+    new_id,
+)
+
+log = logging.getLogger(__name__)
+
+# Add NEXUS to path
+_nexus_src = str(Path(__file__).resolve().parents[4] / "NEXUS" / "src")
+if _nexus_src not in sys.path:
+    sys.path.insert(0, _nexus_src)
+
+try:
+    from nexus_runtime.agent import AgentExecutor
+    from nexus_runtime.contracts import MemoryProvider, ModelProvider
+    from nexus_runtime.events import InMemoryEventBus
+    from nexus_runtime.models import Agent, AgentRunState, Budget
+    from nexus_runtime.models import DomainError as NexusDomainError
+    from nexus_runtime.persistence import SQLiteStateStore
+    from nexus_runtime.policy import PolicyEngine
+    from nexus_runtime.tools import ToolRegistry
+    _HAS_NEXUS = True
+except ImportError:
+    log.warning("NEXUS runtime not available; agent execution will be stub-only")
+    _HAS_NEXUS = False
+    NexusDomainError = Exception  # type: ignore
+
+
+class StubModelProvider:
+    """Placeholder model provider. Replace with real LLM integration."""
+
+    def complete(self, prompt: str, response_schema: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "action": "finish",
+            "output": {"result": "stub response"},
+            "token_usage": 100,
+        }
+
+
+class StubMemoryProvider:
+    """Placeholder memory provider."""
+
+    def recall(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        return []
+
+    def remember(self, record: dict[str, Any]) -> str:
+        return new_id("mem")
+
+
+class NexusAgentBridge:
+    """Bridges NEXUS agent execution into the multiplayer room context.
+
+    This class:
+    - Creates NEXUS Agent instances from multiplayer AgentInstance records
+    - Manages execution lifecycle through NEXUS AgentExecutor
+    - Translates NEXUS events into multiplayer RoomEvents
+    - Supports pause/resume/cancel/intervene operations
+
+    Thread safety: All mutable shared state is protected by an asyncio.Lock.
+    """
+
+    def __init__(
+        self,
+        model_provider: ModelProvider | None = None,
+        memory_provider: MemoryProvider | None = None,
+        db_path: str | Path = ":memory:",
+    ) -> None:
+        self._model = model_provider or StubModelProvider()
+        self._memory = memory_provider or StubMemoryProvider()
+        self._lock = asyncio.Lock()
+
+        if _HAS_NEXUS:
+            self._event_bus = InMemoryEventBus()
+            self._state_store = SQLiteStateStore(db_path)
+            self._executor = AgentExecutor(
+                model=self._model,
+                memory=self._memory,
+                tools=ToolRegistry(PolicyEngine({})),
+                event_bus=self._event_bus,
+                state_store=self._state_store,
+            )
+        else:
+            self._executor = None
+
+        self._active_runs: dict[str, str] = {}  # execution_id -> run_id
+        self._run_executions: dict[str, str] = {}  # run_id -> execution_id
+        self._agent_executions: dict[str, str] = {}  # agent_id -> execution_id
+        self._cancellation_flags: dict[str, bool] = {}
+        self._interventions: dict[str, list[str]] = {}  # run_id -> list of interventions
+
+    def create_nexus_agent(self, agent_instance: AgentInstance) -> Agent:
+        """Convert a multiplayer AgentInstance to a NEXUS Agent."""
+        return Agent(
+            name=agent_instance.name,
+            role=agent_instance.role,
+            capabilities=agent_instance.capabilities,
+            instructions=agent_instance.system_prompt,
+            agent_id=agent_instance.agent_id,
+        )
+
+    async def create_execution(
+        self,
+        agent_instance: AgentInstance,
+        session: Session,
+        task_description: str,
+        execution: Execution,
+    ) -> tuple[Agent, Budget]:
+        """Create a NEXUS agent run for a multiplayer execution."""
+        nexus_agent = self.create_nexus_agent(agent_instance)
+        budget = Budget(
+            max_tokens=100_000,
+            max_wall_time=timedelta(minutes=30),
+            max_tool_calls=50,
+            max_workers=4,
+            max_experiment_resources=10,
+        )
+        run = self._executor.create_run(
+            agent=nexus_agent,
+            investigation_id=session.session_id,
+            budget=budget,
+            task_id=session.task_id,
+            run_id=f"run_{execution.execution_id}",
+        )
+        async with self._lock:
+            self._active_runs[execution.execution_id] = run.run_id
+            self._run_executions[run.run_id] = execution.execution_id
+            self._agent_executions[agent_instance.agent_id] = execution.execution_id
+        return nexus_agent, budget
+
+    async def execute_step(
+        self,
+        execution_id: str,
+        prompt: str,
+        schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Execute one step of an agent run. This is the core execution loop."""
+        async with self._lock:
+            run_id = self._active_runs.get(execution_id)
+            if not run_id:
+                raise DomainError(f"no active run for execution {execution_id}")
+
+            if self._cancellation_flags.get(run_id):
+                return {"status": "cancelled", "reason": "cancellation requested"}
+
+            # Collect and clear interventions atomically
+            interventions = list(self._interventions.get(run_id, []))
+            if interventions:
+                self._interventions[run_id] = []
+
+        if schema is None:
+            schema = {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["tool", "finish", "delegate", "wait"]},
+                    "tool": {"type": "string"},
+                    "input": {"type": "object"},
+                    "output": {"type": "object"},
+                },
+                "required": ["action"],
+            }
+
+        # Inject interventions into the prompt
+        if interventions:
+            intervention_text = "\n".join(f"- HUMAN INTERVENTION: {i}" for i in interventions)
+            prompt = f"{prompt}\n\n{intervention_text}\n\nPlease incorporate these instructions."
+
+        run = self._executor.get_run(run_id)
+
+        # Start if created
+        if run.state == AgentRunState.CREATED:
+            self._executor.transition(run_id, AgentRunState.RUNNING, "begin execution")
+
+        # Execute one step
+        try:
+            response = self._executor.reason(run_id, prompt, schema)
+            action = self._executor.choose_action(run_id, response)
+            result = self._executor.execute_action(run_id, action)
+            self._executor.update_state(run_id)
+            return {"status": "ok", "result": result, "action": action.get("action")}
+        except DomainError as e:
+            return {"status": "error", "error": str(e)}
+        except NexusDomainError as e:
+            return {"status": "error", "error": str(e)}
+        except Exception as e:
+            log.exception("Unexpected error in agent execution step")
+            return {"status": "error", "error": f"internal error: {e}"}
+
+    async def request_cancellation(self, run_id: str) -> None:
+        async with self._lock:
+            self._cancellation_flags[run_id] = True
+
+    async def add_intervention(self, run_id: str, instruction: str) -> None:
+        async with self._lock:
+            if run_id not in self._interventions:
+                self._interventions[run_id] = []
+            self._interventions[run_id].append(instruction)
+
+    async def get_run_state(self, execution_id: str) -> AgentRunState | None:
+        async with self._lock:
+            run_id = self._active_runs.get(execution_id)
+        if not run_id:
+            return None
+        run = self._executor.get_run(run_id)
+        return run.state
+
+    async def pause_execution(self, execution_id: str) -> bool:
+        async with self._lock:
+            run_id = self._active_runs.get(execution_id)
+        if not run_id:
+            return False
+        try:
+            self._executor.transition(run_id, AgentRunState.PAUSED, "human requested pause")
+            return True
+        except (DomainError, NexusDomainError):
+            return False
+
+    async def resume_execution(self, execution_id: str) -> bool:
+        async with self._lock:
+            run_id = self._active_runs.get(execution_id)
+        if not run_id:
+            return False
+        try:
+            self._executor.transition(run_id, AgentRunState.RUNNING, "human requested resume")
+            return True
+        except (DomainError, NexusDomainError):
+            return False
+
+    async def cancel_execution(self, execution_id: str) -> bool:
+        async with self._lock:
+            run_id = self._active_runs.get(execution_id)
+            if not run_id:
+                return False
+            self._cancellation_flags[run_id] = True
+        try:
+            self._executor.transition(run_id, AgentRunState.CANCELLED, "human requested cancel")
+            return True
+        except (DomainError, NexusDomainError):
+            return False
+
+    async def get_execution_for_agent(self, agent_id: str) -> str | None:
+        """Get the active execution_id for a given agent_id."""
+        async with self._lock:
+            return self._agent_executions.get(agent_id)
+
+    async def get_run_id_for_execution(self, execution_id: str) -> str | None:
+        """Get the run_id for a given execution_id."""
+        async with self._lock:
+            return self._active_runs.get(execution_id)
+
+    async def build_delegation(
+        self,
+        parent_execution_id: str,
+        delegated_agent: AgentInstance,
+        task: str,
+    ) -> str:
+        """Create a delegated child run. Returns the child run_id."""
+        async with self._lock:
+            parent_run_id = self._active_runs.get(parent_execution_id)
+        if not parent_run_id:
+            raise DomainError(f"no active run for execution {parent_execution_id}")
+
+        child_agent = self.create_nexus_agent(delegated_agent)
+        child_budget = Budget(
+            max_tokens=50_000,
+            max_wall_time=timedelta(minutes=15),
+            max_tool_calls=25,
+            max_workers=2,
+            max_experiment_resources=5,
+        )
+        child = self._executor.build_delegation(
+            parent_run_id=parent_run_id,
+            delegated_to=child_agent,
+            task=task,
+            budget=child_budget,
+        )
+        return child.run_id
+
+    async def checkpoint(self, execution_id: str) -> None:
+        async with self._lock:
+            run_id = self._active_runs.get(execution_id)
+        if run_id:
+            self._executor.checkpoint(run_id)
+
+    async def get_run_outputs(self, execution_id: str) -> dict[str, Any]:
+        async with self._lock:
+            run_id = self._active_runs.get(execution_id)
+        if not run_id:
+            return {}
+        run = self._executor.get_run(run_id)
+        return run.outputs
+
+    async def cleanup_execution(self, execution_id: str) -> None:
+        """Remove tracking state for a completed/failed execution."""
+        async with self._lock:
+            run_id = self._active_runs.pop(execution_id, None)
+            if run_id:
+                self._run_executions.pop(run_id, None)
+                self._cancellation_flags.pop(run_id, None)
+                self._interventions.pop(run_id, None)
+            # Remove from agent_executions
+            agent_to_remove = None
+            for aid, eid in self._agent_executions.items():
+                if eid == execution_id:
+                    agent_to_remove = aid
+                    break
+            if agent_to_remove:
+                self._agent_executions.pop(agent_to_remove)
