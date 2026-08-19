@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Multiplayer AI Workspace</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f0f14;--surface:#1a1a24;--surface2:#232333;--border:#2a2a3a;--text:#e0e0e8;--text2:#8888a0;--accent:#6366f1;--accent2:#818cf8;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--orange:#f97316;--radius:8px}
+body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:flex;flex-direction:column}
+.header{display:flex;align-items:center;gap:12px;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--border);min-height:56px}
+.header h1{font-size:16px;font-weight:600;color:var(--accent2)}
+.header .status{margin-left:auto;font-size:12px;color:var(--text2)}
+.main{display:flex;flex:1;overflow:hidden}
+.sidebar{width:260px;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto}
+.sidebar h3{padding:12px 16px 8px;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text2)}
+.sidebar .item{padding:8px 16px;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:8px;border-left:3px solid transparent}
+.sidebar .item:hover{background:var(--surface2)}
+.sidebar .item.active{background:var(--surface2);border-left-color:var(--accent)}
+.sidebar .item .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.sidebar .item .dot.online{background:var(--green)}
+.sidebar .item .dot.working{background:var(--yellow)}
+.sidebar .item .dot.idle{background:var(--text2)}
+.center{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.room-header{padding:12px 20px;border-bottom:1px solid var(--border);background:var(--surface)}
+.room-header h2{font-size:15px;font-weight:500}
+.room-header .meta{font-size:12px;color:var(--text2);margin-top:2px}
+.messages{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
+.msg{max-width:80%}
+.msg.human{align-self:flex-end}
+.msg.agent{align-self:flex-start}
+.msg.system{align-self:center;text-align:center}
+.msg .sender{font-size:11px;font-weight:600;margin-bottom:4px;color:var(--accent2)}
+.msg.human .sender{color:var(--green)}
+.msg .bubble{padding:10px 14px;border-radius:var(--radius);font-size:13px;line-height:1.5}
+.msg.human .bubble{background:var(--accent);color:white;border-bottom-right-radius:2px}
+.msg.agent .bubble{background:var(--surface2);border-bottom-left-radius:2px}
+.msg.system .bubble{background:transparent;color:var(--text2);font-size:12px;font-style:italic}
+.msg .time{font-size:10px;color:var(--text2);margin-top:4px}
+.input-bar{padding:12px 20px;border-top:1px solid var(--border);background:var(--surface);display:flex;gap:8px}
+.input-bar input{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;color:var(--text);font-size:13px;outline:none}
+.input-bar input:focus{border-color:var(--accent)}
+.input-bar button{background:var(--accent);color:white;border:none;border-radius:var(--radius);padding:10px 20px;cursor:pointer;font-size:13px;font-weight:500}
+.input-bar button:hover{background:var(--accent2)}
+.right-panel{width:320px;background:var(--surface);border-left:1px solid var(--border);overflow-y:auto;display:flex;flex-direction:column}
+.right-panel h3{padding:12px 16px 8px;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text2)}
+.panel-section{padding:8px 16px;border-bottom:1px solid var(--border)}
+.panel-section .card{background:var(--surface2);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px;font-size:12px}
+.panel-section .card .title{font-weight:600;margin-bottom:4px}
+.panel-section .card .detail{color:var(--text2)}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase}
+.badge.idle{background:#374151;color:#9ca3af}
+.badge.working{background:#1e3a5f;color:#60a5fa}
+.badge.thinking{background:#3b1f4e;color:#c084fc}
+.badge.completed{background:#14532d;color:#4ade80}
+.badge.failed{background:#450a0a;color:#f87171}
+.badge.paused{background:#422006;color:#fbbf24}
+.btn-sm{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 10px;border-radius:var(--radius);cursor:pointer;font-size:11px}
+.btn-sm:hover{border-color:var(--accent)}
+.approval-card{background:#422006;border:1px solid #92400e;border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
+.approval-card .action{font-size:12px;margin-bottom:8px}
+.approval-card .btns{display:flex;gap:6px}
+.btn-approve{background:#14532d;color:#4ade80;border:1px solid #166534;padding:4px 12px;border-radius:var(--radius);cursor:pointer;font-size:11px}
+.btn-reject{background:#450a0a;color:#f87171;border:1px solid #991b1b;padding:4px 12px;border-radius:var(--radius);cursor:pointer;font-size:11px}
+.hidden{display:none!important}
+#setup-screen{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:100}
+.setup-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:32px;width:420px;max-width:90vw}
+.setup-card h2{font-size:20px;margin-bottom:4px}
+.setup-card p{color:var(--text2);font-size:13px;margin-bottom:20px}
+.setup-card label{display:block;font-size:12px;color:var(--text2);margin-bottom:4px;margin-top:12px}
+.setup-card input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;color:var(--text);font-size:13px;outline:none}
+.setup-card button{width:100%;margin-top:20px;background:var(--accent);color:white;border:none;border-radius:var(--radius);padding:12px;font-size:14px;font-weight:600;cursor:pointer}
+.setup-card button:hover{background:var(--accent2)}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--text2);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.events-log{max-height:200px;overflow-y:auto;font-size:11px;font-family:monospace;color:var(--text2);padding:8px 16px}
+.events-log div{padding:2px 0;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<div id="setup-screen">
+<div class="setup-card">
+<h2>Multiplayer AI Workspace</h2>
+<p>Persistent shared workspace for humans and AI agents</p>
+<label>Display Name</label>
+<input id="setup-name" placeholder="Your name" value="Yasser">
+<label>Room Name</label>
+<input id="setup-room" placeholder="Room name" value="Authentication Migration">
+<button onclick="setup()">Enter Workspace</button>
+</div>
+</div>
+
+<div class="header" id="app-header" style="display:none">
+<h1>Multiplayer AI Workspace</h1>
+<span class="status" id="ws-status">Connecting...</span>
+</div>
+
+<div class="main" id="app-main" style="display:none">
+<div class="sidebar" id="sidebar">
+<h3>Rooms</h3>
+<div id="rooms-list"></div>
+<h3>Team</h3>
+<div id="team-list"></div>
+<h3>Agents</h3>
+<div id="agents-sidebar"></div>
+<h3>Events</h3>
+<div class="events-log" id="events-log"></div>
+</div>
+
+<div class="center">
+<div class="room-header" id="room-header">
+<h2 id="room-name">Room</h2>
+<div class="meta" id="room-meta"></div>
+</div>
+<div class="messages" id="messages"></div>
+<div class="input-bar">
+<input id="msg-input" placeholder="Send a message or instruction..." onkeydown="if(event.key==='Enter')sendMessage()">
+<button onclick="sendMessage()">Send</button>
+</div>
+</div>
+
+<div class="right-panel">
+<h3>Tasks</h3>
+<div class="panel-section" id="tasks-panel"></div>
+<h3>Agents</h3>
+<div class="panel-section" id="agents-panel"></div>
+<h3>Approvals</h3>
+<div class="panel-section" id="approvals-panel"></div>
+<h3>Artifacts</h3>
+<div class="panel-section" id="artifacts-panel"></div>
+<h3>Decisions</h3>
+<div class="panel-section" id="decisions-panel"></div>
+</div>
+</div>
+
+<script>
+const API = '/api/v1';
+let userId = '';
+let userName = '';
+let roomId = '';
+let ws = null;
+let lastSequence = 0;
+let orgId = '';
+let workspaceId = '';
+
+async function api(method, path, body) {
+  const sep = path.includes('?') ? '&' : '?';
+  const url = `${API}${path}${sep}user_id=${userId}`;
+  const opts = { method, headers: {'Content-Type': 'application/json'} };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(url, opts);
+  if (!r.ok) { const e = await r.text(); throw new Error(e); }
+  return r.json();
+}
+
+async function setup() {
+  userName = document.getElementById('setup-name').value.trim();
+  const roomName = document.getElementById('setup-room').value.trim();
+  if (!userName || !roomName) return alert('Fill in both fields');
+  userId = 'user_' + userName.toLowerCase().replace(/\s/g, '_');
+
+  // Create org + workspace + room
+  const org = await api('POST', '/organizations', {name: 'Default', slug: 'default'});
+  orgId = org.org_id;
+  const ws = await api('POST', `/organizations/${orgId}/workspaces`, {name: 'Main', slug: 'main'});
+  workspaceId = ws.workspace_id;
+  const room = await api('POST', `/workspaces/${workspaceId}/rooms`, {name: roomName});
+  roomId = room.room_id;
+
+  document.getElementById('setup-screen').style.display = 'none';
+  document.getElementById('app-header').style.display = 'flex';
+  document.getElementById('app-main').style.display = 'flex';
+
+  connectWS();
+  await loadState();
+}
+
+let wsReconnectDelay = 1000;
+const WS_MAX_DELAY = 30000;
+let wsReconnectAttempts = 0;
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const encRoomId = encodeURIComponent(roomId);
+  const encUserId = encodeURIComponent(userId);
+  ws = new WebSocket(`${proto}://${location.host}/ws?room_id=${encRoomId}&user_id=${encUserId}`);
+  ws.onopen = () => {
+    document.getElementById('ws-status').textContent = 'Connected';
+    document.getElementById('ws-status').style.color = '#22c55e';
+    wsReconnectDelay = 1000;
+    wsReconnectAttempts = 0;
+  };
+  ws.onclose = () => {
+    document.getElementById('ws-status').textContent = 'Disconnected - reconnecting...';
+    document.getElementById('ws-status').style.color = '#ef4444';
+    wsReconnectAttempts++;
+    const delay = Math.min(wsReconnectDelay * Math.pow(1.5, wsReconnectAttempts - 1), WS_MAX_DELAY);
+    setTimeout(connectWS, delay);
+  };
+  ws.onerror = () => {};
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      handleRealtimeEvent(msg);
+    } catch(err) {
+      console.error('Failed to parse WS message:', err);
+    }
+  };
+}
+
+async function loadState() {
+  const state = await api('GET', `/rooms/${roomId}/state?last_sequence=0`);
+  document.getElementById('room-name').textContent = state.room.name;
+  document.getElementById('room-meta').textContent = state.room.description || 'No description';
+
+  // Messages
+  const msgDiv = document.getElementById('messages');
+  msgDiv.innerHTML = '';
+  state.messages.forEach(m => appendMessage(m));
+
+  // Agents
+  renderAgents(state.agents);
+  renderSidebarAgents(state.agents);
+
+  // Tasks
+  renderTasks(state.tasks);
+
+  // Approvals
+  renderApprovals(state.pending_approvals);
+
+  // Artifacts
+  renderArtifacts(state.artifacts);
+
+  // Decisions
+  renderDecisions(state.decisions);
+
+  // Members
+  renderMembers(state.members);
+
+  if (state.events_since.length > 0) {
+    lastSequence = Math.max(...state.events_since.map(e => e.sequence));
+  }
+}
+
+function handleRealtimeEvent(msg) {
+  if (msg.type === 'ping' || msg.type === 'pong' || msg.type === 'connected') return;
+  if (msg.type === 'room_event') {
+    lastSequence = Math.max(lastSequence, msg.sequence || 0);
+    logEvent(msg);
+    switch(msg.event_type) {
+      case 'message.created':
+        appendMessage({role: msg.payload.role, sender_id: msg.payload.sender_id,
+                       content: msg.payload.content, created_at: msg.timestamp});
+        break;
+      case 'user.joined_room':
+        appendSystemMessage(`${msg.payload.user_id} joined the room`);
+        break;
+      case 'user.left_room':
+        appendSystemMessage(`${msg.payload.user_id} left the room`);
+        break;
+      case 'agent.joined_room':
+        appendSystemMessage(`Agent ${msg.payload.name} (${msg.payload.role}) joined`);
+        loadState();
+        break;
+      case 'agent.status_changed':
+        loadState();
+        break;
+      case 'task.created': case 'task.assigned': case 'task.completed': case 'task.cancelled':
+        loadState();
+        break;
+      case 'approval.requested': case 'approval.granted': case 'approval.rejected':
+        loadState();
+        break;
+      case 'artifact.created': case 'artifact.version_created':
+        loadState();
+        break;
+      case 'decision.created':
+        loadState();
+        break;
+      case 'human.interrupted_agent':
+        appendSystemMessage(`Agent interrupted by human`);
+        break;
+      case 'human.redirected_agent':
+        appendSystemMessage(`Agent redirected: ${msg.payload.instruction || ''}`);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+function appendMessage(m) {
+  const div = document.getElementById('messages');
+  const msg = document.createElement('div');
+  const role = (m.role || 'system').toLowerCase();
+  msg.className = `msg ${role}`;
+  const senderName = m.sender_id === userId ? userName : (m.sender_id || 'System');
+  const time = m.created_at ? new Date(m.created_at).toLocaleTimeString() : '';
+  msg.innerHTML = `<div class="sender">${escHtml(senderName)}</div><div class="bubble">${escHtml(m.content)}</div><div class="time">${time}</div>`;
+  div.appendChild(msg);
+  div.scrollTop = div.scrollHeight;
+}
+
+function appendSystemMessage(text) {
+  appendMessage({role: 'system', sender_id: 'system', content: text});
+}
+
+function renderAgents(agents) {
+  const panel = document.getElementById('agents-panel');
+  if (!agents.length) { panel.innerHTML = '<div class="card"><div class="detail">No agents</div></div>'; return; }
+  panel.innerHTML = agents.map(a => `
+    <div class="card">
+      <div class="title">${escHtml(a.name)} <span class="badge ${a.status.toLowerCase()}">${a.status}</span></div>
+      <div class="detail">${escHtml(a.role)}</div>
+    </div>
+  `).join('');
+}
+
+function renderSidebarAgents(agents) {
+  const el = document.getElementById('agents-sidebar');
+  el.innerHTML = agents.map(a => `
+    <div class="item">
+      <span class="dot ${a.status === 'WORKING' ? 'working' : a.status === 'IDLE' ? 'idle' : 'online'}"></span>
+      ${escHtml(a.name)} <span class="badge ${a.status.toLowerCase()}" style="margin-left:auto">${a.status}</span>
+    </div>
+  `).join('');
+}
+
+function renderTasks(tasks) {
+  const panel = document.getElementById('tasks-panel');
+  if (!tasks.length) { panel.innerHTML = '<div class="card"><div class="detail">No tasks</div></div>'; return; }
+  panel.innerHTML = tasks.map(t => `
+    <div class="card">
+      <div class="title">${escHtml(t.title)} <span class="badge ${t.status.toLowerCase()}">${t.status}</span></div>
+      <div class="detail">${t.assigned_agent_id ? 'Assigned: ' + t.assigned_agent_id.slice(0,12) : 'Unassigned'} | ${t.priority}</div>
+    </div>
+  `).join('');
+}
+
+function renderApprovals(approvals) {
+  const panel = document.getElementById('approvals-panel');
+  if (!approvals.length) { panel.innerHTML = '<div class="card"><div class="detail">No pending approvals</div></div>'; return; }
+  panel.innerHTML = approvals.map(a => `
+    <div class="approval-card">
+      <div class="action">${escHtml(a.action)}</div>
+      <div class="btns">
+        <button class="btn-approve" onclick="approveAction('${a.approval_id}')">Approve</button>
+        <button class="btn-reject" onclick="rejectAction('${a.approval_id}')">Reject</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderArtifacts(arts) {
+  const panel = document.getElementById('artifacts-panel');
+  if (!arts.length) { panel.innerHTML = '<div class="card"><div class="detail">No artifacts</div></div>'; return; }
+  panel.innerHTML = arts.map(a => `
+    <div class="card">
+      <div class="title">${escHtml(a.name)}</div>
+      <div class="detail">${a.type} v${a.version}</div>
+    </div>
+  `).join('');
+}
+
+function renderDecisions(decs) {
+  const panel = document.getElementById('decisions-panel');
+  if (!decs.length) { panel.innerHTML = '<div class="card"><div class="detail">No decisions</div></div>'; return; }
+  panel.innerHTML = decs.map(d => `
+    <div class="card">
+      <div class="title">${escHtml(d.title)} <span class="badge completed">${d.status}</span></div>
+      <div class="detail">${escHtml(d.content || '').slice(0,100)}</div>
+    </div>
+  `).join('');
+}
+
+function renderMembers(members) {
+  const el = document.getElementById('team-list');
+  el.innerHTML = members.map(m => `
+    <div class="item"><span class="dot online"></span>${escHtml(m.user_id)}</div>
+  `).join('');
+}
+
+function logEvent(msg) {
+  const log = document.getElementById('events-log');
+  const div = document.createElement('div');
+  div.textContent = `[${msg.sequence}] ${msg.event_type} by ${msg.actor_id || '?'}`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendMessage() {
+  const input = document.getElementById('msg-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+
+  try {
+    await api('POST', `/rooms/${roomId}/messages`, {
+      content: text, role: 'HUMAN', sender_id: userId
+    });
+  } catch(err) {
+    console.error('Failed to send message:', err);
+    input.value = text;
+  }
+}
+
+async function approveAction(approvalId) {
+  await api('POST', `/approvals/${approvalId}/approve`, {comment: 'Approved'});
+  await loadState();
+}
+
+async function rejectAction(approvalId) {
+  await api('POST', `/approvals/${approvalId}/reject`, {comment: 'Rejected'});
+  await loadState();
+}
+
+function escHtml(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+</script>
+</body>
+</html>
