@@ -38,7 +38,6 @@ class PresenceService:
         key = (user_id, room_id)
         async with self._lock:
             if key in self._presence:
-                old = self._presence[key]
                 self._presence[key] = Presence(
                     user_id=user_id,
                     room_id=room_id,
@@ -61,7 +60,7 @@ class PresenceService:
     async def get_room_presence(self, room_id: str) -> list[Presence]:
         result: list[Presence] = []
         async with self._lock:
-            for key, pres in self._presence.items():
+            for pres in self._presence.values():
                 if pres.room_id == room_id:
                     result.append(pres)
         return result
@@ -69,7 +68,7 @@ class PresenceService:
     async def get_user_rooms(self, user_id: str) -> list[str]:
         rooms: list[str] = []
         async with self._lock:
-            for key, pres in self._presence.items():
+            for pres in self._presence.values():
                 if pres.user_id == user_id:
                     rooms.append(pres.room_id)
         return rooms

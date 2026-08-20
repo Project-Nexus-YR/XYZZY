@@ -1,17 +1,24 @@
 """Concurrency tests for NexusAgentBridge: lock safety, concurrent operations."""
 
 import asyncio
+
 import pytest
-from unittest.mock import MagicMock
+
+from multiplayer.domain.models import AgentInstance, AgentStatus, Execution, Session
 from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
-from multiplayer.domain.models import AgentInstance, Session, Execution, AgentStatus, DomainError
 
 
 def _make_agent(**overrides) -> AgentInstance:
     defaults = dict(
-        agent_id="agent_1", template_id="tmpl_1", room_id="room_1",
-        name="Test Agent", role="Coder", system_prompt="Be helpful.",
-        capabilities=frozenset({"coding"}), model_provider="", model_name="",
+        agent_id="agent_1",
+        template_id="tmpl_1",
+        room_id="room_1",
+        name="Test Agent",
+        role="Coder",
+        system_prompt="Be helpful.",
+        capabilities=frozenset({"coding"}),
+        model_provider="",
+        model_name="",
         status=AgentStatus.IDLE,
     )
     defaults.update(overrides)
@@ -20,7 +27,9 @@ def _make_agent(**overrides) -> AgentInstance:
 
 def _make_session(**overrides) -> Session:
     defaults = dict(
-        session_id="sess_1", room_id="room_1", agent_id="agent_1",
+        session_id="sess_1",
+        room_id="room_1",
+        agent_id="agent_1",
         task_id=None,
     )
     defaults.update(overrides)
@@ -29,8 +38,11 @@ def _make_session(**overrides) -> Session:
 
 def _make_execution(**overrides) -> Execution:
     defaults = dict(
-        execution_id="exec_1", session_id="sess_1", agent_id="agent_1",
-        run_id=None, input_data={},
+        execution_id="exec_1",
+        session_id="sess_1",
+        agent_id="agent_1",
+        run_id=None,
+        input_data={},
     )
     defaults.update(overrides)
     return Execution(**defaults)
@@ -45,7 +57,9 @@ async def test_concurrent_create_execution():
     async def create(i: int):
         agent = _make_agent(agent_id=f"agent_{i}")
         session = _make_session(session_id=f"sess_{i}", agent_id=f"agent_{i}")
-        execution = _make_execution(execution_id=f"exec_{i}", session_id=f"sess_{i}", agent_id=f"agent_{i}")
+        execution = _make_execution(
+            execution_id=f"exec_{i}", session_id=f"sess_{i}", agent_id=f"agent_{i}"
+        )
         result = await bridge.create_execution(agent, session, "test task", execution)
         results.append(result)
 
@@ -62,7 +76,9 @@ async def test_concurrent_execute_steps():
     for i in range(10):
         agent = _make_agent(agent_id=f"agent_{i}")
         session = _make_session(session_id=f"sess_{i}", agent_id=f"agent_{i}")
-        execution = _make_execution(execution_id=f"exec_{i}", session_id=f"sess_{i}", agent_id=f"agent_{i}")
+        execution = _make_execution(
+            execution_id=f"exec_{i}", session_id=f"sess_{i}", agent_id=f"agent_{i}"
+        )
         await bridge.create_execution(agent, session, "test", execution)
         executions.append(execution)
 
@@ -103,7 +119,9 @@ async def test_cleanup_during_concurrent_access():
     for i in range(5):
         agent = _make_agent(agent_id=f"agent_{i}")
         session = _make_session(session_id=f"sess_{i}", agent_id=f"agent_{i}")
-        execution = _make_execution(execution_id=f"exec_{i}", session_id=f"sess_{i}", agent_id=f"agent_{i}")
+        execution = _make_execution(
+            execution_id=f"exec_{i}", session_id=f"sess_{i}", agent_id=f"agent_{i}"
+        )
         await bridge.create_execution(agent, session, "test", execution)
 
     # Clean up exec_2 while operating on exec_4

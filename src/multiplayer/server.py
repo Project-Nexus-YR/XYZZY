@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import sys
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,26 +15,43 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api.routes import router, set_service
+from .api.routes import router, set_authenticator, set_service
 from .db.connection import Database
 from .realtime.hub import RealtimeHub
 from .realtime.websocket import websocket_endpoint
+from .security import TokenAuthenticator
 from .services.service import MultiplayerService
 
 log = logging.getLogger(__name__)
 
 
-def create_app(db_path: str = ":memory:") -> FastAPI:
+def create_app(
+    db_path: str = ":memory:",
+    *,
+    auth_tokens: dict[str, str] | None = None,
+) -> FastAPI:
     db = Database(db_path)
     hub = RealtimeHub()
     svc = MultiplayerService(db, hub)
+    if auth_tokens is None:
+        raw_tokens = os.environ.get("MULTIAI_AUTH_TOKENS", "{}")
+        try:
+            configured_tokens = json.loads(raw_tokens)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("MULTIAI_AUTH_TOKENS must be a JSON object") from exc
+        if not isinstance(configured_tokens, dict):
+            raise RuntimeError("MULTIAI_AUTH_TOKENS must be a JSON object")
+        auth_tokens = {str(token): str(user_id) for token, user_id in configured_tokens.items()}
+    authenticator = TokenAuthenticator(auth_tokens)
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await db.connect()
         await svc.initialize()
         set_service(svc)
+        set_authenticator(authenticator)
         yield
+        set_authenticator(None)
         set_service(None)
         await db.close()
 
@@ -53,14 +73,15 @@ def create_app(db_path: str = ":memory:") -> FastAPI:
     app.include_router(router)
 
     @app.websocket("/ws")
-    async def ws_route(websocket: WebSocket):
-        await websocket_endpoint(websocket, hub)
+    async def ws_route(websocket: WebSocket) -> None:
+        await websocket_endpoint(websocket, hub, authenticator, svc.authorization)
 
     # Serve the web UI
     static_dir = Path(__file__).parent.parent.parent / "web"
     if static_dir.exists():
+
         @app.get("/")
-        async def serve_ui():
+        async def serve_ui() -> FileResponse:
             return FileResponse(str(static_dir / "index.html"))
 
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -68,8 +89,9 @@ def create_app(db_path: str = ":memory:") -> FastAPI:
     return app
 
 
-def main():
+def main() -> None:
     import uvicorn
+
     db_path = sys.argv[1] if len(sys.argv) > 1 else "multiplayer.db"
     app = create_app(db_path)
     uvicorn.run(app, host="127.0.0.1", port=8000)

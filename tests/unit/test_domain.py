@@ -60,8 +60,12 @@ def test_agent_template():
 
 def test_agent_instance():
     a = AgentInstance(
-        agent_id="a1", template_id="t1", room_id="r1",
-        name="Architect", role="Architect", status=AgentStatus.IDLE
+        agent_id="a1",
+        template_id="t1",
+        room_id="r1",
+        name="Architect",
+        role="Architect",
+        status=AgentStatus.IDLE,
     )
     assert a.status == AgentStatus.IDLE
 
@@ -73,14 +77,20 @@ def test_task_lifecycle():
 
 
 def test_message():
-    msg = Message(message_id="m1", room_id="r1", role=MessageRole.HUMAN,
-                  sender_id="u1", content="Hello")
+    msg = Message(
+        message_id="m1", room_id="r1", role=MessageRole.HUMAN, sender_id="u1", content="Hello"
+    )
     assert msg.role == MessageRole.HUMAN
 
 
 def test_artifact_versioning():
-    art = Artifact(artifact_id="a1", room_id="r1", name="doc.md",
-                   artifact_type=ArtifactType.DOCUMENT, current_version=0)
+    Artifact(
+        artifact_id="a1",
+        room_id="r1",
+        name="doc.md",
+        artifact_type=ArtifactType.DOCUMENT,
+        current_version=0,
+    )
     ver = ArtifactVersion(version_id="v1", artifact_id="a1", version_number=1, content="hello")
     assert ver.version_number == 1
 
@@ -91,20 +101,36 @@ def test_decision():
 
 
 def test_memory_scope():
-    mem = Memory(memory_id="m1", room_id="r1", workspace_id=None, org_id=None, scope=MemoryScope.ROOM, content="fact")
+    mem = Memory(
+        memory_id="m1",
+        room_id="r1",
+        workspace_id=None,
+        org_id=None,
+        scope=MemoryScope.ROOM,
+        content="fact",
+    )
     assert mem.scope == MemoryScope.ROOM
 
 
 def test_approval_lifecycle():
-    app = Approval(approval_id="a1", room_id="r1", execution_id="e1",
-                   agent_id="ag1", action_description="Deploy")
+    app = Approval(
+        approval_id="a1",
+        room_id="r1",
+        execution_id="e1",
+        agent_id="ag1",
+        action_description="Deploy",
+    )
     assert app.status == ApprovalStatus.PENDING
 
 
 def test_room_event():
     event = RoomEvent(
-        room_id="r1", sequence=1, event_type=EventType.ROOM_CREATED,
-        payload={"name": "Test"}, actor_id="u1", actor_type="user",
+        room_id="r1",
+        sequence=1,
+        event_type=EventType.ROOM_CREATED,
+        payload={"name": "Test"},
+        actor_id="u1",
+        actor_type="user",
     )
     assert event.sequence == 1
     assert event.event_type == EventType.ROOM_CREATED
@@ -126,5 +152,7 @@ def test_dependency():
 
 
 def test_notification():
-    n = Notification(notification_id="n1", user_id="u1", room_id=None, title="Hey", body="You have work")
+    n = Notification(
+        notification_id="n1", user_id="u1", room_id=None, title="Hey", body="You have work"
+    )
     assert n.status == NotificationStatus.UNREAD

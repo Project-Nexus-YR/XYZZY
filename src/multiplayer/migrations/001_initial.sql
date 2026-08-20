@@ -168,6 +168,39 @@ CREATE TABLE IF NOT EXISTS executions (
 
 CREATE INDEX IF NOT EXISTS idx_executions_session ON executions(session_id);
 
+-- Immutable outputs are first-class records rather than opaque execution blobs.
+-- One execution produces at most one terminal output in the Phase 1 run model.
+CREATE TABLE IF NOT EXISTS agent_outputs (
+    output_id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL REFERENCES rooms(room_id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    execution_id TEXT NOT NULL UNIQUE REFERENCES executions(execution_id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    output_data TEXT NOT NULL DEFAULT '{}',
+    source_prompt TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_outputs_room_created
+    ON agent_outputs(room_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_outputs_session
+    ON agent_outputs(session_id);
+
+-- One shared review decision per output. The output remains immutable regardless
+-- of disposition, and another authorized room member sees the same choice.
+CREATE TABLE IF NOT EXISTS output_selections (
+    room_id TEXT NOT NULL REFERENCES rooms(room_id) ON DELETE CASCADE,
+    output_id TEXT NOT NULL UNIQUE REFERENCES agent_outputs(output_id) ON DELETE CASCADE,
+    disposition TEXT NOT NULL CHECK(disposition IN ('INCLUDED', 'EXCLUDED')),
+    decided_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (room_id, output_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_output_selections_room
+    ON output_selections(room_id, updated_at);
+
 -- ── Tasks ───────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -236,6 +269,26 @@ CREATE TABLE IF NOT EXISTS artifact_versions (
     created_at TEXT NOT NULL,
     UNIQUE(artifact_id, version_number)
 );
+
+CREATE TABLE IF NOT EXISTS artifact_claims (
+    claim_id TEXT PRIMARY KEY,
+    version_id TEXT NOT NULL REFERENCES artifact_versions(version_id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    is_ai_derived INTEGER NOT NULL DEFAULT 1,
+    confidence REAL NOT NULL,
+    UNIQUE(version_id, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS artifact_claim_sources (
+    claim_id TEXT NOT NULL REFERENCES artifact_claims(claim_id) ON DELETE CASCADE,
+    output_id TEXT NOT NULL REFERENCES agent_outputs(output_id) ON DELETE RESTRICT,
+    evidence TEXT NOT NULL,
+    PRIMARY KEY (claim_id, output_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_claims_version
+    ON artifact_claims(version_id, ordinal);
 
 -- ── Decisions ───────────────────────────────────────────────────────────────
 

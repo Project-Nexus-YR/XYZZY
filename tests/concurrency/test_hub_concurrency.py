@@ -1,9 +1,10 @@
 """Concurrency tests for RealtimeHub: subscribe, unsubscribe, broadcast races."""
 
 import asyncio
+
 import pytest
+
 from multiplayer.realtime.hub import RealtimeHub
-from multiplayer.domain.events import EventType, RoomEvent
 
 
 @pytest.fixture

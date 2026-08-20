@@ -1,31 +1,21 @@
 """State machine transition tests: verify all valid/invalid transitions."""
 
 import pytest
-from multiplayer.services.service import (
-    MultiplayerService,
-    VALID_TASK_TRANSITIONS,
-    VALID_AGENT_TRANSITIONS,
-    VALID_SESSION_TRANSITIONS,
-    VALID_EXECUTION_TRANSITIONS,
-    _validate_transition,
-)
+
+from multiplayer.db.connection import Database
 from multiplayer.domain.models import (
     AgentStatus,
     DomainError,
-    ExecutionStatus,
     SessionStatus,
-    TaskStatus,
-    TaskPriority,
-    AgentInstance,
-    AgentRoomMembership,
-    Session,
-    Execution,
     Task,
-    new_id,
+    TaskStatus,
 )
-from multiplayer.db.connection import Database
 from multiplayer.realtime.hub import RealtimeHub
-from multiplayer.domain.events import EventType
+from multiplayer.services.service import (
+    VALID_TASK_TRANSITIONS,
+    MultiplayerService,
+    _validate_transition,
+)
 
 
 @pytest.fixture
@@ -40,6 +30,7 @@ async def service():
 
 
 # ── Task state machine ─────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_task_valid_transitions(service):
@@ -65,10 +56,15 @@ async def test_task_valid_transitions(service):
     task3 = await service.create_task(room.room_id, "T3")
     task3 = await service.assign_task(task3.task_id, agent.agent_id)
     task3_in_progress = Task(
-        task_id=task3.task_id, room_id=task3.room_id, title=task3.title,
-        description=task3.description, status=TaskStatus.IN_PROGRESS,
-        priority=task3.priority, assigned_agent_id=task3.assigned_agent_id,
-        created_by=task3.created_by, parent_task_id=task3.parent_task_id,
+        task_id=task3.task_id,
+        room_id=task3.room_id,
+        title=task3.title,
+        description=task3.description,
+        status=TaskStatus.IN_PROGRESS,
+        priority=task3.priority,
+        assigned_agent_id=task3.assigned_agent_id,
+        created_by=task3.created_by,
+        parent_task_id=task3.parent_task_id,
         delegation_id=task3.delegation_id,
     )
     await service.repos.tasks.update(task3_in_progress)
@@ -106,6 +102,7 @@ async def test_task_invalid_transitions(service):
 
 
 # ── Agent state machine ────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_agent_valid_transitions(service):
@@ -151,6 +148,7 @@ async def test_agent_invalid_transitions(service):
 
 # ── Session state machine ──────────────────────────────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_session_valid_transitions(service):
     org = await service.create_organization("O", "o", "u1")
@@ -163,7 +161,7 @@ async def test_session_valid_transitions(service):
     assert session.status == SessionStatus.CREATED
 
     # CREATED -> ACTIVE (via start_execution)
-    execution = await service.start_execution(session.session_id)
+    await service.start_execution(session.session_id)
     session = await service.repos.sessions.get(session.session_id)
     assert session.status == SessionStatus.ACTIVE
 
@@ -186,16 +184,21 @@ async def test_session_invalid_start_execution_twice(service):
 
 # ── _validate_transition edge cases ────────────────────────────────────────
 
+
 def test_validate_transition_unknown_state():
     """Unknown source state (not in transition table) should raise DomainError."""
     with pytest.raises(DomainError, match="invalid task transition"):
         # Use a valid but unexpected state pair where source isn't in the table
         # All valid states are in the table, so we test with a source that has
         # no outgoing transitions for the desired target
-        _validate_transition(TaskStatus.COMPLETED, TaskStatus.IN_PROGRESS, VALID_TASK_TRANSITIONS, "task")
+        _validate_transition(
+            TaskStatus.COMPLETED, TaskStatus.IN_PROGRESS, VALID_TASK_TRANSITIONS, "task"
+        )
 
 
 def test_validate_transition_to_self():
     """Terminal states should not allow self-transition if not in valid set."""
     with pytest.raises(DomainError):
-        _validate_transition(TaskStatus.COMPLETED, TaskStatus.COMPLETED, VALID_TASK_TRANSITIONS, "task")
+        _validate_transition(
+            TaskStatus.COMPLETED, TaskStatus.COMPLETED, VALID_TASK_TRANSITIONS, "task"
+        )

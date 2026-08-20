@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, cast
 
 import aiosqlite
 
@@ -20,10 +22,17 @@ class Database:
     def __init__(self, path: str | Path = ":memory:") -> None:
         self._path = str(path)
         self._db: aiosqlite.Connection | None = None
+        # SQLite transactions belong to the connection, not to an asyncio task.
+        # Every operation therefore passes through one ownership gate, while an
+        # explicit transaction holds the gate for its complete lifetime.
+        self._connection_lock = asyncio.Lock()
+        self._transaction_owner: asyncio.Task[Any] | None = None
 
     async def connect(self) -> None:
         try:
-            self._db = await aiosqlite.connect(self._path)
+            # Single-statement writes are independently durable. Multi-statement
+            # units use transaction(), which provides task-scoped ownership.
+            self._db = await aiosqlite.connect(self._path, isolation_level=None)
         except Exception:
             log.exception("Failed to connect to database at %s", self._path)
             raise
@@ -35,7 +44,8 @@ class Database:
     async def close(self) -> None:
         if self._db:
             try:
-                await self._db.close()
+                async with self._connection_lock:
+                    await self._db.close()
             except Exception:
                 log.warning("Error closing database", exc_info=True)
             finally:
@@ -49,38 +59,95 @@ class Database:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[None]:
-        """Execute a block in an explicit transaction. Rolls back on error."""
-        await self.conn.execute("BEGIN IMMEDIATE")
+        """Run a transaction with exclusive, task-scoped connection ownership."""
+        owner = asyncio.current_task()
+        if owner is None:
+            raise RuntimeError("database transaction requires an asyncio task")
+        if self._transaction_owner is owner:
+            raise RuntimeError("nested database transactions are not supported")
+
+        await self._connection_lock.acquire()
+        self._transaction_owner = owner
         try:
-            yield
-            await self.conn.execute("COMMIT")
-        except Exception:
-            await self.conn.execute("ROLLBACK")
-            raise
+            await self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                await self.conn.execute("COMMIT")
+            except BaseException:
+                await self.conn.execute("ROLLBACK")
+                raise
+        finally:
+            self._transaction_owner = None
+            self._connection_lock.release()
+
+    def _owns_transaction(self) -> bool:
+        return asyncio.current_task() is self._transaction_owner
+
+    @property
+    def owns_current_transaction(self) -> bool:
+        """Whether the calling task currently owns this connection's transaction."""
+        return self._owns_transaction()
 
     async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> aiosqlite.Cursor:
-        return await self.conn.execute(sql, params)
+        if self._owns_transaction():
+            return await self.conn.execute(sql, params)
+        async with self._connection_lock:
+            return await self.conn.execute(sql, params)
 
     async def executemany(self, sql: str, params: list[tuple[Any, ...]]) -> None:
-        await self.conn.executemany(sql, params)
+        if self._owns_transaction():
+            await self.conn.executemany(sql, params)
+            return
+        async with self._connection_lock:
+            await self.conn.executemany(sql, params)
 
     async def fetch_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
-        cursor = await self.execute(sql, params)
-        row = await cursor.fetchone()
+        if self._owns_transaction():
+            cursor = await self.conn.execute(sql, params)
+            try:
+                row = await cursor.fetchone()
+            finally:
+                await cursor.close()
+        else:
+            async with self._connection_lock:
+                cursor = await self.conn.execute(sql, params)
+                try:
+                    row = await cursor.fetchone()
+                finally:
+                    await cursor.close()
         if row is None:
             return None
         return dict(row)
 
     async def fetch_all(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-        cursor = await self.execute(sql, params)
-        rows = await cursor.fetchall()
+        if self._owns_transaction():
+            cursor = await self.conn.execute(sql, params)
+            try:
+                rows = await cursor.fetchall()
+            finally:
+                await cursor.close()
+        else:
+            async with self._connection_lock:
+                cursor = await self.conn.execute(sql, params)
+                try:
+                    rows = await cursor.fetchall()
+                finally:
+                    await cursor.close()
         return [dict(row) for row in rows]
 
     async def commit(self) -> None:
-        await self.conn.commit()
+        # An inner repository method must never end its caller's transaction.
+        if self._owns_transaction():
+            return
+        async with self._connection_lock:
+            await self.conn.commit()
 
     async def execute_script(self, script: str) -> None:
-        await self.conn.executescript(script)
+        if self._owns_transaction():
+            await self.conn.executescript(script)
+            return
+        async with self._connection_lock:
+            await self.conn.executescript(script)
 
 
 def serialize_datetime(dt: datetime | None) -> str | None:
@@ -98,4 +165,4 @@ def deserialize_datetime(s: str | None) -> datetime | None:
 
 
 def deserialize_dict(s: str) -> dict[str, Any]:
-    return json.loads(s)
+    return cast(dict[str, Any], json.loads(s))

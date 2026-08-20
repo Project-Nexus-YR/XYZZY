@@ -1,16 +1,14 @@
 """Approval security tests: double-approve, stale approval, unauthorized."""
 
 import pytest
+
 from multiplayer.db.connection import Database
-from multiplayer.services.service import MultiplayerService
 from multiplayer.domain.models import (
-    ApprovalStatus,
     AgentStatus,
     DomainError,
-    MessageRole,
-    ArtifactType,
 )
 from multiplayer.realtime.hub import RealtimeHub
+from multiplayer.services.service import MultiplayerService
 
 
 @pytest.fixture

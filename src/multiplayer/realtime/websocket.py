@@ -3,41 +3,98 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ..realtime.hub import RealtimeHub
+from ..security import (
+    AuthenticationError,
+    AuthorizationError,
+    RoomCapability,
+    RoomPolicy,
+    TokenAuthenticator,
+)
 
 log = logging.getLogger(__name__)
 
 
-async def websocket_endpoint(websocket: WebSocket, hub: RealtimeHub) -> None:
+def _websocket_authorization(websocket: WebSocket) -> tuple[str | None, str | None]:
+    """Read a browser-compatible bearer credential from negotiated subprotocols.
+
+    Browser WebSocket APIs cannot set Authorization headers. The UI therefore sends
+    ``multiai.v1`` plus a base64url encoded ``bearer.<token>`` protocol value. This
+    keeps credentials out of URLs, query logs, and reconnect history.
+    """
+    authorization = websocket.headers.get("authorization")
+    if authorization:
+        return authorization, None
+    protocols = [
+        value.strip()
+        for value in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if value.strip()
+    ]
+    if "multiai.v1" not in protocols:
+        return None, None
+    encoded = next(
+        (value.removeprefix("bearer.") for value in protocols if value.startswith("bearer.")), ""
+    )
+    if not encoded:
+        return None, None
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        token = base64.urlsafe_b64decode(padded.encode()).decode()
+    except (ValueError, UnicodeDecodeError):
+        return None, None
+    return f"Bearer {token}", "multiai.v1"
+
+
+async def websocket_endpoint(
+    websocket: WebSocket,
+    hub: RealtimeHub,
+    authenticator: TokenAuthenticator,
+    authorization: RoomPolicy,
+) -> None:
     """Handle a WebSocket connection for realtime room updates.
 
     Query params:
         room_id: Room to subscribe to
-        user_id: User making the connection
         last_sequence: Last known sequence for catch-up (informational)
     """
-    await websocket.accept()
-
     room_id = websocket.query_params.get("room_id", "").strip()
-    user_id = websocket.query_params.get("user_id", "").strip()
 
-    if not room_id or not user_id:
-        await websocket.close(code=4000, reason="room_id and user_id required")
+    if not room_id:
+        await websocket.close(code=4400, reason="room_id required")
         return
+
+    websocket_authorization, accepted_protocol = _websocket_authorization(websocket)
+    try:
+        principal = authenticator.authenticate(websocket_authorization)
+    except AuthenticationError:
+        await websocket.close(code=4401, reason="authentication required")
+        return
+
+    try:
+        await authorization.require(room_id, principal.user_id, RoomCapability.READ)
+    except AuthorizationError:
+        await websocket.close(code=4403, reason="room access forbidden")
+        return
+
+    user_id = principal.user_id
+    await websocket.accept(subprotocol=accepted_protocol)
 
     sub = await hub.subscribe(room_id, user_id)
 
     # Send connection confirmation
-    await websocket.send_json({
-        "type": "connected",
-        "subscription_id": sub.subscription_id,
-        "room_id": room_id,
-    })
+    await websocket.send_json(
+        {
+            "type": "connected",
+            "subscription_id": sub.subscription_id,
+            "room_id": room_id,
+        }
+    )
 
     async def send_loop() -> None:
         """Read from subscription queue and send to WebSocket."""
@@ -71,26 +128,42 @@ async def websocket_endpoint(websocket: WebSocket, hub: RealtimeHub) -> None:
             elif msg_type == "subscribe":
                 extra_room = msg.get("room_id", "").strip()
                 if extra_room and extra_room != room_id:
-                    await hub.subscribe(extra_room, user_id)
-                    await websocket.send_json({
-                        "type": "subscribed",
-                        "room_id": extra_room,
-                    })
+                    try:
+                        await authorization.require(extra_room, user_id, RoomCapability.READ)
+                    except AuthorizationError:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": "room access forbidden",
+                            }
+                        )
+                    else:
+                        await hub.subscribe(extra_room, user_id)
+                        await websocket.send_json(
+                            {
+                                "type": "subscribed",
+                                "room_id": extra_room,
+                            }
+                        )
             elif msg_type == "unsubscribe":
                 extra_room = msg.get("room_id", "").strip()
                 if extra_room:
                     sub_ids = await hub.get_subscriptions_for_user_room(user_id, extra_room)
                     for sid in sub_ids:
                         await hub.unsubscribe(sid)
-                    await websocket.send_json({
-                        "type": "unsubscribed",
-                        "room_id": extra_room,
-                    })
+                    await websocket.send_json(
+                        {
+                            "type": "unsubscribed",
+                            "room_id": extra_room,
+                        }
+                    )
             else:
-                await websocket.send_json({
-                    "type": "error",
-                    "message": f"unknown message type: {msg_type}",
-                })
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": f"unknown message type: {msg_type}",
+                    }
+                )
 
     except WebSocketDisconnect:
         pass

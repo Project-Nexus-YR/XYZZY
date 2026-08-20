@@ -1,7 +1,9 @@
 """Concurrency tests: verify atomic sequence generation under concurrent writes."""
 
 import asyncio
+
 import pytest
+
 from multiplayer.db.connection import Database
 from multiplayer.db.repositories import Repos
 from multiplayer.domain.events import EventType, RoomEvent
@@ -11,9 +13,17 @@ from multiplayer.domain.events import EventType, RoomEvent
 async def repos():
     db = Database(":memory:")
     await db.connect()
-    await db.execute_script(open(
-        str(__import__("pathlib").Path(__file__).parents[2] / "src" / "multiplayer" / "migrations" / "001_initial.sql")
-    ).read())
+    await db.execute_script(
+        open(
+            str(
+                __import__("pathlib").Path(__file__).parents[2]
+                / "src"
+                / "multiplayer"
+                / "migrations"
+                / "001_initial.sql"
+            )
+        ).read()
+    )
     yield Repos(db)
     await db.close()
 
@@ -21,12 +31,19 @@ async def repos():
 @pytest.fixture
 async def seeded_room(repos):
     """Create a room + org + workspace so FK constraints are satisfied."""
-    from multiplayer.domain.models import Organization, Workspace, Room, new_id
+    from multiplayer.domain.models import Organization, Room, Workspace, new_id
+
     org = Organization(org_id=new_id("org"), name="TestOrg", slug="testorg")
     await repos.orgs.create(org)
     ws = Workspace(workspace_id=new_id("ws"), org_id=org.org_id, name="TestWS", slug="testws")
     await repos.workspaces.create(ws)
-    room = Room(room_id="conc_room", workspace_id=ws.workspace_id, name="ConcRoom", description="test", created_by="u1")
+    room = Room(
+        room_id="conc_room",
+        workspace_id=ws.workspace_id,
+        name="ConcRoom",
+        description="test",
+        created_by="u1",
+    )
     await repos.rooms.create(room)
     return room.room_id
 
@@ -39,8 +56,12 @@ async def test_concurrent_sequence_generation(repos, seeded_room):
 
     async def write_event(i: int):
         event = RoomEvent(
-            room_id=room_id, sequence=0, event_type=EventType.MESSAGE_CREATED,
-            payload={"index": i}, actor_id="u1", actor_type="user",
+            room_id=room_id,
+            sequence=0,
+            event_type=EventType.MESSAGE_CREATED,
+            payload={"index": i},
+            actor_id="u1",
+            actor_type="user",
         )
         event = await repos.events.append_with_next_sequence(event)
         results.append(event.sequence)
@@ -59,7 +80,8 @@ async def test_concurrent_sequence_generation(repos, seeded_room):
 @pytest.mark.asyncio
 async def test_concurrent_sequence_multi_room(repos):
     """Concurrent writes to different rooms must not interfere."""
-    from multiplayer.domain.models import Organization, Workspace, Room, new_id
+    from multiplayer.domain.models import Organization, Room, Workspace, new_id
+
     org = Organization(org_id=new_id("org"), name="TestOrg", slug="testorg")
     await repos.orgs.create(org)
     ws = Workspace(workspace_id=new_id("ws"), org_id=org.org_id, name="TestWS", slug="testws")
@@ -67,15 +89,21 @@ async def test_concurrent_sequence_multi_room(repos):
 
     rooms = ["room_a", "room_b", "room_c"]
     for rid in rooms:
-        room = Room(room_id=rid, workspace_id=ws.workspace_id, name=rid, description="", created_by="u1")
+        room = Room(
+            room_id=rid, workspace_id=ws.workspace_id, name=rid, description="", created_by="u1"
+        )
         await repos.rooms.create(room)
 
     results: dict[str, list[int]] = {r: [] for r in rooms}
 
     async def write_to_room(room_id: str, i: int):
         event = RoomEvent(
-            room_id=room_id, sequence=0, event_type=EventType.MESSAGE_CREATED,
-            payload={"index": i}, actor_id="u1", actor_type="user",
+            room_id=room_id,
+            sequence=0,
+            event_type=EventType.MESSAGE_CREATED,
+            payload={"index": i},
+            actor_id="u1",
+            actor_type="user",
         )
         event = await repos.events.append_with_next_sequence(event)
         results[room_id].append(event.sequence)
@@ -99,8 +127,12 @@ async def test_concurrent_sequence_with_existing_events(repos, seeded_room):
     room_id = seeded_room
     for i in range(5):
         event = RoomEvent(
-            room_id=room_id, sequence=0, event_type=EventType.MESSAGE_CREATED,
-            payload={"seed": i}, actor_id="u1", actor_type="user",
+            room_id=room_id,
+            sequence=0,
+            event_type=EventType.MESSAGE_CREATED,
+            payload={"seed": i},
+            actor_id="u1",
+            actor_type="user",
         )
         await repos.events.append_with_next_sequence(event)
 
@@ -108,8 +140,12 @@ async def test_concurrent_sequence_with_existing_events(repos, seeded_room):
 
     async def write_event(i: int):
         event = RoomEvent(
-            room_id=room_id, sequence=0, event_type=EventType.MESSAGE_CREATED,
-            payload={"concurrent": i}, actor_id="u1", actor_type="user",
+            room_id=room_id,
+            sequence=0,
+            event_type=EventType.MESSAGE_CREATED,
+            payload={"concurrent": i},
+            actor_id="u1",
+            actor_type="user",
         )
         event = await repos.events.append_with_next_sequence(event)
         results.append(event.sequence)

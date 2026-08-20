@@ -73,6 +73,17 @@ class WorkspaceMember:
     created_at: datetime = field(default_factory=utcnow)
 
 
+@dataclass(frozen=True, slots=True)
+class BootstrapContext:
+    """Principal-owned identity for the idempotent first workspace hierarchy."""
+
+    user_id: str
+    org_id: str
+    workspace_id: str
+    room_id: str
+    created_at: datetime = field(default_factory=utcnow)
+
+
 # ── Room ─────────────────────────────────────────────────────────────────────
 
 
@@ -198,6 +209,46 @@ class Execution:
     completed_at: datetime | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class AgentOutput:
+    """An immutable, inspectable result produced by one agent execution."""
+
+    output_id: str
+    room_id: str
+    session_id: str
+    execution_id: str
+    agent_id: str
+    content: str
+    output_data: dict[str, Any] = field(default_factory=dict)
+    # The human-authored prompt and the exact rendered provider request are
+    # intentionally separate. The latter includes template instructions and
+    # any interventions that actually reached the model.
+    source_prompt: str = ""
+    provider_input: str = ""
+    provider_name: str = ""
+    provider_model: str = ""
+    provider_response_id: str = ""
+    provider_interventions: tuple[str, ...] = ()
+    provider_evidence: str = ""
+    created_at: datetime = field(default_factory=utcnow)
+
+
+class OutputDisposition(StrEnum):
+    INCLUDED = "INCLUDED"
+    EXCLUDED = "EXCLUDED"
+
+
+@dataclass(frozen=True, slots=True)
+class OutputSelection:
+    """The room's durable, human-governed review decision for one output."""
+
+    room_id: str
+    output_id: str
+    disposition: OutputDisposition
+    decided_by: str
+    updated_at: datetime = field(default_factory=utcnow)
+
+
 # ── Task ─────────────────────────────────────────────────────────────────────
 
 
@@ -294,11 +345,130 @@ class ArtifactVersion:
     version_number: int
     content: str = ""
     content_hash: str = ""
+    provenance_hash: str = ""
     created_by: str = ""
     created_at: datetime = field(default_factory=utcnow)
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactClaim:
+    """A final artifact claim whose evidence is exact immutable agent output text."""
+
+    claim_id: str
+    version_id: str
+    ordinal: int
+    text: str
+    is_ai_derived: bool = True
+    confidence: float = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimSource:
+    claim_id: str
+    output_id: str
+    evidence: str
+    agent_id: str = ""
+    execution_id: str = ""
+    source_prompt: str = ""
+    provider_input: str = ""
+    provider_name: str = ""
+    provider_model: str = ""
+    provider_response_id: str = ""
+    provider_interventions: tuple[str, ...] = ()
+    provider_evidence: str = ""
+
+
 # ── Decision ─────────────────────────────────────────────────────────────────
+
+
+class OntologyEntityKind(StrEnum):
+    PERSON = "Person"
+    PROJECT = "Project"
+    TASK = "Task"
+    DECISION = "Decision"
+    ARTIFACT = "Artifact"
+    CLAIM = "Claim"
+    AGENT_OUTPUT = "AgentOutput"
+
+
+class OntologyRelationshipKind(StrEnum):
+    OWNS = "OWNS"
+    BLOCKS = "BLOCKS"
+    DEPENDS_ON = "DEPENDS_ON"
+    SUPPORTS = "SUPPORTS"
+    CONTRADICTS = "CONTRADICTS"
+    REFERENCES = "REFERENCES"
+    DERIVED_FROM = "DERIVED_FROM"
+
+
+class OntologyDerivationKind(StrEnum):
+    SYSTEM_MATERIALIZED = "SYSTEM_MATERIALIZED"
+    AI_DERIVED = "AI_DERIVED"
+
+
+class OntologyReviewStatus(StrEnum):
+    UNCONFIRMED = "UNCONFIRMED"
+    CONFIRMED = "CONFIRMED"
+    CORRECTED = "CORRECTED"
+
+
+class OntologyReviewAction(StrEnum):
+    CONFIRM = "CONFIRM"
+    CORRECT = "CORRECT"
+
+
+class OntologyReviewTarget(StrEnum):
+    ENTITY = "ENTITY"
+    RELATIONSHIP = "RELATIONSHIP"
+
+
+@dataclass(frozen=True, slots=True)
+class OntologyEntity:
+    """A room-scoped projection with explicit derivation and exact evidence IDs."""
+
+    entity_id: str
+    room_id: str
+    kind: OntologyEntityKind
+    source_object_id: str
+    label: str
+    properties: dict[str, Any] = field(default_factory=dict)
+    derivation_kind: OntologyDerivationKind = OntologyDerivationKind.SYSTEM_MATERIALIZED
+    confidence: float = 1.0
+    evidence_ids: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
+    review_status: OntologyReviewStatus = OntologyReviewStatus.UNCONFIRMED
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass(frozen=True, slots=True)
+class OntologyRelationship:
+    relationship_id: str
+    room_id: str
+    kind: OntologyRelationshipKind
+    from_entity_id: str
+    to_entity_id: str
+    derivation_kind: OntologyDerivationKind = OntologyDerivationKind.SYSTEM_MATERIALIZED
+    confidence: float = 1.0
+    evidence_ids: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
+    review_status: OntologyReviewStatus = OntologyReviewStatus.UNCONFIRMED
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass(frozen=True, slots=True)
+class OntologyReview:
+    review_id: str
+    room_id: str
+    target_type: OntologyReviewTarget
+    target_id: str
+    action: OntologyReviewAction
+    before_value: dict[str, Any]
+    after_value: dict[str, Any]
+    reason: str
+    reviewed_by: str
+    created_at: datetime = field(default_factory=utcnow)
 
 
 class DecisionStatus(StrEnum):

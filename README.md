@@ -12,6 +12,9 @@ Modern AI tools are single-player: one human, one chat, one context. Real work h
 - **Multi-agent orchestration** — spawn, pause, resume, redirect, and delegate between agents
 - **Human-in-the-loop** — request/approve/reject agent actions before execution
 - **Artifact versioning** — create and version documents, code, and other artifacts
+- **Selective synthesis** — explicitly include/exclude outputs and publish immutable Decision Briefs
+- **Evidence ontology** — typed, reviewable Decision → Claim → AgentOutput relationships
+- **Bounded Meta** — permission-aware “why” and decision-evidence answers with exact drill-down
 - **Decision tracking** — record and audit architectural and product decisions
 - **Shared memory** — room-scoped, workspace-scoped, and org-scoped memory
 - **Real-time collaboration** — WebSocket broadcasting of all room events
@@ -91,7 +94,10 @@ MultiAI includes an optional integration with [NEXUS](../NEXUS/), a lightweight 
 - **PolicyEngine** gates tool access per agent and room
 - **StateStore** persists agent state for checkpoint/restart
 
-When NEXUS is unavailable, `StubModelProvider` returns `{action: "finish"}` immediately, allowing all multiplayer features to work without a real LLM.
+When NEXUS is unavailable, the bridge runs the configured model provider directly. With an
+`OPENAI_API_KEY`, specialists use the OpenAI Responses API. Without a credential, MultiAI emits a
+conspicuously labelled `SIMULATED WORKFLOW OUTPUT` so collaboration mechanics remain testable
+without presenting placeholder text as real analysis.
 
 ## Local Installation
 
@@ -107,13 +113,25 @@ pip install -e ".[dev]"
 
 ```bash
 # Start the server (serves API + web UI)
+export MULTIAI_AUTH_TOKENS='{"local-dev-token":"user_local"}'
+export OPENAI_API_KEY="..."                 # read only by the server process
+export MULTIAI_OPENAI_MODEL="gpt-5.4-mini" # optional; this is the default
+export MULTIAI_MODEL_TIMEOUT_SECONDS="45"  # optional
 python -m multiplayer.server
 
 # Open browser
 # http://localhost:8000
 ```
 
-The server binds to `127.0.0.1:8000` by default. Uses in-memory SQLite (data resets on restart).
+The model credential is never accepted from an API request, written to SQLite, or included in an
+agent output. Requests send only the selected specialist's name, role, template instructions, the
+user decision prompt, and any explicit human intervention. Responses API storage is disabled with
+`store: false`.
+
+`MULTIAI_AUTH_TOKENS` is a server-owned JSON map from opaque Bearer tokens to user IDs. Empty or
+missing configuration denies every non-health request. The browser keeps its token in memory only.
+The server binds to `127.0.0.1:8000` and persists to `multiplayer.db` by default; pass an explicit
+database path as the first CLI argument when needed.
 
 ## Running Tests
 
@@ -131,27 +149,30 @@ python -m pytest tests/regression/ -v
 
 ## Current Status
 
-**92 tests passing** across 6 test suites:
+The current repository gate is 143 passing tests plus Ruff format/check and strict `mypy src`.
+The suite covers:
 - Unit tests for domain models
 - Integration tests for repositories, services, and API endpoints
 - Concurrency tests for event sequencing, hub pub/sub, and agent bridge locks
 - Security tests for state machines, approval workflows, and room isolation
 - Failure injection tests for error handling and validation
 - Regression tests for reconnect correctness
+- File-backed acknowledgement latency and exact zero-loss event persistence
 
 ## Known Limitations
 
-- **No real LLM integration** — StubModelProvider returns a finish action immediately
-- **No authentication** — user_id is passed in the request body (placeholder)
-- **In-memory only** — SQLite is created in-memory; data resets on restart
+- **Live model credentials are not exercised in CI** — provider behavior is verified with a fake
+  HTTP transport; a real Responses API run requires a server-side `OPENAI_API_KEY`
 - **Single-process** — no Redis/Postgres for horizontal scaling
-- **No persistent storage option** — switching to file-based SQLite requires additional config
+- **Token allowlist authentication** — deterministic Bearer identity and role authorization are
+  implemented, but external SSO/session lifecycle is not
 
 ## Roadmap
 
-- [ ] Real LLM provider integration (OpenAI, Anthropic, local models)
-- [ ] Persistent storage (file-based SQLite or PostgreSQL)
-- [ ] User authentication and session management
+- [x] OpenAI Responses API model-provider integration
+- [x] Persistent file-backed SQLite storage
+- [x] Opaque Bearer identity and room authorization
+- [ ] External SSO and production session lifecycle
 - [ ] Agent-to-agent messaging and negotiation
 - [ ] File upload and binary artifact support
 - [ ] Room templates and quickstart configurations

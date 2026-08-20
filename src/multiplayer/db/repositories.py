@@ -11,13 +11,17 @@ from typing import Any
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
     AgentInstance,
+    AgentOutput,
     AgentStatus,
     AgentTemplate,
     Approval,
     ApprovalStatus,
     Artifact,
+    ArtifactClaim,
     ArtifactType,
     ArtifactVersion,
+    BootstrapContext,
+    ClaimSource,
     Decision,
     DecisionStatus,
     Execution,
@@ -28,8 +32,19 @@ from ..domain.models import (
     MessageRole,
     Notification,
     NotificationStatus,
+    OntologyDerivationKind,
+    OntologyEntity,
+    OntologyEntityKind,
+    OntologyRelationship,
+    OntologyRelationshipKind,
+    OntologyReview,
+    OntologyReviewAction,
+    OntologyReviewStatus,
+    OntologyReviewTarget,
     Organization,
     OrgMember,
+    OutputDisposition,
+    OutputSelection,
     Presence,
     Room,
     RoomMember,
@@ -60,11 +75,14 @@ class Repos:
         self.users = UserRepo(db)
         self.orgs = OrgRepo(db)
         self.workspaces = WorkspaceRepo(db)
+        self.bootstrap_contexts = BootstrapContextRepo(db)
         self.rooms = RoomRepo(db)
         self.room_members = RoomMemberRepo(db)
         self.agents = AgentRepo(db)
         self.sessions = SessionRepo(db)
         self.executions = ExecutionRepo(db)
+        self.agent_outputs = AgentOutputRepo(db)
+        self.output_selections = OutputSelectionRepo(db)
         self.tasks = TaskRepo(db)
         self.messages = MessageRepo(db)
         self.events = EventRepo(db)
@@ -75,6 +93,7 @@ class Repos:
         self.notifications = NotificationRepo(db)
         self.presence = PresenceRepo(db)
         self.tool_permissions = ToolPermissionRepo(db)
+        self.ontology = OntologyRepo(db)
 
 
 class UserRepo:
@@ -85,8 +104,14 @@ class UserRepo:
         await self.db.execute(
             "INSERT INTO users(user_id, display_name, email, avatar_url, status, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (user.user_id, user.display_name, user.email, user.avatar_url,
-             user.status.value, serialize_datetime(user.created_at)),
+            (
+                user.user_id,
+                user.display_name,
+                user.email,
+                user.avatar_url,
+                user.status.value,
+                serialize_datetime(user.created_at),
+            ),
         )
         await self.db.commit()
         return user
@@ -134,26 +159,71 @@ class OrgRepo:
 
     async def get(self, org_id: str) -> Organization | None:
         row = await self.db.fetch_one("SELECT * FROM organizations WHERE org_id = ?", (org_id,))
-        return None if row is None else Organization(
-            org_id=row["org_id"], name=row["name"], slug=row["slug"],
-            created_at=datetime.fromisoformat(row["created_at"]),
+        return (
+            None
+            if row is None
+            else Organization(
+                org_id=row["org_id"],
+                name=row["name"],
+                slug=row["slug"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
         )
 
     async def add_member(self, member: OrgMember) -> None:
         await self.db.execute(
-            "INSERT INTO organization_members(org_id, user_id, role, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO organization_members(org_id, user_id, role, created_at) "
+            "VALUES (?, ?, ?, ?)",
             (member.org_id, member.user_id, member.role, serialize_datetime(member.created_at)),
         )
         await self.db.commit()
+
+    async def get_member(self, org_id: str, user_id: str) -> OrgMember | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM organization_members WHERE org_id = ? AND user_id = ?",
+            (org_id, user_id),
+        )
+        return (
+            None
+            if row is None
+            else OrgMember(
+                org_id=row["org_id"],
+                user_id=row["user_id"],
+                role=row["role"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+        )
 
     async def list_members(self, org_id: str) -> list[OrgMember]:
         rows = await self.db.fetch_all(
             "SELECT * FROM organization_members WHERE org_id = ?", (org_id,)
         )
         return [
-            OrgMember(org_id=r["org_id"], user_id=r["user_id"], role=r["role"],
-                      created_at=datetime.fromisoformat(r["created_at"]))
+            OrgMember(
+                org_id=r["org_id"],
+                user_id=r["user_id"],
+                role=r["role"],
+                created_at=datetime.fromisoformat(r["created_at"]),
+            )
             for r in rows
+        ]
+
+    async def list_for_user(self, user_id: str) -> list[Organization]:
+        """Return only organizations the user can access through durable membership."""
+        rows = await self.db.fetch_all(
+            "SELECT o.* FROM organizations o "
+            "JOIN organization_members m ON m.org_id = o.org_id "
+            "WHERE m.user_id = ? ORDER BY o.created_at",
+            (user_id,),
+        )
+        return [
+            Organization(
+                org_id=row["org_id"],
+                name=row["name"],
+                slug=row["slug"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in rows
         ]
 
 
@@ -163,7 +233,8 @@ class WorkspaceRepo:
 
     async def create(self, ws: Workspace) -> Workspace:
         await self.db.execute(
-            "INSERT INTO workspaces(workspace_id, org_id, name, slug, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO workspaces(workspace_id, org_id, name, slug, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
             (ws.workspace_id, ws.org_id, ws.name, ws.slug, serialize_datetime(ws.created_at)),
         )
         await self.db.commit()
@@ -173,10 +244,16 @@ class WorkspaceRepo:
         row = await self.db.fetch_one(
             "SELECT * FROM workspaces WHERE workspace_id = ?", (workspace_id,)
         )
-        return None if row is None else Workspace(
-            workspace_id=row["workspace_id"], org_id=row["org_id"],
-            name=row["name"], slug=row["slug"],
-            created_at=datetime.fromisoformat(row["created_at"]),
+        return (
+            None
+            if row is None
+            else Workspace(
+                workspace_id=row["workspace_id"],
+                org_id=row["org_id"],
+                name=row["name"],
+                slug=row["slug"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
         )
 
     async def list_by_org(self, org_id: str) -> list[Workspace]:
@@ -184,19 +261,102 @@ class WorkspaceRepo:
             "SELECT * FROM workspaces WHERE org_id = ? ORDER BY created_at", (org_id,)
         )
         return [
-            Workspace(workspace_id=r["workspace_id"], org_id=r["org_id"],
-                      name=r["name"], slug=r["slug"],
-                      created_at=datetime.fromisoformat(r["created_at"]))
+            Workspace(
+                workspace_id=r["workspace_id"],
+                org_id=r["org_id"],
+                name=r["name"],
+                slug=r["slug"],
+                created_at=datetime.fromisoformat(r["created_at"]),
+            )
             for r in rows
         ]
 
     async def add_member(self, member: WorkspaceMember) -> None:
         await self.db.execute(
-            "INSERT INTO workspace_members(workspace_id, user_id, role, created_at) VALUES (?, ?, ?, ?)",
-            (member.workspace_id, member.user_id, member.role,
-             serialize_datetime(member.created_at)),
+            "INSERT INTO workspace_members(workspace_id, user_id, role, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                member.workspace_id,
+                member.user_id,
+                member.role,
+                serialize_datetime(member.created_at),
+            ),
         )
         await self.db.commit()
+
+    async def get_member(self, workspace_id: str, user_id: str) -> WorkspaceMember | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+            (workspace_id, user_id),
+        )
+        return (
+            None
+            if row is None
+            else WorkspaceMember(
+                workspace_id=row["workspace_id"],
+                user_id=row["user_id"],
+                role=row["role"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+        )
+
+    async def list_for_user(self, user_id: str) -> list[Workspace]:
+        """Return only workspaces the user can access through durable membership."""
+        rows = await self.db.fetch_all(
+            "SELECT w.* FROM workspaces w "
+            "JOIN workspace_members m ON m.workspace_id = w.workspace_id "
+            "WHERE m.user_id = ? ORDER BY w.created_at",
+            (user_id,),
+        )
+        return [
+            Workspace(
+                workspace_id=row["workspace_id"],
+                org_id=row["org_id"],
+                name=row["name"],
+                slug=row["slug"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+
+class BootstrapContextRepo:
+    """Durable principal key for concurrency-safe first-time setup."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(self, user_id: str) -> BootstrapContext | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM user_bootstrap_contexts WHERE user_id = ?", (user_id,)
+        )
+        return (
+            None
+            if row is None
+            else BootstrapContext(
+                user_id=row["user_id"],
+                org_id=row["org_id"],
+                workspace_id=row["workspace_id"],
+                room_id=row["room_id"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+        )
+
+    async def create(self, context: BootstrapContext) -> BootstrapContext:
+        await self.db.execute(
+            "INSERT INTO user_bootstrap_contexts("
+            "user_id, org_id, workspace_id, room_id, created_at"
+            ") VALUES (?, ?, ?, ?, ?)",
+            (
+                context.user_id,
+                context.org_id,
+                context.workspace_id,
+                context.room_id,
+                serialize_datetime(context.created_at),
+            ),
+        )
+        await self.db.commit()
+        return context
 
 
 class RoomRepo:
@@ -205,10 +365,18 @@ class RoomRepo:
 
     async def create(self, room: Room) -> Room:
         await self.db.execute(
-            "INSERT INTO rooms(room_id, workspace_id, name, description, status, created_by, created_at) "
+            "INSERT INTO rooms(room_id, workspace_id, name, description, status, "
+            "created_by, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (room.room_id, room.workspace_id, room.name, room.description,
-             room.status.value, room.created_by, serialize_datetime(room.created_at)),
+            (
+                room.room_id,
+                room.workspace_id,
+                room.name,
+                room.description,
+                room.status.value,
+                room.created_by,
+                serialize_datetime(room.created_at),
+            ),
         )
         await self.db.commit()
         return room
@@ -223,6 +391,16 @@ class RoomRepo:
         )
         return [self._from_row(r) for r in rows]
 
+    async def list_for_user(self, user_id: str) -> list[Room]:
+        """Return only rooms the user can access through durable membership."""
+        rows = await self.db.fetch_all(
+            "SELECT r.* FROM rooms r "
+            "JOIN room_members m ON m.room_id = r.room_id "
+            "WHERE m.user_id = ? ORDER BY r.created_at",
+            (user_id,),
+        )
+        return [self._from_row(row) for row in rows]
+
     async def update_status(self, room_id: str, status: RoomStatus) -> None:
         await self.db.execute(
             "UPDATE rooms SET status = ? WHERE room_id = ?", (status.value, room_id)
@@ -231,8 +409,10 @@ class RoomRepo:
 
     def _from_row(self, row: dict[str, Any]) -> Room:
         return Room(
-            room_id=row["room_id"], workspace_id=row["workspace_id"],
-            name=row["name"], description=row["description"],
+            room_id=row["room_id"],
+            workspace_id=row["workspace_id"],
+            name=row["name"],
+            description=row["description"],
             status=RoomStatus(row["status"]),
             created_by=row["created_by"],
             created_at=datetime.fromisoformat(row["created_at"]),
@@ -245,11 +425,65 @@ class RoomMemberRepo:
 
     async def add(self, member: RoomMember) -> None:
         await self.db.execute(
-            "INSERT OR IGNORE INTO room_members(room_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)",
-            (member.room_id, member.user_id, member.role,
-             serialize_datetime(member.joined_at)),
+            "INSERT OR IGNORE INTO room_members(room_id, user_id, role, joined_at) "
+            "VALUES (?, ?, ?, ?)",
+            (member.room_id, member.user_id, member.role, serialize_datetime(member.joined_at)),
         )
         await self.db.commit()
+
+    async def add_with_event(self, member: RoomMember, event: RoomEvent) -> RoomEvent:
+        """Atomically add a member and append the canonical invitation event."""
+        async with self.db.transaction():
+            await self.db.execute(
+                "INSERT INTO room_members(room_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)",
+                (
+                    member.room_id,
+                    member.user_id,
+                    member.role,
+                    serialize_datetime(member.joined_at),
+                ),
+            )
+            cursor = await self.db.execute(
+                "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
+                "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
+                (event.room_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            persisted = replace(event, sequence=int(row["seq"]) if row else 1)
+            await self.db.execute(
+                "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
+                "actor_id, actor_type, timestamp, schema_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    persisted.event_id,
+                    persisted.room_id,
+                    persisted.sequence,
+                    persisted.event_type.value,
+                    json.dumps(persisted.payload, default=str),
+                    persisted.actor_id,
+                    persisted.actor_type,
+                    serialize_datetime(persisted.timestamp),
+                    persisted.schema_version,
+                ),
+            )
+        return persisted
+
+    async def get(self, room_id: str, user_id: str) -> RoomMember | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM room_members WHERE room_id = ? AND user_id = ?",
+            (room_id, user_id),
+        )
+        return (
+            None
+            if row is None
+            else RoomMember(
+                room_id=row["room_id"],
+                user_id=row["user_id"],
+                role=row["role"],
+                joined_at=datetime.fromisoformat(row["joined_at"]),
+            )
+        )
 
     async def remove(self, room_id: str, user_id: str) -> None:
         await self.db.execute(
@@ -258,12 +492,14 @@ class RoomMemberRepo:
         await self.db.commit()
 
     async def list(self, room_id: str) -> list[RoomMember]:
-        rows = await self.db.fetch_all(
-            "SELECT * FROM room_members WHERE room_id = ?", (room_id,)
-        )
+        rows = await self.db.fetch_all("SELECT * FROM room_members WHERE room_id = ?", (room_id,))
         return [
-            RoomMember(room_id=r["room_id"], user_id=r["user_id"], role=r["role"],
-                       joined_at=datetime.fromisoformat(r["joined_at"]))
+            RoomMember(
+                room_id=r["room_id"],
+                user_id=r["user_id"],
+                role=r["role"],
+                joined_at=datetime.fromisoformat(r["joined_at"]),
+            )
             for r in rows
         ]
 
@@ -282,11 +518,19 @@ class AgentRepo:
     async def create_template(self, template: AgentTemplate) -> AgentTemplate:
         await self.db.execute(
             "INSERT INTO agent_templates(template_id, name, description, role, system_prompt, "
-            "capabilities, preferred_tools, avatar_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (template.template_id, template.name, template.description, template.role,
-             template.system_prompt, json.dumps(sorted(template.capabilities)),
-             json.dumps(list(template.preferred_tools)), template.avatar_url,
-             serialize_datetime(template.created_at)),
+            "capabilities, preferred_tools, avatar_url, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                template.template_id,
+                template.name,
+                template.description,
+                template.role,
+                template.system_prompt,
+                json.dumps(sorted(template.capabilities)),
+                json.dumps(list(template.preferred_tools)),
+                template.avatar_url,
+                serialize_datetime(template.created_at),
+            ),
         )
         await self.db.commit()
         return template
@@ -306,11 +550,19 @@ class AgentRepo:
             "INSERT INTO agent_instances(agent_id, template_id, room_id, name, role, status, "
             "system_prompt, capabilities, model_provider, model_name, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (agent.agent_id, agent.template_id, agent.room_id, agent.name, agent.role,
-             agent.status.value, agent.system_prompt,
-             json.dumps(sorted(agent.capabilities)),
-             agent.model_provider, agent.model_name,
-             serialize_datetime(agent.created_at)),
+            (
+                agent.agent_id,
+                agent.template_id,
+                agent.room_id,
+                agent.name,
+                agent.role,
+                agent.status.value,
+                agent.system_prompt,
+                json.dumps(sorted(agent.capabilities)),
+                agent.model_provider,
+                agent.model_name,
+                serialize_datetime(agent.created_at),
+            ),
         )
         await self.db.commit()
         return agent
@@ -338,15 +590,16 @@ class AgentRepo:
         await self.db.execute(
             "INSERT OR IGNORE INTO agent_room_memberships(agent_id, room_id, joined_at) "
             "VALUES (?, ?, ?)",
-            (membership.agent_id, membership.room_id,
-             serialize_datetime(membership.joined_at)),
+            (membership.agent_id, membership.room_id, serialize_datetime(membership.joined_at)),
         )
         await self.db.commit()
 
     def _template_from_row(self, row: dict[str, Any]) -> AgentTemplate:
         return AgentTemplate(
-            template_id=row["template_id"], name=row["name"],
-            description=row["description"], role=row["role"],
+            template_id=row["template_id"],
+            name=row["name"],
+            description=row["description"],
+            role=row["role"],
             system_prompt=row["system_prompt"],
             capabilities=frozenset(json.loads(row["capabilities"])),
             preferred_tools=tuple(json.loads(row["preferred_tools"])),
@@ -356,8 +609,11 @@ class AgentRepo:
 
     def _instance_from_row(self, row: dict[str, Any]) -> AgentInstance:
         return AgentInstance(
-            agent_id=row["agent_id"], template_id=row["template_id"],
-            room_id=row["room_id"], name=row["name"], role=row["role"],
+            agent_id=row["agent_id"],
+            template_id=row["template_id"],
+            room_id=row["room_id"],
+            name=row["name"],
+            role=row["role"],
             status=AgentStatus(row["status"]),
             system_prompt=row["system_prompt"],
             capabilities=frozenset(json.loads(row["capabilities"])),
@@ -373,19 +629,24 @@ class SessionRepo:
 
     async def create(self, session: Session) -> Session:
         await self.db.execute(
-            "INSERT INTO sessions(session_id, room_id, agent_id, task_id, status, started_at, ended_at) "
+            "INSERT INTO sessions(session_id, room_id, agent_id, task_id, status, "
+            "started_at, ended_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (session.session_id, session.room_id, session.agent_id, session.task_id,
-             session.status.value, serialize_datetime(session.started_at),
-             serialize_datetime(session.ended_at)),
+            (
+                session.session_id,
+                session.room_id,
+                session.agent_id,
+                session.task_id,
+                session.status.value,
+                serialize_datetime(session.started_at),
+                serialize_datetime(session.ended_at),
+            ),
         )
         await self.db.commit()
         return session
 
     async def get(self, session_id: str) -> Session | None:
-        row = await self.db.fetch_one(
-            "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
-        )
+        row = await self.db.fetch_one("SELECT * FROM sessions WHERE session_id = ?", (session_id,))
         return None if row is None else self._from_row(row)
 
     async def update_status(self, session_id: str, status: SessionStatus) -> None:
@@ -407,8 +668,10 @@ class SessionRepo:
 
     def _from_row(self, row: dict[str, Any]) -> Session:
         return Session(
-            session_id=row["session_id"], room_id=row["room_id"],
-            agent_id=row["agent_id"], task_id=row.get("task_id"),
+            session_id=row["session_id"],
+            room_id=row["room_id"],
+            agent_id=row["agent_id"],
+            task_id=row.get("task_id"),
             status=SessionStatus(row["status"]),
             started_at=datetime.fromisoformat(row["started_at"]),
             ended_at=datetime.fromisoformat(row["ended_at"]) if row.get("ended_at") else None,
@@ -424,14 +687,75 @@ class ExecutionRepo:
             "INSERT INTO executions(execution_id, session_id, agent_id, run_id, status, "
             "input_data, output_data, error, started_at, completed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (execution.execution_id, execution.session_id, execution.agent_id,
-             execution.run_id, execution.status.value,
-             json.dumps(execution.input_data), json.dumps(execution.output_data),
-             execution.error, serialize_datetime(execution.started_at),
-             serialize_datetime(execution.completed_at)),
+            (
+                execution.execution_id,
+                execution.session_id,
+                execution.agent_id,
+                execution.run_id,
+                execution.status.value,
+                json.dumps(execution.input_data),
+                json.dumps(execution.output_data),
+                execution.error,
+                serialize_datetime(execution.started_at),
+                serialize_datetime(execution.completed_at),
+            ),
         )
         await self.db.commit()
         return execution
+
+    async def start_with_event(
+        self,
+        execution: Execution,
+        event: RoomEvent,
+    ) -> RoomEvent:
+        """Atomically activate a session, create its execution, and append the run event."""
+        async with self.db.transaction():
+            await self.db.execute(
+                "UPDATE sessions SET status = ? WHERE session_id = ?",
+                (SessionStatus.ACTIVE.value, execution.session_id),
+            )
+            await self.db.execute(
+                "INSERT INTO executions(execution_id, session_id, agent_id, run_id, status, "
+                "input_data, output_data, error, started_at, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    execution.execution_id,
+                    execution.session_id,
+                    execution.agent_id,
+                    execution.run_id,
+                    execution.status.value,
+                    json.dumps(execution.input_data),
+                    json.dumps(execution.output_data),
+                    execution.error,
+                    serialize_datetime(execution.started_at),
+                    serialize_datetime(execution.completed_at),
+                ),
+            )
+            cursor = await self.db.execute(
+                "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
+                "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
+                (event.room_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            persisted = replace(event, sequence=int(row["seq"]) if row else 1)
+            await self.db.execute(
+                "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
+                "actor_id, actor_type, timestamp, schema_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    persisted.event_id,
+                    persisted.room_id,
+                    persisted.sequence,
+                    persisted.event_type.value,
+                    json.dumps(persisted.payload, default=str),
+                    persisted.actor_id,
+                    persisted.actor_type,
+                    serialize_datetime(persisted.timestamp),
+                    persisted.schema_version,
+                ),
+            )
+        return persisted
 
     async def get(self, execution_id: str) -> Execution | None:
         row = await self.db.fetch_one(
@@ -440,8 +764,11 @@ class ExecutionRepo:
         return None if row is None else self._from_row(row)
 
     async def update_status(
-        self, execution_id: str, status: ExecutionStatus,
-        output_data: dict[str, Any] | None = None, error: str = "",
+        self,
+        execution_id: str,
+        status: ExecutionStatus,
+        output_data: dict[str, Any] | None = None,
+        error: str = "",
     ) -> None:
         updates: dict[str, Any] = {"status": status.value}
         if output_data is not None:
@@ -457,9 +784,25 @@ class ExecutionRepo:
         )
         await self.db.commit()
 
+    async def mark_running(self, execution_id: str, run_id: str) -> None:
+        await self.db.execute(
+            "UPDATE executions SET status = ?, run_id = ? WHERE execution_id = ?",
+            (ExecutionStatus.RUNNING.value, run_id, execution_id),
+        )
+        await self.db.commit()
+
     async def list_by_session(self, session_id: str) -> list[Execution]:
         rows = await self.db.fetch_all(
             "SELECT * FROM executions WHERE session_id = ? ORDER BY started_at", (session_id,)
+        )
+        return [self._from_row(r) for r in rows]
+
+    async def list_by_room(self, room_id: str) -> list[Execution]:
+        rows = await self.db.fetch_all(
+            "SELECT e.* FROM executions e "
+            "JOIN sessions s ON s.session_id = e.session_id "
+            "WHERE s.room_id = ? ORDER BY e.started_at",
+            (room_id,),
         )
         return [self._from_row(r) for r in rows]
 
@@ -473,15 +816,218 @@ class ExecutionRepo:
         except (json.JSONDecodeError, TypeError):
             output_data = {}
         return Execution(
-            execution_id=row["execution_id"], session_id=row["session_id"],
-            agent_id=row["agent_id"], run_id=row.get("run_id"),
+            execution_id=row["execution_id"],
+            session_id=row["session_id"],
+            agent_id=row["agent_id"],
+            run_id=row.get("run_id"),
             status=ExecutionStatus(row["status"]),
             input_data=input_data,
             output_data=output_data,
             error=row["error"],
             started_at=datetime.fromisoformat(row["started_at"]),
-            completed_at=datetime.fromisoformat(row["completed_at"]) if row.get("completed_at") else None,
+            completed_at=datetime.fromisoformat(row["completed_at"])
+            if row.get("completed_at")
+            else None,
         )
+
+
+class AgentOutputRepo:
+    """Durable access for immutable outputs and atomic terminal run commits."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(self, output_id: str) -> AgentOutput | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM agent_outputs WHERE output_id = ?", (output_id,)
+        )
+        return None if row is None else self._from_row(row)
+
+    async def get_by_execution(self, execution_id: str) -> AgentOutput | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM agent_outputs WHERE execution_id = ?", (execution_id,)
+        )
+        return None if row is None else self._from_row(row)
+
+    async def list_by_room(self, room_id: str) -> list[AgentOutput]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM agent_outputs WHERE room_id = ? ORDER BY created_at",
+            (room_id,),
+        )
+        return [self._from_row(row) for row in rows]
+
+    async def complete_execution(
+        self,
+        output: AgentOutput,
+        events: list[RoomEvent],
+    ) -> list[RoomEvent]:
+        """Persist output, terminal state, and canonical events in one transaction."""
+        persisted_events: list[RoomEvent] = []
+        async with self.db.transaction():
+            await self.db.execute(
+                "INSERT INTO agent_outputs(output_id, room_id, session_id, execution_id, "
+                "agent_id, content, output_data, source_prompt, provider_input, provider_name, "
+                "provider_model, provider_response_id, provider_interventions, "
+                "provider_evidence, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    output.output_id,
+                    output.room_id,
+                    output.session_id,
+                    output.execution_id,
+                    output.agent_id,
+                    output.content,
+                    json.dumps(output.output_data, sort_keys=True, default=str),
+                    output.source_prompt,
+                    output.provider_input,
+                    output.provider_name,
+                    output.provider_model,
+                    output.provider_response_id,
+                    json.dumps(output.provider_interventions),
+                    output.provider_evidence,
+                    serialize_datetime(output.created_at),
+                ),
+            )
+            completed_at = serialize_datetime(utcnow())
+            await self.db.execute(
+                "UPDATE executions SET status = ?, output_data = ?, completed_at = ? "
+                "WHERE execution_id = ?",
+                (
+                    ExecutionStatus.COMPLETED.value,
+                    json.dumps(output.output_data, sort_keys=True, default=str),
+                    completed_at,
+                    output.execution_id,
+                ),
+            )
+            await self.db.execute(
+                "UPDATE sessions SET status = ?, ended_at = ? WHERE session_id = ?",
+                (SessionStatus.COMPLETED.value, completed_at, output.session_id),
+            )
+            for event in events:
+                cursor = await self.db.execute(
+                    "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
+                    "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
+                    (event.room_id,),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+                persisted = replace(event, sequence=int(row["seq"]) if row else 1)
+                await self.db.execute(
+                    "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
+                    "actor_id, actor_type, timestamp, schema_version) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        persisted.event_id,
+                        persisted.room_id,
+                        persisted.sequence,
+                        persisted.event_type.value,
+                        json.dumps(persisted.payload, default=str),
+                        persisted.actor_id,
+                        persisted.actor_type,
+                        serialize_datetime(persisted.timestamp),
+                        persisted.schema_version,
+                    ),
+                )
+                persisted_events.append(persisted)
+        return persisted_events
+
+    @staticmethod
+    def _from_row(row: dict[str, Any]) -> AgentOutput:
+        try:
+            output_data = json.loads(row["output_data"])
+        except (json.JSONDecodeError, TypeError):
+            output_data = {}
+        try:
+            raw_interventions = json.loads(row.get("provider_interventions", "[]"))
+            provider_interventions = (
+                tuple(str(item) for item in raw_interventions)
+                if isinstance(raw_interventions, list)
+                else ()
+            )
+        except (json.JSONDecodeError, TypeError):
+            provider_interventions = ()
+        return AgentOutput(
+            output_id=row["output_id"],
+            room_id=row["room_id"],
+            session_id=row["session_id"],
+            execution_id=row["execution_id"],
+            agent_id=row["agent_id"],
+            content=row["content"],
+            output_data=output_data,
+            source_prompt=row["source_prompt"],
+            provider_input=row.get("provider_input", ""),
+            provider_name=row.get("provider_name", ""),
+            provider_model=row.get("provider_model", ""),
+            provider_response_id=row.get("provider_response_id", ""),
+            provider_interventions=provider_interventions,
+            provider_evidence=row.get("provider_evidence", ""),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+
+class OutputSelectionRepo:
+    """Shared output review decisions, committed with their canonical event."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def upsert_with_event(self, selection: OutputSelection, event: RoomEvent) -> RoomEvent:
+        async with self.db.transaction():
+            await self.db.execute(
+                "INSERT INTO output_selections(room_id, output_id, disposition, decided_by, "
+                "updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(room_id, output_id) DO UPDATE SET "
+                "disposition = excluded.disposition, decided_by = excluded.decided_by, "
+                "updated_at = excluded.updated_at",
+                (
+                    selection.room_id,
+                    selection.output_id,
+                    selection.disposition.value,
+                    selection.decided_by,
+                    serialize_datetime(selection.updated_at),
+                ),
+            )
+            cursor = await self.db.execute(
+                "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
+                "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
+                (event.room_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            persisted = replace(event, sequence=int(row["seq"]) if row else 1)
+            await self.db.execute(
+                "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
+                "actor_id, actor_type, timestamp, schema_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    persisted.event_id,
+                    persisted.room_id,
+                    persisted.sequence,
+                    persisted.event_type.value,
+                    json.dumps(persisted.payload, default=str),
+                    persisted.actor_id,
+                    persisted.actor_type,
+                    serialize_datetime(persisted.timestamp),
+                    persisted.schema_version,
+                ),
+            )
+        return persisted
+
+    async def list_by_room(self, room_id: str) -> list[OutputSelection]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM output_selections WHERE room_id = ? ORDER BY updated_at, output_id",
+            (room_id,),
+        )
+        return [
+            OutputSelection(
+                room_id=row["room_id"],
+                output_id=row["output_id"],
+                disposition=OutputDisposition(row["disposition"]),
+                decided_by=row["decided_by"],
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+            )
+            for row in rows
+        ]
 
 
 class TaskRepo:
@@ -489,16 +1035,24 @@ class TaskRepo:
         self.db = db
 
     async def create(self, task: Task) -> Task:
-        now = utcnow().isoformat()
         await self.db.execute(
             "INSERT INTO tasks(task_id, room_id, title, description, status, priority, "
             "assigned_agent_id, created_by, parent_task_id, delegation_id, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (task.task_id, task.room_id, task.title, task.description,
-             task.status.value, task.priority.value,
-             task.assigned_agent_id, task.created_by,
-             task.parent_task_id, task.delegation_id,
-             serialize_datetime(task.created_at), serialize_datetime(task.updated_at)),
+            (
+                task.task_id,
+                task.room_id,
+                task.title,
+                task.description,
+                task.status.value,
+                task.priority.value,
+                task.assigned_agent_id,
+                task.created_by,
+                task.parent_task_id,
+                task.delegation_id,
+                serialize_datetime(task.created_at),
+                serialize_datetime(task.updated_at),
+            ),
         )
         await self.db.commit()
         return task
@@ -511,8 +1065,15 @@ class TaskRepo:
         await self.db.execute(
             "UPDATE tasks SET title = ?, description = ?, status = ?, priority = ?, "
             "assigned_agent_id = ?, updated_at = ? WHERE task_id = ?",
-            (task.title, task.description, task.status.value, task.priority.value,
-             task.assigned_agent_id, serialize_datetime(utcnow()), task.task_id),
+            (
+                task.title,
+                task.description,
+                task.status.value,
+                task.priority.value,
+                task.assigned_agent_id,
+                serialize_datetime(utcnow()),
+                task.task_id,
+            ),
         )
         await self.db.commit()
         return task
@@ -532,15 +1093,18 @@ class TaskRepo:
 
     async def add_dependency(self, dep: TaskDependency) -> None:
         await self.db.execute(
-            "INSERT INTO task_dependencies(task_id, depends_on_task_id, created_at) VALUES (?, ?, ?)",
+            "INSERT INTO task_dependencies(task_id, depends_on_task_id, created_at) "
+            "VALUES (?, ?, ?)",
             (dep.task_id, dep.depends_on_task_id, serialize_datetime(dep.created_at)),
         )
         await self.db.commit()
 
     def _from_row(self, row: dict[str, Any]) -> Task:
         return Task(
-            task_id=row["task_id"], room_id=row["room_id"],
-            title=row["title"], description=row["description"],
+            task_id=row["task_id"],
+            room_id=row["room_id"],
+            title=row["title"],
+            description=row["description"],
             status=TaskStatus(row["status"]),
             priority=TaskPriority(row["priority"]),
             assigned_agent_id=row.get("assigned_agent_id"),
@@ -558,11 +1122,18 @@ class MessageRepo:
 
     async def create(self, message: Message) -> Message:
         await self.db.execute(
-            "INSERT INTO messages(message_id, room_id, role, sender_id, content, metadata, created_at) "
+            "INSERT INTO messages(message_id, room_id, role, sender_id, content, "
+            "metadata, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (message.message_id, message.room_id, message.role.value,
-             message.sender_id, message.content,
-             json.dumps(message.metadata), serialize_datetime(message.created_at)),
+            (
+                message.message_id,
+                message.room_id,
+                message.role.value,
+                message.sender_id,
+                message.content,
+                json.dumps(message.metadata),
+                serialize_datetime(message.created_at),
+            ),
         )
         await self.db.commit()
         return message
@@ -575,9 +1146,12 @@ class MessageRepo:
         )
         return [
             Message(
-                message_id=r["message_id"], room_id=r["room_id"],
-                role=MessageRole(r["role"]), sender_id=r["sender_id"],
-                content=r["content"], metadata=json.loads(r["metadata"]),
+                message_id=r["message_id"],
+                room_id=r["room_id"],
+                role=MessageRole(r["role"]),
+                sender_id=r["sender_id"],
+                content=r["content"],
+                metadata=json.loads(r["metadata"]),
                 created_at=datetime.fromisoformat(r["created_at"]),
             )
             for r in reversed(rows)
@@ -592,21 +1166,30 @@ class EventRepo:
         await self.db.execute(
             "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
             "actor_id, actor_type, timestamp, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (event.event_id, event.room_id, event.sequence, event.event_type.value,
-             json.dumps(event.payload, default=str), event.actor_id, event.actor_type,
-             serialize_datetime(event.timestamp), event.schema_version),
+            (
+                event.event_id,
+                event.room_id,
+                event.sequence,
+                event.event_type.value,
+                json.dumps(event.payload, default=str),
+                event.actor_id,
+                event.actor_type,
+                serialize_datetime(event.timestamp),
+                event.schema_version,
+            ),
         )
         await self.db.commit()
         return event
 
     async def append_with_next_sequence(self, event: RoomEvent) -> RoomEvent:
-        """Atomically increment sequence counter and insert event.
+        """Atomically allocate a sequence and insert its canonical event."""
+        async with self.db.transaction():
+            return await self.append_with_next_sequence_in_transaction(event)
 
-        Uses RETURNING on the sequence increment to get the sequence atomically,
-        then inserts the event. Since aiosqlite serializes all DB operations
-        through a single thread, the sequence is guaranteed unique between
-        the RETURNING and the event INSERT.
-        """
+    async def append_with_next_sequence_in_transaction(self, event: RoomEvent) -> RoomEvent:
+        """Append while the caller owns a wider atomic state transition."""
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("canonical event append requires transaction ownership")
         cursor = await self.db.execute(
             "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
             "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 "
@@ -614,16 +1197,25 @@ class EventRepo:
             (event.room_id,),
         )
         row = await cursor.fetchone()
+        await cursor.close()
         seq = int(row["seq"]) if row else 1
         event = replace(event, sequence=seq)
         await self.db.execute(
             "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
-            "actor_id, actor_type, timestamp, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (event.event_id, event.room_id, event.sequence, event.event_type.value,
-             json.dumps(event.payload, default=str), event.actor_id, event.actor_type,
-             serialize_datetime(event.timestamp), event.schema_version),
+            "actor_id, actor_type, timestamp, schema_version) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event.event_id,
+                event.room_id,
+                event.sequence,
+                event.event_type.value,
+                json.dumps(event.payload, default=str),
+                event.actor_id,
+                event.actor_type,
+                serialize_datetime(event.timestamp),
+                event.schema_version,
+            ),
         )
-        await self.db.commit()
         return event
 
     async def append_batch(self, events: list[RoomEvent]) -> None:
@@ -631,10 +1223,19 @@ class EventRepo:
         for event in events:
             await self.db.execute(
                 "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
-                "actor_id, actor_type, timestamp, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (event.event_id, event.room_id, event.sequence, event.event_type.value,
-                 json.dumps(event.payload, default=str), event.actor_id, event.actor_type,
-                 serialize_datetime(event.timestamp), event.schema_version),
+                "actor_id, actor_type, timestamp, schema_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.event_id,
+                    event.room_id,
+                    event.sequence,
+                    event.event_type.value,
+                    json.dumps(event.payload, default=str),
+                    event.actor_id,
+                    event.actor_type,
+                    serialize_datetime(event.timestamp),
+                    event.schema_version,
+                ),
             )
         await self.db.commit()
 
@@ -655,7 +1256,9 @@ class EventRepo:
         )
         return int(row["seq"]) if row else 1
 
-    async def list_since(self, room_id: str, after_sequence: int, limit: int = 500) -> list[RoomEvent]:
+    async def list_since(
+        self, room_id: str, after_sequence: int, limit: int = 500
+    ) -> list[RoomEvent]:
         rows = await self.db.fetch_all(
             "SELECT * FROM room_events WHERE room_id = ? AND sequence > ? "
             "ORDER BY sequence ASC LIMIT ?",
@@ -663,11 +1266,13 @@ class EventRepo:
         )
         return [
             RoomEvent(
-                event_id=r["event_id"], room_id=r["room_id"],
+                event_id=r["event_id"],
+                room_id=r["room_id"],
                 sequence=r["sequence"],
                 event_type=EventType(r["event_type"]),
                 payload=json.loads(r["payload"]),
-                actor_id=r["actor_id"], actor_type=r["actor_type"],
+                actor_id=r["actor_id"],
+                actor_type=r["actor_type"],
                 timestamp=datetime.fromisoformat(r["timestamp"]),
                 schema_version=r["schema_version"],
             )
@@ -689,11 +1294,19 @@ class ArtifactRepo:
     async def create(self, artifact: Artifact) -> Artifact:
         await self.db.execute(
             "INSERT INTO artifacts(artifact_id, room_id, name, artifact_type, description, "
-            "current_version, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (artifact.artifact_id, artifact.room_id, artifact.name,
-             artifact.artifact_type.value, artifact.description,
-             artifact.current_version, artifact.created_by,
-             serialize_datetime(artifact.created_at), serialize_datetime(artifact.updated_at)),
+            "current_version, created_by, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                artifact.artifact_id,
+                artifact.room_id,
+                artifact.name,
+                artifact.artifact_type.value,
+                artifact.description,
+                artifact.current_version,
+                artifact.created_by,
+                serialize_datetime(artifact.created_at),
+                serialize_datetime(artifact.updated_at),
+            ),
         )
         await self.db.commit()
         return artifact
@@ -715,10 +1328,18 @@ class ArtifactRepo:
         async with self.db.transaction():
             await self.db.execute(
                 "INSERT INTO artifact_versions(version_id, artifact_id, version_number, content, "
-                "content_hash, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (version.version_id, version.artifact_id, version.version_number,
-                 version.content, version.content_hash, version.created_by,
-                 serialize_datetime(version.created_at)),
+                "content_hash, provenance_hash, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    version.version_id,
+                    version.artifact_id,
+                    version.version_number,
+                    version.content,
+                    version.content_hash,
+                    version.provenance_hash,
+                    version.created_by,
+                    serialize_datetime(version.created_at),
+                ),
             )
             await self.db.execute(
                 "UPDATE artifacts SET current_version = ?, updated_at = ? WHERE artifact_id = ?",
@@ -733,22 +1354,640 @@ class ArtifactRepo:
         )
         return [
             ArtifactVersion(
-                version_id=r["version_id"], artifact_id=r["artifact_id"],
-                version_number=r["version_number"], content=r["content"],
-                content_hash=r["content_hash"], created_by=r["created_by"],
+                version_id=r["version_id"],
+                artifact_id=r["artifact_id"],
+                version_number=r["version_number"],
+                content=r["content"],
+                content_hash=r["content_hash"],
+                provenance_hash=r.get("provenance_hash", ""),
+                created_by=r["created_by"],
                 created_at=datetime.fromisoformat(r["created_at"]),
             )
             for r in rows
         ]
 
+    async def get_version(self, version_id: str) -> ArtifactVersion | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM artifact_versions WHERE version_id = ?", (version_id,)
+        )
+        if row is None:
+            return None
+        return ArtifactVersion(
+            version_id=row["version_id"],
+            artifact_id=row["artifact_id"],
+            version_number=row["version_number"],
+            content=row["content"],
+            content_hash=row["content_hash"],
+            provenance_hash=row.get("provenance_hash", ""),
+            created_by=row["created_by"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    async def resolve_decision_version(
+        self, room_id: str, version_id: str | None = None
+    ) -> tuple[Artifact, ArtifactVersion] | None:
+        """Resolve one published Decision Brief without crossing the room boundary."""
+        params: tuple[Any, ...]
+        version_filter = ""
+        if version_id is None:
+            params = (room_id,)
+        else:
+            version_filter = "AND v.version_id = ? "
+            params = (room_id, version_id)
+        row = await self.db.fetch_one(
+            "SELECT a.*, v.version_id AS resolved_version_id, "
+            "v.version_number AS resolved_version_number, v.content AS resolved_content, "
+            "v.content_hash AS resolved_content_hash, "
+            "v.provenance_hash AS resolved_provenance_hash, "
+            "v.created_by AS resolved_created_by, v.created_at AS resolved_created_at "
+            "FROM artifacts a JOIN artifact_versions v ON v.artifact_id = a.artifact_id "
+            "WHERE a.room_id = ? AND a.name = 'Decision Brief' "
+            f"{version_filter}"
+            "ORDER BY v.version_number DESC LIMIT 1",
+            params,
+        )
+        if row is None:
+            return None
+        artifact = self._from_row(row)
+        version = ArtifactVersion(
+            version_id=row["resolved_version_id"],
+            artifact_id=row["artifact_id"],
+            version_number=row["resolved_version_number"],
+            content=row["resolved_content"],
+            content_hash=row["resolved_content_hash"],
+            provenance_hash=row["resolved_provenance_hash"],
+            created_by=row["resolved_created_by"],
+            created_at=datetime.fromisoformat(row["resolved_created_at"]),
+        )
+        return artifact, version
+
+    async def create_synthesis(
+        self,
+        artifact: Artifact,
+        version: ArtifactVersion,
+        claims_and_sources: list[tuple[ArtifactClaim, ClaimSource]],
+        ontology_entities: list[OntologyEntity],
+        ontology_relationships: list[OntologyRelationship],
+        events: list[RoomEvent],
+        *,
+        create_artifact: bool,
+    ) -> list[RoomEvent]:
+        """Atomically publish a version, complete provenance graph, and events."""
+        persisted_events: list[RoomEvent] = []
+        async with self.db.transaction():
+            if create_artifact:
+                await self.db.execute(
+                    "INSERT INTO artifacts(artifact_id, room_id, name, artifact_type, description, "
+                    "current_version, created_by, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                    (
+                        artifact.artifact_id,
+                        artifact.room_id,
+                        artifact.name,
+                        artifact.artifact_type.value,
+                        artifact.description,
+                        artifact.created_by,
+                        serialize_datetime(artifact.created_at),
+                        serialize_datetime(artifact.updated_at),
+                    ),
+                )
+            await self.db.execute(
+                "INSERT INTO artifact_versions(version_id, artifact_id, version_number, content, "
+                "content_hash, provenance_hash, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    version.version_id,
+                    version.artifact_id,
+                    version.version_number,
+                    version.content,
+                    version.content_hash,
+                    version.provenance_hash,
+                    version.created_by,
+                    serialize_datetime(version.created_at),
+                ),
+            )
+            for claim, source in claims_and_sources:
+                await self.db.execute(
+                    "INSERT INTO artifact_claims(claim_id, version_id, ordinal, text, "
+                    "is_ai_derived, confidence) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        claim.claim_id,
+                        claim.version_id,
+                        claim.ordinal,
+                        claim.text,
+                        int(claim.is_ai_derived),
+                        claim.confidence,
+                    ),
+                )
+                await self.db.execute(
+                    "INSERT INTO artifact_claim_sources(claim_id, output_id, evidence, agent_id, "
+                    "execution_id, source_prompt, provider_input, provider_name, provider_model, "
+                    "provider_response_id, provider_interventions, provider_evidence) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        source.claim_id,
+                        source.output_id,
+                        source.evidence,
+                        source.agent_id,
+                        source.execution_id,
+                        source.source_prompt,
+                        source.provider_input,
+                        source.provider_name,
+                        source.provider_model,
+                        source.provider_response_id,
+                        json.dumps(source.provider_interventions),
+                        source.provider_evidence,
+                    ),
+                )
+            await self.db.execute(
+                "UPDATE artifacts SET current_version = ?, updated_at = ? WHERE artifact_id = ?",
+                (version.version_number, serialize_datetime(utcnow()), artifact.artifact_id),
+            )
+            await OntologyRepo(self.db).materialize_in_transaction(
+                ontology_entities, ontology_relationships
+            )
+            for event in events:
+                cursor = await self.db.execute(
+                    "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
+                    "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
+                    (event.room_id,),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+                persisted = replace(event, sequence=int(row["seq"]) if row else 1)
+                await self.db.execute(
+                    "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
+                    "actor_id, actor_type, timestamp, schema_version) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        persisted.event_id,
+                        persisted.room_id,
+                        persisted.sequence,
+                        persisted.event_type.value,
+                        json.dumps(persisted.payload, default=str),
+                        persisted.actor_id,
+                        persisted.actor_type,
+                        serialize_datetime(persisted.timestamp),
+                        persisted.schema_version,
+                    ),
+                )
+                persisted_events.append(persisted)
+        return persisted_events
+
+    async def get_version_provenance(self, version_id: str) -> list[dict[str, Any]]:
+        rows = await self.db.fetch_all(
+            "SELECT c.claim_id, c.ordinal, c.text, c.is_ai_derived, c.confidence, "
+            "s.output_id, s.evidence, s.agent_id, s.execution_id, s.source_prompt, "
+            "s.provider_input, s.provider_name, s.provider_model, s.provider_response_id, "
+            "s.provider_interventions, s.provider_evidence "
+            "FROM artifact_claims c JOIN artifact_claim_sources s ON s.claim_id = c.claim_id "
+            "WHERE c.version_id = ? ORDER BY c.ordinal, s.output_id",
+            (version_id,),
+        )
+        provenance: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                interventions = json.loads(item["provider_interventions"])
+            except (json.JSONDecodeError, TypeError):
+                interventions = []
+            item["provider_interventions"] = (
+                interventions if isinstance(interventions, list) else []
+            )
+            provenance.append(item)
+        return provenance
+
+    async def get_version_provenance_bounded(
+        self, version_id: str, limit: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return at most ten frozen claim/source rows and the exact available count."""
+        bounded_limit = max(1, min(limit, 10))
+        count_row = await self.db.fetch_one(
+            "SELECT COUNT(*) AS count FROM artifact_claims WHERE version_id = ?",
+            (version_id,),
+        )
+        total = int(count_row["count"]) if count_row else 0
+        rows = await self.db.fetch_all(
+            "SELECT c.claim_id, c.ordinal, c.text, c.is_ai_derived, c.confidence, "
+            "s.output_id, s.evidence, s.agent_id, s.execution_id, s.source_prompt, "
+            "s.provider_input, s.provider_name, s.provider_model, s.provider_response_id, "
+            "s.provider_interventions, s.provider_evidence "
+            "FROM artifact_claims c JOIN artifact_claim_sources s ON s.claim_id = c.claim_id "
+            "WHERE c.version_id = ? ORDER BY c.ordinal, s.output_id LIMIT ?",
+            (version_id, bounded_limit),
+        )
+        provenance: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                interventions = json.loads(item["provider_interventions"])
+            except (json.JSONDecodeError, TypeError):
+                interventions = []
+            item["provider_interventions"] = (
+                interventions if isinstance(interventions, list) else []
+            )
+            provenance.append(item)
+        return provenance, total
+
+    async def list_versions_without_provenance_hash(self) -> list[ArtifactVersion]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM artifact_versions WHERE provenance_hash = '' "
+            "ORDER BY created_at, version_id"
+        )
+        return [
+            ArtifactVersion(
+                version_id=row["version_id"],
+                artifact_id=row["artifact_id"],
+                version_number=row["version_number"],
+                content=row["content"],
+                content_hash=row["content_hash"],
+                provenance_hash="",
+                created_by=row["created_by"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    async def set_provenance_hash_if_empty(self, version_id: str, provenance_hash: str) -> None:
+        await self.db.execute(
+            "UPDATE artifact_versions SET provenance_hash = ? "
+            "WHERE version_id = ? AND provenance_hash = ''",
+            (provenance_hash, version_id),
+        )
+
     def _from_row(self, row: dict[str, Any]) -> Artifact:
         return Artifact(
-            artifact_id=row["artifact_id"], room_id=row["room_id"],
-            name=row["name"], artifact_type=ArtifactType(row["artifact_type"]),
-            description=row["description"], current_version=row["current_version"],
+            artifact_id=row["artifact_id"],
+            room_id=row["room_id"],
+            name=row["name"],
+            artifact_type=ArtifactType(row["artifact_type"]),
+            description=row["description"],
+            current_version=row["current_version"],
             created_by=row["created_by"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+
+class OntologyRepo:
+    """Typed access to the bounded ontology projection and its review history."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def materialize_in_transaction(
+        self,
+        entities: list[OntologyEntity],
+        relationships: list[OntologyRelationship],
+    ) -> None:
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("ontology materialization requires transaction ownership")
+        for entity in entities:
+            await self.db.execute(
+                "INSERT INTO ontology_entities("
+                "entity_id, room_id, kind, source_object_id, label, properties, "
+                "derivation_kind, confidence, evidence_ids, source_ids, review_status, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(room_id, kind, source_object_id) DO NOTHING",
+                (
+                    entity.entity_id,
+                    entity.room_id,
+                    entity.kind.value,
+                    entity.source_object_id,
+                    entity.label,
+                    json.dumps(entity.properties, sort_keys=True),
+                    entity.derivation_kind.value,
+                    entity.confidence,
+                    json.dumps(entity.evidence_ids),
+                    json.dumps(entity.source_ids),
+                    entity.review_status.value,
+                    serialize_datetime(entity.created_at),
+                    serialize_datetime(entity.updated_at),
+                ),
+            )
+        for relationship in relationships:
+            await self.db.execute(
+                "INSERT INTO ontology_relationships("
+                "relationship_id, room_id, kind, from_entity_id, to_entity_id, "
+                "derivation_kind, confidence, evidence_ids, source_ids, review_status, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(room_id, kind, from_entity_id, to_entity_id) DO NOTHING",
+                (
+                    relationship.relationship_id,
+                    relationship.room_id,
+                    relationship.kind.value,
+                    relationship.from_entity_id,
+                    relationship.to_entity_id,
+                    relationship.derivation_kind.value,
+                    relationship.confidence,
+                    json.dumps(relationship.evidence_ids),
+                    json.dumps(relationship.source_ids),
+                    relationship.review_status.value,
+                    serialize_datetime(relationship.created_at),
+                    serialize_datetime(relationship.updated_at),
+                ),
+            )
+
+    async def get_entity(self, entity_id: str) -> OntologyEntity | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM ontology_entities WHERE entity_id = ?", (entity_id,)
+        )
+        return None if row is None else self._entity_from_row(row)
+
+    async def get_entity_by_source(
+        self, room_id: str, kind: OntologyEntityKind, source_object_id: str
+    ) -> OntologyEntity | None:
+        """Resolve a single room-scoped projection node by its durable source ID."""
+        row = await self.db.fetch_one(
+            "SELECT * FROM ontology_entities "
+            "WHERE room_id = ? AND kind = ? AND source_object_id = ? LIMIT 1",
+            (room_id, kind.value, source_object_id),
+        )
+        return None if row is None else self._entity_from_row(row)
+
+    async def get_latest_review(self, room_id: str, target_id: str) -> OntologyReview | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM ontology_reviews WHERE room_id = ? AND target_id = ? "
+            "ORDER BY created_at DESC, review_id DESC LIMIT 1",
+            (room_id, target_id),
+        )
+        return None if row is None else self._review_from_row(row)
+
+    async def list_entities(self, room_id: str) -> list[OntologyEntity]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM ontology_entities WHERE room_id = ? ORDER BY created_at, entity_id",
+            (room_id,),
+        )
+        return [self._entity_from_row(row) for row in rows]
+
+    async def list_relationships(self, room_id: str) -> list[OntologyRelationship]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM ontology_relationships WHERE room_id = ? "
+            "ORDER BY created_at, relationship_id",
+            (room_id,),
+        )
+        return [self._relationship_from_row(row) for row in rows]
+
+    async def get_relationship(self, relationship_id: str) -> OntologyRelationship | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM ontology_relationships WHERE relationship_id = ?",
+            (relationship_id,),
+        )
+        return None if row is None else self._relationship_from_row(row)
+
+    async def get_relationship_between(
+        self, room_id: str, from_entity_id: str, to_entity_id: str
+    ) -> OntologyRelationship | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM ontology_relationships WHERE room_id = ? "
+            "AND from_entity_id = ? AND to_entity_id = ? "
+            "ORDER BY updated_at DESC, relationship_id LIMIT 1",
+            (room_id, from_entity_id, to_entity_id),
+        )
+        return None if row is None else self._relationship_from_row(row)
+
+    async def list_reviews(self, room_id: str) -> list[OntologyReview]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM ontology_reviews WHERE room_id = ? ORDER BY created_at, review_id",
+            (room_id,),
+        )
+        return [self._review_from_row(row) for row in rows]
+
+    async def review_entity_in_transaction(
+        self,
+        entity: OntologyEntity,
+        review_id: str,
+        action: OntologyReviewAction,
+        reviewed_by: str,
+        reason: str,
+        *,
+        corrected_label: str | None,
+        corrected_properties: dict[str, Any] | None,
+        corrected_confidence: float | None,
+        reviewed_at: datetime,
+    ) -> tuple[OntologyEntity, OntologyReview]:
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("ontology review requires transaction ownership")
+        before = self._entity_value(entity)
+        status = (
+            OntologyReviewStatus.CONFIRMED
+            if action == OntologyReviewAction.CONFIRM
+            else OntologyReviewStatus.CORRECTED
+        )
+        updated = replace(
+            entity,
+            label=corrected_label if corrected_label is not None else entity.label,
+            properties=(
+                corrected_properties if corrected_properties is not None else entity.properties
+            ),
+            confidence=(
+                corrected_confidence if corrected_confidence is not None else entity.confidence
+            ),
+            review_status=status,
+            updated_at=reviewed_at,
+        )
+        after = self._entity_value(updated)
+        review = OntologyReview(
+            review_id=review_id,
+            room_id=entity.room_id,
+            target_type=OntologyReviewTarget.ENTITY,
+            target_id=entity.entity_id,
+            action=action,
+            before_value=before,
+            after_value=after,
+            reason=reason,
+            reviewed_by=reviewed_by,
+            created_at=reviewed_at,
+        )
+        await self.db.execute(
+            "UPDATE ontology_entities SET label = ?, properties = ?, confidence = ?, "
+            "review_status = ?, updated_at = ? WHERE entity_id = ? AND room_id = ?",
+            (
+                updated.label,
+                json.dumps(updated.properties, sort_keys=True),
+                updated.confidence,
+                updated.review_status.value,
+                serialize_datetime(updated.updated_at),
+                updated.entity_id,
+                updated.room_id,
+            ),
+        )
+        await self.db.execute(
+            "INSERT INTO ontology_reviews("
+            "review_id, room_id, target_type, target_id, action, before_value, "
+            "after_value, reason, "
+            "reviewed_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                review.review_id,
+                review.room_id,
+                review.target_type.value,
+                review.target_id,
+                review.action.value,
+                json.dumps(review.before_value, sort_keys=True),
+                json.dumps(review.after_value, sort_keys=True),
+                review.reason,
+                review.reviewed_by,
+                serialize_datetime(review.created_at),
+            ),
+        )
+        return updated, review
+
+    async def review_relationship_in_transaction(
+        self,
+        relationship: OntologyRelationship,
+        review_id: str,
+        action: OntologyReviewAction,
+        reviewed_by: str,
+        reason: str,
+        *,
+        corrected_kind: OntologyRelationshipKind | None,
+        corrected_confidence: float | None,
+        reviewed_at: datetime,
+    ) -> tuple[OntologyRelationship, OntologyReview]:
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("ontology review requires transaction ownership")
+        before = self._relationship_value(relationship)
+        status = (
+            OntologyReviewStatus.CONFIRMED
+            if action == OntologyReviewAction.CONFIRM
+            else OntologyReviewStatus.CORRECTED
+        )
+        updated = replace(
+            relationship,
+            kind=corrected_kind if corrected_kind is not None else relationship.kind,
+            confidence=(
+                corrected_confidence
+                if corrected_confidence is not None
+                else relationship.confidence
+            ),
+            review_status=status,
+            updated_at=reviewed_at,
+        )
+        after = self._relationship_value(updated)
+        review = OntologyReview(
+            review_id=review_id,
+            room_id=relationship.room_id,
+            target_type=OntologyReviewTarget.RELATIONSHIP,
+            target_id=relationship.relationship_id,
+            action=action,
+            before_value=before,
+            after_value=after,
+            reason=reason,
+            reviewed_by=reviewed_by,
+            created_at=reviewed_at,
+        )
+        await self.db.execute(
+            "UPDATE ontology_relationships SET kind = ?, confidence = ?, review_status = ?, "
+            "updated_at = ? WHERE relationship_id = ? AND room_id = ?",
+            (
+                updated.kind.value,
+                updated.confidence,
+                updated.review_status.value,
+                serialize_datetime(updated.updated_at),
+                updated.relationship_id,
+                updated.room_id,
+            ),
+        )
+        await self.db.execute(
+            "INSERT INTO ontology_reviews("
+            "review_id, room_id, target_type, target_id, action, before_value, after_value, "
+            "reason, reviewed_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                review.review_id,
+                review.room_id,
+                review.target_type.value,
+                review.target_id,
+                review.action.value,
+                json.dumps(review.before_value, sort_keys=True),
+                json.dumps(review.after_value, sort_keys=True),
+                review.reason,
+                review.reviewed_by,
+                serialize_datetime(review.created_at),
+            ),
+        )
+        return updated, review
+
+    @staticmethod
+    def _entity_value(entity: OntologyEntity) -> dict[str, Any]:
+        return {
+            "label": entity.label,
+            "properties": entity.properties,
+            "confidence": entity.confidence,
+            "review_status": entity.review_status.value,
+        }
+
+    @staticmethod
+    def _relationship_value(relationship: OntologyRelationship) -> dict[str, Any]:
+        return {
+            "kind": relationship.kind.value,
+            "from_entity_id": relationship.from_entity_id,
+            "to_entity_id": relationship.to_entity_id,
+            "confidence": relationship.confidence,
+            "review_status": relationship.review_status.value,
+        }
+
+    @staticmethod
+    def _json_tuple(value: str) -> tuple[str, ...]:
+        parsed = json.loads(value)
+        if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+            raise ValueError("ontology identifier list is malformed")
+        return tuple(parsed)
+
+    @classmethod
+    def _entity_from_row(cls, row: dict[str, Any]) -> OntologyEntity:
+        properties = json.loads(row["properties"])
+        if not isinstance(properties, dict):
+            raise ValueError("ontology entity properties are malformed")
+        return OntologyEntity(
+            entity_id=row["entity_id"],
+            room_id=row["room_id"],
+            kind=OntologyEntityKind(row["kind"]),
+            source_object_id=row["source_object_id"],
+            label=row["label"],
+            properties=properties,
+            derivation_kind=OntologyDerivationKind(row["derivation_kind"]),
+            confidence=float(row["confidence"]),
+            evidence_ids=cls._json_tuple(row["evidence_ids"]),
+            source_ids=cls._json_tuple(row["source_ids"]),
+            review_status=OntologyReviewStatus(row["review_status"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    @classmethod
+    def _relationship_from_row(cls, row: dict[str, Any]) -> OntologyRelationship:
+        return OntologyRelationship(
+            relationship_id=row["relationship_id"],
+            room_id=row["room_id"],
+            kind=OntologyRelationshipKind(row["kind"]),
+            from_entity_id=row["from_entity_id"],
+            to_entity_id=row["to_entity_id"],
+            derivation_kind=OntologyDerivationKind(row["derivation_kind"]),
+            confidence=float(row["confidence"]),
+            evidence_ids=cls._json_tuple(row["evidence_ids"]),
+            source_ids=cls._json_tuple(row["source_ids"]),
+            review_status=OntologyReviewStatus(row["review_status"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _review_from_row(row: dict[str, Any]) -> OntologyReview:
+        before = json.loads(row["before_value"])
+        after = json.loads(row["after_value"])
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            raise ValueError("ontology review snapshot is malformed")
+        return OntologyReview(
+            review_id=row["review_id"],
+            room_id=row["room_id"],
+            target_type=OntologyReviewTarget(row["target_type"]),
+            target_id=row["target_id"],
+            action=OntologyReviewAction(row["action"]),
+            before_value=before,
+            after_value=after,
+            reason=row["reason"],
+            reviewed_by=row["reviewed_by"],
+            created_at=datetime.fromisoformat(row["created_at"]),
         )
 
 
@@ -760,10 +1999,17 @@ class DecisionRepo:
         await self.db.execute(
             "INSERT INTO decisions(decision_id, room_id, title, content, reason, status, "
             "created_by, reviewed_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (decision.decision_id, decision.room_id, decision.title,
-             decision.content, decision.reason, decision.status.value,
-             decision.created_by, decision.reviewed_by,
-             serialize_datetime(decision.created_at)),
+            (
+                decision.decision_id,
+                decision.room_id,
+                decision.title,
+                decision.content,
+                decision.reason,
+                decision.status.value,
+                decision.created_by,
+                decision.reviewed_by,
+                serialize_datetime(decision.created_at),
+            ),
         )
         await self.db.commit()
         return decision
@@ -789,10 +2035,14 @@ class DecisionRepo:
 
     def _from_row(self, row: dict[str, Any]) -> Decision:
         return Decision(
-            decision_id=row["decision_id"], room_id=row["room_id"],
-            title=row["title"], content=row["content"], reason=row["reason"],
+            decision_id=row["decision_id"],
+            room_id=row["room_id"],
+            title=row["title"],
+            content=row["content"],
+            reason=row["reason"],
             status=DecisionStatus(row["status"]),
-            created_by=row["created_by"], reviewed_by=row["reviewed_by"],
+            created_by=row["created_by"],
+            reviewed_by=row["reviewed_by"],
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
@@ -806,24 +2056,35 @@ class MemoryRepo:
             "INSERT INTO memories(memory_id, room_id, workspace_id, org_id, scope, content, "
             "memory_type, is_authoritative, superseded_by, created_by, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (memory.memory_id, memory.room_id, memory.workspace_id, memory.org_id,
-             memory.scope.value, memory.content, memory.memory_type,
-             int(memory.is_authoritative), memory.superseded_by,
-             memory.created_by, serialize_datetime(memory.created_at)),
+            (
+                memory.memory_id,
+                memory.room_id,
+                memory.workspace_id,
+                memory.org_id,
+                memory.scope.value,
+                memory.content,
+                memory.memory_type,
+                int(memory.is_authoritative),
+                memory.superseded_by,
+                memory.created_by,
+                serialize_datetime(memory.created_at),
+            ),
         )
         await self.db.commit()
         return memory
 
     async def list_by_room(self, room_id: str) -> list[Memory]:
         rows = await self.db.fetch_all(
-            "SELECT * FROM memories WHERE room_id = ? AND superseded_by IS NULL ORDER BY created_at",
+            "SELECT * FROM memories WHERE room_id = ? AND superseded_by IS NULL "
+            "ORDER BY created_at",
             (room_id,),
         )
         return [self._from_row(r) for r in rows]
 
     async def list_by_workspace(self, workspace_id: str) -> list[Memory]:
         rows = await self.db.fetch_all(
-            "SELECT * FROM memories WHERE workspace_id = ? AND superseded_by IS NULL ORDER BY created_at",
+            "SELECT * FROM memories WHERE workspace_id = ? AND superseded_by IS NULL "
+            "ORDER BY created_at",
             (workspace_id,),
         )
         return [self._from_row(r) for r in rows]
@@ -837,9 +2098,12 @@ class MemoryRepo:
 
     def _from_row(self, row: dict[str, Any]) -> Memory:
         return Memory(
-            memory_id=row["memory_id"], room_id=row.get("room_id"),
-            workspace_id=row.get("workspace_id"), org_id=row.get("org_id"),
-            scope=MemoryScope(row["scope"]), content=row["content"],
+            memory_id=row["memory_id"],
+            room_id=row.get("room_id"),
+            workspace_id=row.get("workspace_id"),
+            org_id=row.get("org_id"),
+            scope=MemoryScope(row["scope"]),
+            content=row["content"],
             memory_type=row["memory_type"],
             is_authoritative=bool(row["is_authoritative"]),
             superseded_by=row.get("superseded_by"),
@@ -857,11 +2121,18 @@ class ApprovalRepo:
             "INSERT INTO approvals(approval_id, room_id, execution_id, agent_id, "
             "action_description, status, reviewer_id, review_comment, requested_at, reviewed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (approval.approval_id, approval.room_id, approval.execution_id,
-             approval.agent_id, approval.action_description, approval.status.value,
-             approval.reviewer_id, approval.review_comment,
-             serialize_datetime(approval.requested_at),
-             serialize_datetime(approval.reviewed_at)),
+            (
+                approval.approval_id,
+                approval.room_id,
+                approval.execution_id,
+                approval.agent_id,
+                approval.action_description,
+                approval.status.value,
+                approval.reviewer_id,
+                approval.review_comment,
+                serialize_datetime(approval.requested_at),
+                serialize_datetime(approval.reviewed_at),
+            ),
         )
         await self.db.commit()
         return approval
@@ -874,7 +2145,8 @@ class ApprovalRepo:
 
     async def list_pending_by_room(self, room_id: str) -> list[Approval]:
         rows = await self.db.fetch_all(
-            "SELECT * FROM approvals WHERE room_id = ? AND status = 'PENDING' ORDER BY requested_at",
+            "SELECT * FROM approvals WHERE room_id = ? AND status = 'PENDING' "
+            "ORDER BY requested_at",
             (room_id,),
         )
         return [self._from_row(r) for r in rows]
@@ -883,22 +2155,31 @@ class ApprovalRepo:
         await self.db.execute(
             "UPDATE approvals SET status = ?, reviewer_id = ?, review_comment = ?, reviewed_at = ? "
             "WHERE approval_id = ?",
-            (approval.status.value, approval.reviewer_id, approval.review_comment,
-             serialize_datetime(approval.reviewed_at), approval.approval_id),
+            (
+                approval.status.value,
+                approval.reviewer_id,
+                approval.review_comment,
+                serialize_datetime(approval.reviewed_at),
+                approval.approval_id,
+            ),
         )
         await self.db.commit()
         return approval
 
     def _from_row(self, row: dict[str, Any]) -> Approval:
         return Approval(
-            approval_id=row["approval_id"], room_id=row["room_id"],
-            execution_id=row["execution_id"], agent_id=row["agent_id"],
+            approval_id=row["approval_id"],
+            room_id=row["room_id"],
+            execution_id=row["execution_id"],
+            agent_id=row["agent_id"],
             action_description=row["action_description"],
             status=ApprovalStatus(row["status"]),
             reviewer_id=row.get("reviewer_id"),
             review_comment=row["review_comment"],
             requested_at=datetime.fromisoformat(row["requested_at"]),
-            reviewed_at=datetime.fromisoformat(row["reviewed_at"]) if row.get("reviewed_at") else None,
+            reviewed_at=datetime.fromisoformat(row["reviewed_at"])
+            if row.get("reviewed_at")
+            else None,
         )
 
 
@@ -910,22 +2191,33 @@ class NotificationRepo:
         await self.db.execute(
             "INSERT INTO notifications(notification_id, user_id, room_id, title, body, "
             "notification_type, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (notification.notification_id, notification.user_id, notification.room_id,
-             notification.title, notification.body, notification.notification_type,
-             notification.status.value, serialize_datetime(notification.created_at)),
+            (
+                notification.notification_id,
+                notification.user_id,
+                notification.room_id,
+                notification.title,
+                notification.body,
+                notification.notification_type,
+                notification.status.value,
+                serialize_datetime(notification.created_at),
+            ),
         )
         await self.db.commit()
         return notification
 
     async def list_unread(self, user_id: str) -> list[Notification]:
         rows = await self.db.fetch_all(
-            "SELECT * FROM notifications WHERE user_id = ? AND status = 'UNREAD' ORDER BY created_at DESC",
+            "SELECT * FROM notifications WHERE user_id = ? AND status = 'UNREAD' "
+            "ORDER BY created_at DESC",
             (user_id,),
         )
         return [
             Notification(
-                notification_id=r["notification_id"], user_id=r["user_id"],
-                room_id=r.get("room_id"), title=r["title"], body=r["body"],
+                notification_id=r["notification_id"],
+                user_id=r["user_id"],
+                room_id=r.get("room_id"),
+                title=r["title"],
+                body=r["body"],
                 notification_type=r["notification_type"],
                 status=NotificationStatus(r["status"]),
                 created_at=datetime.fromisoformat(r["created_at"]),
@@ -960,9 +2252,15 @@ class ToolPermissionRepo:
         await self.db.execute(
             "INSERT INTO tool_permissions(permission_id, agent_id, room_id, tool_name, "
             "allowed, requires_approval, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (perm.permission_id, perm.agent_id, perm.room_id, perm.tool_name,
-             int(perm.allowed), int(perm.requires_approval),
-             serialize_datetime(perm.created_at)),
+            (
+                perm.permission_id,
+                perm.agent_id,
+                perm.room_id,
+                perm.tool_name,
+                int(perm.allowed),
+                int(perm.requires_approval),
+                serialize_datetime(perm.created_at),
+            ),
         )
         await self.db.commit()
         return perm
@@ -972,12 +2270,18 @@ class ToolPermissionRepo:
             "SELECT * FROM tool_permissions WHERE agent_id = ? AND room_id = ? AND tool_name = ?",
             (agent_id, room_id, tool_name),
         )
-        return None if row is None else ToolPermission(
-            permission_id=row["permission_id"], agent_id=row["agent_id"],
-            room_id=row["room_id"], tool_name=row["tool_name"],
-            allowed=bool(row["allowed"]),
-            requires_approval=bool(row["requires_approval"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
+        return (
+            None
+            if row is None
+            else ToolPermission(
+                permission_id=row["permission_id"],
+                agent_id=row["agent_id"],
+                room_id=row["room_id"],
+                tool_name=row["tool_name"],
+                allowed=bool(row["allowed"]),
+                requires_approval=bool(row["requires_approval"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
         )
 
     async def list_by_agent_room(self, agent_id: str, room_id: str) -> list[ToolPermission]:
@@ -987,8 +2291,10 @@ class ToolPermissionRepo:
         )
         return [
             ToolPermission(
-                permission_id=r["permission_id"], agent_id=r["agent_id"],
-                room_id=r["room_id"], tool_name=r["tool_name"],
+                permission_id=r["permission_id"],
+                agent_id=r["agent_id"],
+                room_id=r["room_id"],
+                tool_name=r["tool_name"],
                 allowed=bool(r["allowed"]),
                 requires_approval=bool(r["requires_approval"]),
                 created_at=datetime.fromisoformat(r["created_at"]),

@@ -6,10 +6,12 @@
 <title>Multiplayer AI Workspace</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#0f0f14;--surface:#1a1a24;--surface2:#232333;--border:#2a2a3a;--text:#e0e0e8;--text2:#8888a0;--accent:#6366f1;--accent2:#818cf8;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--orange:#f97316;--radius:8px}
+:root{--bg:#0d0f14;--surface:#151821;--surface2:#1e2330;--surface3:#272d3c;--border:#303747;--text:#eef1f7;--text2:#98a2b6;--accent:#6d7cff;--accent2:#9aa5ff;--green:#35c987;--red:#f0646b;--yellow:#eabf4c;--orange:#f4934d;--radius:9px}
 body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:flex;flex-direction:column}
 .header{display:flex;align-items:center;gap:12px;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--border);min-height:56px}
-.header h1{font-size:16px;font-weight:600;color:var(--accent2)}
+.header h1{font-size:16px;font-weight:650;color:var(--text)}
+.product-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--accent),#9b6dff);display:grid;place-items:center;font-size:12px;font-weight:800;color:white}
+.workflow-tag{font-size:10px;color:var(--text2);border:1px solid var(--border);border-radius:999px;padding:4px 8px}
 .header .status{margin-left:auto;font-size:12px;color:var(--text2)}
 .main{display:flex;flex:1;overflow:hidden}
 .sidebar{width:260px;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto}
@@ -21,7 +23,7 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
 .sidebar .item .dot.online{background:var(--green)}
 .sidebar .item .dot.working{background:var(--yellow)}
 .sidebar .item .dot.idle{background:var(--text2)}
-.center{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.center{min-width:360px;flex:1;display:flex;flex-direction:column;overflow:hidden}
 .room-header{padding:12px 20px;border-bottom:1px solid var(--border);background:var(--surface)}
 .room-header h2{font-size:15px;font-weight:500}
 .room-header .meta{font-size:12px;color:var(--text2);margin-top:2px}
@@ -42,7 +44,7 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
 .input-bar input:focus{border-color:var(--accent)}
 .input-bar button{background:var(--accent);color:white;border:none;border-radius:var(--radius);padding:10px 20px;cursor:pointer;font-size:13px;font-weight:500}
 .input-bar button:hover{background:var(--accent2)}
-.right-panel{width:320px;background:var(--surface);border-left:1px solid var(--border);overflow-y:auto;display:flex;flex-direction:column}
+.right-panel{width:min(620px,46vw);min-width:430px;background:var(--surface);border-left:1px solid var(--border);overflow-y:auto;display:flex;flex-direction:column}
 .right-panel h3{padding:12px 16px 8px;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text2)}
 .panel-section{padding:8px 16px;border-bottom:1px solid var(--border)}
 .panel-section .card{background:var(--surface2);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px;font-size:12px}
@@ -75,6 +77,68 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
 @keyframes spin{to{transform:rotate(360deg)}}
 .events-log{max-height:200px;overflow-y:auto;font-size:11px;font-family:monospace;color:var(--text2);padding:8px 16px}
 .events-log div{padding:2px 0;border-bottom:1px solid var(--border)}
+.decision-studio{padding:14px 16px 16px;border-bottom:1px solid var(--border)}
+.section-kicker{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent2);font-weight:700;margin-bottom:7px}
+.section-title{font-size:16px;font-weight:650;line-height:1.3}
+.section-copy{font-size:11px;color:var(--text2);line-height:1.5;margin:5px 0 12px}
+.question-input{display:block;width:100%;min-height:78px;resize:vertical;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;color:var(--text);font:inherit;font-size:12px;line-height:1.45;outline:none}
+.question-input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(109,124,255,.13)}
+.field-label{display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:650;margin:12px 0 7px}
+.field-label span{font-weight:400;color:var(--text2)}
+.template-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
+.template-option{position:relative;display:block;cursor:pointer}
+.template-option input{position:absolute;opacity:0;pointer-events:none}
+.template-body{height:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:9px;transition:.15s ease}
+.template-option input:checked + .template-body{border-color:var(--accent);background:rgba(109,124,255,.11);box-shadow:inset 0 0 0 1px rgba(109,124,255,.25)}
+.template-name{display:flex;justify-content:space-between;gap:4px;font-size:11px;font-weight:650}
+.template-name::after{content:'+';color:var(--text2)}
+.template-option input:checked + .template-body .template-name::after{content:'\2713';color:var(--accent2)}
+.template-role{margin-top:3px;color:var(--text2);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.launch-row{display:flex;align-items:center;gap:10px;margin-top:11px}
+.btn-primary{border:0;border-radius:var(--radius);background:var(--accent);color:white;padding:9px 13px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap}
+.btn-primary:hover:not(:disabled){background:var(--accent2)}
+.btn-primary:disabled{cursor:not-allowed;opacity:.45}
+.launch-note{font-size:10px;color:var(--text2);line-height:1.4}
+.launch-note.error{color:#ff969c}.launch-note.success{color:var(--green)}
+.outputs-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 6px}
+.outputs-head h3{padding:0;color:var(--text);font-size:12px;letter-spacing:0;text-transform:none}
+.outputs-count{font-size:10px;color:var(--text2)}
+.outputs-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;padding:8px 16px 12px}
+.output-card{min-width:0;background:var(--surface2);border:1px solid var(--border);border-radius:11px;overflow:hidden}
+.output-card.included{border-color:rgba(53,201,135,.7)}
+.output-card.excluded{opacity:.7}
+.output-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:10px 11px 8px;border-bottom:1px solid var(--border)}
+.output-author{font-size:11px;font-weight:700}.output-role{font-size:10px;color:var(--text2);margin-top:2px}
+.review-state{font-size:9px;border-radius:999px;padding:3px 7px;background:var(--surface3);color:var(--text2);white-space:nowrap;text-transform:uppercase;font-weight:700;letter-spacing:.04em}
+.review-state.included{background:rgba(53,201,135,.13);color:#6ee7aa}.review-state.excluded{background:rgba(240,100,107,.12);color:#ff969c}
+.output-content{padding:10px 11px;min-height:78px;font-size:11px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.output-provenance{padding:0 11px 9px;color:var(--text2);font-size:9px;line-height:1.5}
+.output-provenance code{font-family:ui-monospace,SFMono-Regular,monospace;color:#b7c0d3}
+.prompt-detail{margin-top:4px}.prompt-detail summary{cursor:pointer;color:var(--accent2)}.prompt-detail div{margin-top:4px;white-space:pre-wrap}
+.review-actions{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--border)}
+.review-actions button{background:transparent;border:0;color:var(--text2);font-size:10px;padding:8px;cursor:pointer}
+.review-actions button+button{border-left:1px solid var(--border)}
+.review-actions button:hover{background:var(--surface3);color:var(--text)}
+.review-actions button.active.include{color:#6ee7aa;background:rgba(53,201,135,.08)}
+.review-actions button.active.exclude{color:#ff969c;background:rgba(240,100,107,.07)}
+.empty-outputs{grid-column:1/-1;border:1px dashed var(--border);border-radius:var(--radius);padding:22px;text-align:center;color:var(--text2);font-size:11px;line-height:1.5}
+.synthesis-gate{margin:0 16px 14px;padding:11px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface2)}
+.synthesis-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.synthesis-title{font-size:11px;font-weight:700}.synthesis-meta{font-size:9px;color:var(--text2);margin-top:3px;line-height:1.4}
+.records{margin:0 16px 16px;border-top:1px solid var(--border);padding-top:10px}.records summary{font-size:10px;color:var(--text2);cursor:pointer}
+.records h3{padding:12px 0 5px}.records .panel-section{padding:0;border:0}
+.ontology-panel{margin:0 16px 16px;border:1px solid var(--border);border-radius:11px;background:var(--surface2);overflow:hidden}
+.ontology-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:12px;border-bottom:1px solid var(--border)}
+.ontology-head h3{padding:0;color:var(--text);font-size:12px;letter-spacing:0;text-transform:none}.ontology-head p{font-size:9px;color:var(--text2);margin-top:3px;line-height:1.4}
+.ontology-mode{font-size:9px;color:var(--text2);white-space:nowrap}.ontology-tree{padding:10px}.ontology-empty{padding:18px;text-align:center;color:var(--text2);font-size:10px;line-height:1.5}
+.ontology-node{border-left:2px solid var(--border);padding:7px 0 7px 10px;margin-left:5px}.ontology-node.decision{border-left-color:var(--accent)}.ontology-node.claim{margin-left:16px;border-left-color:var(--green)}.ontology-node.output{margin-left:32px;border-left-color:var(--yellow)}
+.ontology-node-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.ontology-label{font-size:10px;font-weight:650;line-height:1.4;overflow-wrap:anywhere}.ontology-meta{font-size:9px;color:var(--text2);line-height:1.5;margin-top:4px;overflow-wrap:anywhere}.ontology-meta code{color:#c0c8d8;font-family:ui-monospace,SFMono-Regular,monospace}
+.ontology-badge{display:inline-block;border-radius:999px;padding:2px 6px;font-size:8px;text-transform:uppercase;font-weight:750;letter-spacing:.04em;background:rgba(109,124,255,.13);color:var(--accent2);white-space:nowrap}.ontology-badge.confirmed{background:rgba(53,201,135,.13);color:#6ee7aa}.ontology-badge.corrected{background:rgba(234,191,76,.13);color:#f4d77a}.ontology-badge.system{background:var(--surface3);color:var(--text2)}
+.ontology-actions{display:flex;gap:5px;margin-top:6px}.ontology-actions button{border:1px solid var(--border);background:transparent;color:var(--text2);border-radius:6px;padding:3px 7px;font-size:8px;cursor:pointer}.ontology-actions button:hover{border-color:var(--accent);color:var(--text)}
+.edge-review{margin-top:6px;padding:6px 8px;background:rgba(255,255,255,.025);border-radius:6px}.ontology-history{border-top:1px solid var(--border);padding:10px}.ontology-history>summary{font-size:9px;color:var(--accent2);cursor:pointer}.history-item{border-left:2px solid var(--border);padding:6px 0 6px 8px;margin-top:7px;font-size:9px;color:var(--text2);line-height:1.45}.history-item strong{color:var(--text)}.history-values{margin-top:4px;font-family:ui-monospace,SFMono-Regular,monospace;font-size:8px;overflow-wrap:anywhere}
+.meta-panel{margin:0 16px 16px;border:1px solid var(--border);border-radius:11px;background:linear-gradient(145deg,rgba(109,124,255,.08),var(--surface2));overflow:hidden}.meta-head{padding:12px;border-bottom:1px solid var(--border)}.meta-head h3{padding:0;color:var(--text);font-size:12px;letter-spacing:0;text-transform:none}.meta-head p{font-size:9px;color:var(--text2);margin-top:3px;line-height:1.4}.meta-presets{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}.meta-presets button{border:1px solid var(--border);background:var(--surface3);color:var(--text);border-radius:999px;padding:5px 8px;font-size:9px;cursor:pointer}.meta-presets button:hover{border-color:var(--accent)}.meta-query{display:flex;gap:6px;padding:10px 12px}.meta-query input{min-width:0;flex:1;background:var(--surface);border:1px solid var(--border);border-radius:7px;color:var(--text);padding:7px 9px;font-size:10px;outline:none}.meta-query input:focus{border-color:var(--accent)}.meta-query button{border:0;background:var(--accent);color:white;border-radius:7px;padding:7px 10px;font-size:9px;font-weight:700;cursor:pointer}.meta-scope{padding:0 12px 9px;color:var(--text2);font-size:8px;line-height:1.5;overflow-wrap:anywhere}.meta-answer{margin:0 12px 10px;padding:10px;border-radius:8px;background:var(--surface);font-size:10px;line-height:1.5}.meta-evidence{padding:0 12px 12px}.meta-chain{margin-top:7px;border-left:2px solid var(--accent);padding:7px 0 7px 9px;font-size:9px;line-height:1.5;color:var(--text2)}.meta-chain strong{color:var(--text)}.meta-chain details{margin-top:5px}.meta-chain summary{cursor:pointer;color:var(--accent2)}.meta-chain pre{white-space:pre-wrap;overflow-wrap:anywhere;font:8px/1.45 ui-monospace,SFMono-Regular,monospace;color:#c0c8d8;margin-top:5px}.meta-error{color:#ff969c}
+@media(max-width:1050px){.sidebar{display:none}.right-panel{width:52vw;min-width:400px}}
+@media(max-width:760px){body{overflow:auto;height:auto}.main{display:block!important;overflow:visible}.center{min-height:65vh}.right-panel{width:100%;min-width:0;border-left:0;border-top:1px solid var(--border);overflow:visible}.template-grid,.outputs-grid{grid-template-columns:1fr}.workflow-tag{display:none}}
 </style>
 </head>
 <body>
@@ -85,14 +149,18 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
 <p>Persistent shared workspace for humans and AI agents</p>
 <label>Display Name</label>
 <input id="setup-name" placeholder="Your name" value="Yasser">
+<label>Access Token</label>
+<input id="setup-token" type="password" placeholder="Configured server token" autocomplete="off" spellcheck="false">
 <label>Room Name</label>
 <input id="setup-room" placeholder="Room name" value="Authentication Migration">
-<button onclick="setup()">Enter Workspace</button>
+<button id="setup-button" onclick="setup()">Enter Workspace</button>
 </div>
 </div>
 
 <div class="header" id="app-header" style="display:none">
+<span class="product-mark">M</span>
 <h1>Multiplayer AI Workspace</h1>
+<span class="workflow-tag">shared context → parallel branches → deliberate selection</span>
 <span class="status" id="ws-status">Connecting...</span>
 </div>
 
@@ -121,59 +189,171 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
 </div>
 
 <div class="right-panel">
-<h3>Tasks</h3>
-<div class="panel-section" id="tasks-panel"></div>
-<h3>Agents</h3>
-<div class="panel-section" id="agents-panel"></div>
-<h3>Approvals</h3>
-<div class="panel-section" id="approvals-panel"></div>
-<h3>Artifacts</h3>
-<div class="panel-section" id="artifacts-panel"></div>
-<h3>Decisions</h3>
-<div class="panel-section" id="decisions-panel"></div>
+<section class="decision-studio" aria-labelledby="studio-title">
+  <div class="section-kicker">Decision studio</div>
+  <div class="section-title" id="studio-title">Ask specialists independently</div>
+  <p class="section-copy">Each selected specialist gets the same decision context in an isolated run. Outputs stay visible and attributable after review.</p>
+  <textarea class="question-input" id="analysis-question">Should a 20-person AI-native SaaS startup migrate its authentication service from a self-managed PostgreSQL session store to a managed identity provider this quarter?</textarea>
+  <div class="field-label">Specialist branches <span id="template-selection-count">Choose 2–3</span></div>
+  <div class="template-grid" id="template-grid"><div class="empty-outputs">Loading specialist templates…</div></div>
+  <div class="launch-row">
+    <button class="btn-primary" id="launch-button" onclick="launchParallelAnalyses()" disabled>Run selected in parallel</button>
+    <div class="launch-note" id="launch-note">Runs and outputs are persisted to this room.</div>
+  </div>
+</section>
+
+<div class="outputs-head">
+  <h3>Inspectable outputs</h3>
+  <span class="outputs-count" id="outputs-count">0 authored branches</span>
+</div>
+<div class="outputs-grid" id="outputs-panel"></div>
+<div class="synthesis-gate">
+  <div class="synthesis-row">
+    <div>
+      <div class="synthesis-title" id="selection-summary">No outputs selected</div>
+      <div class="synthesis-meta">Selections are shared with room members and every published claim links to exact source evidence.</div>
+    </div>
+    <button class="btn-primary" id="synthesize-button" onclick="synthesizeDecisionBrief()" disabled>Synthesize decision brief</button>
+  </div>
+</div>
+
+<section class="meta-panel" id="meta-panel" aria-labelledby="meta-title">
+  <div class="meta-head">
+    <h3 id="meta-title">Ask Meta</h3>
+    <p>Room-scoped organizational intelligence from the published decision and its governed evidence—not another AI chat.</p>
+    <div class="meta-presets">
+      <button onclick="askMeta('Why was this decision made?')">Why this decision?</button>
+      <button onclick="askMeta('What evidence supports this decision?')">Show supporting evidence</button>
+      <button onclick="askMeta()">Reload answer</button>
+    </div>
+  </div>
+  <div class="meta-query">
+    <input id="meta-question" placeholder="Ask why or request supporting evidence" onkeydown="if(event.key==='Enter')askMeta()">
+    <button onclick="askMeta()">Ask</button>
+  </div>
+  <div class="meta-scope" id="meta-scope">Scope: current room · latest Decision Brief · maximum 10 claims</div>
+  <div class="meta-answer" id="meta-answer">Publish a Decision Brief, then ask why it was made or inspect its evidence.</div>
+  <div class="meta-evidence" id="meta-evidence"></div>
+</section>
+
+<section class="ontology-panel" id="ontology-panel" aria-labelledby="ontology-title">
+  <div class="ontology-head">
+    <div><h3 id="ontology-title">Evidence ontology</h3><p>Decision → Claim → exact AgentOutput. Every inferred link stays reviewable.</p></div>
+    <span class="ontology-mode" id="ontology-mode">Read-only until published</span>
+  </div>
+  <div class="ontology-tree" id="ontology-tree"><div class="ontology-empty">Publish a Decision Brief to materialize its evidence tree.</div></div>
+  <details class="ontology-history" id="ontology-history"><summary>Review history · 0 entries</summary><div id="ontology-history-list"></div></details>
+</section>
+
+<details class="records">
+  <summary>Workspace records</summary>
+  <h3>Agents</h3><div class="panel-section" id="agents-panel"></div>
+  <h3>Tasks</h3><div class="panel-section" id="tasks-panel"></div>
+  <h3>Approvals</h3><div class="panel-section" id="approvals-panel"></div>
+  <h3>Artifacts</h3><div class="panel-section" id="artifacts-panel"></div>
+  <h3>Decisions</h3><div class="panel-section" id="decisions-panel"></div>
+</details>
 </div>
 </div>
 
 <script>
 const API = '/api/v1';
+const ACTIVE_ROOM_STORAGE_KEY = 'multiai.activeRoomId';
 let userId = '';
 let userName = '';
+let accessToken = '';
 let roomId = '';
 let ws = null;
 let lastSequence = 0;
 let orgId = '';
 let workspaceId = '';
+let agentTemplates = [];
+let roomAgents = [];
+let roomOutputs = [];
+let roomOntology = {entities: [], relationships: [], reviews: []};
+let currentRoomRole = 'viewer';
+const outputSelections = new Map();
 
 async function api(method, path, body) {
-  const sep = path.includes('?') ? '&' : '?';
-  const url = `${API}${path}${sep}user_id=${userId}`;
-  const opts = { method, headers: {'Content-Type': 'application/json'} };
+  const url = `${API}${path}`;
+  const opts = { method, headers: {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${accessToken}`
+  } };
   if (body) opts.body = JSON.stringify(body);
   const r = await fetch(url, opts);
-  if (!r.ok) { const e = await r.text(); throw new Error(e); }
+  if (!r.ok) {
+    const e = await r.text();
+    const error = new Error(e);
+    error.status = r.status;
+    throw error;
+  }
   return r.json();
+}
+
+function storedRoomId() {
+  try { return localStorage.getItem(ACTIVE_ROOM_STORAGE_KEY) || ''; }
+  catch (_) { return ''; }
+}
+
+function rememberRoomId(value) {
+  try { localStorage.setItem(ACTIVE_ROOM_STORAGE_KEY, value); }
+  catch (_) { /* Private browsing can disable storage; server discovery still reconnects. */ }
 }
 
 async function setup() {
   userName = document.getElementById('setup-name').value.trim();
+  accessToken = document.getElementById('setup-token').value;
   const roomName = document.getElementById('setup-room').value.trim();
-  if (!userName || !roomName) return alert('Fill in both fields');
-  userId = 'user_' + userName.toLowerCase().replace(/\s/g, '_');
+  if (!userName || !roomName || !accessToken) return alert('Fill in all fields');
+  const setupButton = document.getElementById('setup-button');
+  setupButton.disabled = true;
+  setupButton.textContent = 'Opening…';
 
-  // Create org + workspace + room
-  const org = await api('POST', '/organizations', {name: 'Default', slug: 'default'});
-  orgId = org.org_id;
-  const ws = await api('POST', `/organizations/${orgId}/workspaces`, {name: 'Main', slug: 'main'});
-  workspaceId = ws.workspace_id;
-  const room = await api('POST', `/workspaces/${workspaceId}/rooms`, {name: roomName});
-  roomId = room.room_id;
+  try {
+    // Discovery is authenticated and membership-scoped. A reload, stale browser
+    // storage, or a second browser can therefore resume without replaying setup
+    // writes. Only the non-secret active room ID is stored in the browser.
+    const context = await api('GET', '/me/context');
+    userId = context.user_id;
+    const savedRoomId = storedRoomId();
+    const roomsNamedForDecision = context.rooms.filter(room => room.name === roomName);
+    const room = context.rooms.find(item => item.room_id === savedRoomId)
+      || roomsNamedForDecision[0];
 
-  document.getElementById('setup-screen').style.display = 'none';
-  document.getElementById('app-header').style.display = 'flex';
-  document.getElementById('app-main').style.display = 'flex';
+    if (room) {
+      roomId = room.room_id;
+      workspaceId = room.workspace_id;
+      const existingWorkspace = context.workspaces.find(
+        item => item.workspace_id === workspaceId
+      );
+      orgId = existingWorkspace ? existingWorkspace.org_id : '';
+    } else {
+      // The server owns the cold-start idempotency boundary. Two tabs can both
+      // observe an empty context and still receive this same atomic hierarchy.
+      const bootstrap = await api('POST', '/me/bootstrap', {
+        display_name: userName, room_name: roomName
+      });
+      orgId = bootstrap.organization.org_id;
+      workspaceId = bootstrap.workspace.workspace_id;
+      roomId = bootstrap.room.room_id;
+    }
 
-  connectWS();
-  await loadState();
+    rememberRoomId(roomId);
+    document.getElementById('setup-screen').style.display = 'none';
+    document.getElementById('app-header').style.display = 'flex';
+    document.getElementById('app-main').style.display = 'flex';
+
+    connectWS();
+    await Promise.all([loadTemplates(), loadState()]);
+  } catch (err) {
+    accessToken = '';
+    document.getElementById('setup-token').value = '';
+    alert(`Could not open workspace: ${errorMessage(err)}`);
+  } finally {
+    setupButton.disabled = false;
+    setupButton.textContent = 'Enter Workspace';
+  }
 }
 
 let wsReconnectDelay = 1000;
@@ -183,13 +363,17 @@ let wsReconnectAttempts = 0;
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const encRoomId = encodeURIComponent(roomId);
-  const encUserId = encodeURIComponent(userId);
-  ws = new WebSocket(`${proto}://${location.host}/ws?room_id=${encRoomId}&user_id=${encUserId}`);
+  const encodedToken = bytesToBase64Url(new TextEncoder().encode(accessToken));
+  ws = new WebSocket(`${proto}://${location.host}/ws?room_id=${encRoomId}`,
+    ['multiai.v1', `bearer.${encodedToken}`]);
   ws.onopen = () => {
     document.getElementById('ws-status').textContent = 'Connected';
     document.getElementById('ws-status').style.color = '#22c55e';
     wsReconnectDelay = 1000;
     wsReconnectAttempts = 0;
+    // Rehydrate durable runs and outputs after every reconnect. Ordered events
+    // remain the synchronization source; state restores anything missed offline.
+    loadState();
   };
   ws.onclose = () => {
     document.getElementById('ws-status').textContent = 'Disconnected - reconnecting...';
@@ -220,8 +404,23 @@ async function loadState() {
   state.messages.forEach(m => appendMessage(m));
 
   // Agents
+  roomAgents = state.agents || [];
   renderAgents(state.agents);
   renderSidebarAgents(state.agents);
+
+  // Durable specialist runs and authored outputs
+  roomOutputs = state.outputs || [];
+  outputSelections.clear();
+  (state.output_selections || []).forEach(selection => {
+    outputSelections.set(selection.output_id, selection.disposition.toLowerCase());
+  });
+  renderOutputs(roomOutputs, state.runs || []);
+
+  // Evidence graph and governance state are part of the reconnect snapshot.
+  const currentMember = (state.members || []).find(member => member.user_id === userId);
+  currentRoomRole = currentMember ? currentMember.role : 'viewer';
+  roomOntology = state.ontology || {entities: [], relationships: [], reviews: []};
+  renderOntology(roomOntology);
 
   // Tasks
   renderTasks(state.tasks);
@@ -238,9 +437,13 @@ async function loadState() {
   // Members
   renderMembers(state.members);
 
-  if (state.events_since.length > 0) {
-    lastSequence = Math.max(...state.events_since.map(e => e.sequence));
-  }
+  // Rebuild the canonical audit trail rather than leaving the event panel
+  // empty after a page reload. Repeated WS onopen hydration cannot duplicate it.
+  document.getElementById('events-log').innerHTML = '';
+  state.events_since.forEach(event => logEvent(event));
+  lastSequence = state.events_since.length > 0
+    ? Math.max(...state.events_since.map(event => event.sequence))
+    : 0;
 }
 
 function handleRealtimeEvent(msg) {
@@ -264,6 +467,12 @@ function handleRealtimeEvent(msg) {
         loadState();
         break;
       case 'agent.status_changed':
+        loadState();
+        break;
+      case 'agent.run.started': case 'agent.output.created': case 'agent.run.completed':
+      case 'output.selection.updated': case 'artifact.decision_brief_synthesized':
+      case 'ontology.materialized': case 'ontology.assertion_confirmed':
+      case 'ontology.assertion_corrected':
         loadState();
         break;
       case 'task.created': case 'task.assigned': case 'task.completed': case 'task.cancelled':
@@ -359,6 +568,9 @@ function renderArtifacts(arts) {
     <div class="card">
       <div class="title">${escHtml(a.name)}</div>
       <div class="detail">${a.type} v${a.version}</div>
+      ${a.content ? `<details><summary>Open version</summary><div class="detail">${escHtml(a.content)}</div>
+        <button onclick="loadProvenance('${a.version_id}')">Drill into evidence</button>
+        <div id="provenance-${a.version_id}"></div></details>` : ''}
     </div>
   `).join('');
 }
@@ -374,11 +586,462 @@ function renderDecisions(decs) {
   `).join('');
 }
 
+function canGovernOntology() {
+  return ['admin', 'editor', 'member'].includes(currentRoomRole);
+}
+
+function ontologyBadge(record) {
+  if (record.review_status === 'CONFIRMED') {
+    return '<span class="ontology-badge confirmed">confirmed</span>';
+  }
+  if (record.review_status === 'CORRECTED') {
+    return '<span class="ontology-badge corrected">corrected</span>';
+  }
+  if (record.derivation_kind === 'AI_DERIVED') {
+    return '<span class="ontology-badge">AI-derived</span>';
+  }
+  return '<span class="ontology-badge system">system</span>';
+}
+
+function ontologyEntityActions(entity) {
+  if (!canGovernOntology()) return '';
+  return `<div class="ontology-actions" data-governance="entity">
+    <button onclick="reviewOntologyEntity('${entity.entity_id}','CONFIRM')">Confirm</button>
+    <button onclick="reviewOntologyEntity('${entity.entity_id}','CORRECT')">Correct</button>
+  </div>`;
+}
+
+function ontologyRelationshipActions(relationship) {
+  if (!canGovernOntology()) return '';
+  return `<div class="ontology-actions" data-governance="relationship">
+    <button onclick="reviewOntologyRelationship('${relationship.relationship_id}','CONFIRM')">Confirm link</button>
+    <button onclick="reviewOntologyRelationship('${relationship.relationship_id}','CORRECT')">Correct link</button>
+  </div>`;
+}
+
+function identifierList(label, identifiers) {
+  const values = identifiers || [];
+  return `${label}: ${values.map(value => `<code>${escHtml(value)}</code>`).join(', ') || 'none'}`;
+}
+
+function renderOntology(ontology) {
+  const panel = document.getElementById('ontology-panel');
+  const tree = document.getElementById('ontology-tree');
+  const mode = document.getElementById('ontology-mode');
+  const entities = ontology.entities || [];
+  const relationships = ontology.relationships || [];
+  const reviews = ontology.reviews || [];
+  const entitiesById = new Map(entities.map(entity => [entity.entity_id, entity]));
+  const decisions = entities.filter(entity => entity.kind === 'Decision');
+  panel.dataset.roomRole = currentRoomRole;
+  panel.dataset.governance = canGovernOntology() ? 'enabled' : 'read-only';
+  mode.textContent = canGovernOntology()
+    ? `${currentRoomRole} · review enabled`
+    : `${currentRoomRole} · read only`;
+
+  if (!decisions.length) {
+    tree.innerHTML = '<div class="ontology-empty">Publish a Decision Brief to materialize its evidence tree.</div>';
+  } else {
+    tree.innerHTML = decisions.map(decision => {
+      const supportLinks = relationships.filter(link =>
+        link.kind === 'SUPPORTS' && link.to_entity_id === decision.entity_id
+      );
+      const claims = supportLinks.map(link => ({
+        entity: entitiesById.get(link.from_entity_id), supportLink: link
+      })).filter(item => item.entity);
+      const claimHtml = claims.map(item => {
+        const claim = item.entity;
+        const sourceLink = relationships.find(link =>
+          link.kind === 'DERIVED_FROM' && link.from_entity_id === claim.entity_id
+          && entitiesById.get(link.to_entity_id)?.kind === 'AgentOutput'
+        );
+        const output = sourceLink ? entitiesById.get(sourceLink.to_entity_id) : null;
+        const persistedOutput = output
+          ? roomOutputs.find(candidate => candidate.output_id === output.source_object_id)
+          : null;
+        const provider = persistedOutput
+          ? `${persistedOutput.provider_name || 'workflow-only'} / ${persistedOutput.provider_model || 'simulated'}`
+          : 'provider snapshot unavailable';
+        const outputHtml = output ? `<div class="ontology-node output" data-ontology-kind="AgentOutput">
+          <div class="ontology-node-head"><div class="ontology-label">AgentOutput · ${escHtml(shortId(output.source_object_id))}</div>${ontologyBadge(output)}</div>
+          <div class="ontology-meta">Confidence ${Number(output.confidence).toFixed(2)} · ${identifierList('Evidence', output.evidence_ids)}<br>
+          Provider: ${escHtml(provider)} · response <code>${escHtml(persistedOutput?.provider_response_id || 'not issued')}</code>
+          <details><summary>Exact provider/source evidence</summary>
+            <div>${identifierList('Source IDs', output.source_ids)}</div>
+            <div>Source prompt: ${escHtml(persistedOutput?.source_prompt || 'Unavailable')}</div>
+            <div>Provider input: ${escHtml(persistedOutput?.provider_input || 'Unavailable')}</div>
+            <div>Evidence: ${escHtml(persistedOutput?.provider_evidence || persistedOutput?.content || 'Unavailable')}</div>
+          </details></div>
+          ${ontologyEntityActions(output)}
+          ${sourceLink ? `<div class="edge-review" data-ontology-edge="DERIVED_FROM">
+            <div class="ontology-meta">DERIVED_FROM · ${ontologyBadge(sourceLink)} · confidence ${Number(sourceLink.confidence).toFixed(2)}<br>${identifierList('Exact evidence', sourceLink.evidence_ids)}</div>
+            ${ontologyRelationshipActions(sourceLink)}
+          </div>` : ''}
+        </div>` : '<div class="ontology-empty">Exact AgentOutput link unavailable.</div>';
+        return `<div class="ontology-node claim" data-ontology-kind="Claim">
+          <div class="ontology-node-head"><div class="ontology-label">${escHtml(claim.label)}</div>${ontologyBadge(claim)}</div>
+          <div class="ontology-meta">Claim · confidence ${Number(claim.confidence).toFixed(2)}<br>
+          ${identifierList('Evidence', claim.evidence_ids)}<br>${identifierList('Sources', claim.source_ids)}</div>
+          ${ontologyEntityActions(claim)}
+          <div class="edge-review" data-ontology-edge="SUPPORTS">
+            <div class="ontology-meta">SUPPORTS decision · ${ontologyBadge(item.supportLink)} · confidence ${Number(item.supportLink.confidence).toFixed(2)}<br>${identifierList('Exact evidence', item.supportLink.evidence_ids)}</div>
+            ${ontologyRelationshipActions(item.supportLink)}
+          </div>
+          ${outputHtml}
+        </div>`;
+      }).join('');
+      return `<article class="ontology-node decision" data-ontology-kind="Decision">
+        <div class="ontology-node-head"><div class="ontology-label">${escHtml(decision.label)}</div>${ontologyBadge(decision)}</div>
+        <div class="ontology-meta">Decision · confidence ${Number(decision.confidence).toFixed(2)}<br>
+        ${identifierList('Evidence', decision.evidence_ids)}<br>${identifierList('Sources', decision.source_ids)}</div>
+        ${ontologyEntityActions(decision)}
+        ${claimHtml || '<div class="ontology-empty">No supporting claims linked.</div>'}
+      </article>`;
+    }).join('');
+  }
+
+  const history = document.getElementById('ontology-history');
+  const historyList = document.getElementById('ontology-history-list');
+  history.querySelector('summary').textContent = `Review history · ${reviews.length} ${reviews.length === 1 ? 'entry' : 'entries'}`;
+  historyList.innerHTML = reviews.length ? reviews.map(review => {
+    const target = review.target_type === 'ENTITY'
+      ? entitiesById.get(review.target_id)?.label || review.target_id
+      : relationships.find(link => link.relationship_id === review.target_id)?.kind || review.target_id;
+    return `<div class="history-item" data-review-action="${escHtml(review.action)}">
+      <strong>${escHtml(review.action)}</strong> ${escHtml(review.target_type.toLowerCase())} · ${escHtml(target)}<br>
+      ${escHtml(review.reviewed_by)} · ${escHtml(new Date(review.created_at).toLocaleString())}<br>
+      Reason: ${escHtml(review.reason || 'No reason supplied')}
+      <div class="history-values">Before ${escHtml(JSON.stringify(review.before))}<br>After ${escHtml(JSON.stringify(review.after))}</div>
+    </div>`;
+  }).join('') : '<div class="ontology-empty">No confirmation or correction history yet.</div>';
+}
+
+async function reviewOntologyEntity(entityId, action) {
+  const entity = (roomOntology.entities || []).find(item => item.entity_id === entityId);
+  if (!entity || !canGovernOntology()) return;
+  const body = {action};
+  if (action === 'CONFIRM') {
+    const reason = prompt('Optional confirmation reason:', 'Checked against exact evidence.');
+    if (reason === null) return;
+    body.reason = reason;
+  } else {
+    const label = prompt('Corrected assertion:', entity.label);
+    if (label === null) return;
+    const confidenceText = prompt('Corrected confidence (0–1):', String(entity.confidence));
+    if (confidenceText === null) return;
+    const reason = prompt('Correction reason (required):', '');
+    if (reason === null) return;
+    const confidence = Number(confidenceText);
+    if (label !== entity.label) body.corrected_label = label;
+    if (confidence !== Number(entity.confidence)) body.corrected_confidence = confidence;
+    body.reason = reason;
+    if (body.corrected_label === undefined && body.corrected_confidence === undefined) {
+      return alert('Change the assertion or confidence before saving a correction.');
+    }
+  }
+  try {
+    await api('POST', `/rooms/${roomId}/ontology/entities/${entityId}/reviews`, body);
+    await loadState();
+  } catch (err) {
+    alert(`Ontology review was not saved: ${errorMessage(err)}`);
+  }
+}
+
+async function reviewOntologyRelationship(relationshipId, action) {
+  const relationship = (roomOntology.relationships || []).find(
+    item => item.relationship_id === relationshipId
+  );
+  if (!relationship || !canGovernOntology()) return;
+  const body = {action};
+  if (action === 'CONFIRM') {
+    const reason = prompt('Optional link confirmation reason:', 'Checked against exact evidence.');
+    if (reason === null) return;
+    body.reason = reason;
+  } else {
+    const kind = prompt(
+      'Corrected relationship (OWNS, BLOCKS, DEPENDS_ON, SUPPORTS, CONTRADICTS, REFERENCES, DERIVED_FROM):',
+      relationship.kind
+    );
+    if (kind === null) return;
+    const confidenceText = prompt('Corrected confidence (0–1):', String(relationship.confidence));
+    if (confidenceText === null) return;
+    const reason = prompt('Correction reason (required):', '');
+    if (reason === null) return;
+    const confidence = Number(confidenceText);
+    if (kind !== relationship.kind) body.corrected_kind = kind;
+    if (confidence !== Number(relationship.confidence)) body.corrected_confidence = confidence;
+    body.reason = reason;
+    if (body.corrected_kind === undefined && body.corrected_confidence === undefined) {
+      return alert('Change the relationship or confidence before saving a correction.');
+    }
+  }
+  try {
+    await api('POST', `/rooms/${roomId}/ontology/relationships/${relationshipId}/reviews`, body);
+    await loadState();
+  } catch (err) {
+    alert(`Ontology relationship review was not saved: ${errorMessage(err)}`);
+  }
+}
+
 function renderMembers(members) {
   const el = document.getElementById('team-list');
   el.innerHTML = members.map(m => `
     <div class="item"><span class="dot online"></span>${escHtml(m.user_id)}</div>
   `).join('');
+}
+
+async function loadTemplates() {
+  try {
+    agentTemplates = await api('GET', '/agent-templates');
+    renderTemplates();
+  } catch (err) {
+    document.getElementById('template-grid').innerHTML =
+      `<div class="empty-outputs">Could not load specialist templates: ${escHtml(errorMessage(err))}</div>`;
+    setLaunchNote('Specialist launch is unavailable.', 'error');
+  }
+}
+
+function renderTemplates() {
+  const preferred = new Set(['Architect', 'Security Reviewer', 'Researcher']);
+  const grid = document.getElementById('template-grid');
+  grid.innerHTML = agentTemplates.map(t => `
+    <label class="template-option">
+      <input type="checkbox" value="${escHtml(t.template_id)}"
+             ${preferred.has(t.name) ? 'checked' : ''} onchange="updateTemplateSelection()">
+      <span class="template-body">
+        <span class="template-name">${escHtml(t.name)}</span>
+        <span class="template-role">${escHtml(t.role)}</span>
+      </span>
+    </label>
+  `).join('');
+  updateTemplateSelection();
+}
+
+function selectedTemplates() {
+  const ids = new Set([...document.querySelectorAll('#template-grid input:checked')].map(i => i.value));
+  return agentTemplates.filter(t => ids.has(t.template_id));
+}
+
+function updateTemplateSelection() {
+  const count = selectedTemplates().length;
+  document.getElementById('template-selection-count').textContent =
+    count ? `${count} selected` : 'Choose 2–3';
+  document.getElementById('launch-button').disabled = count < 2 || count > 3;
+}
+
+async function launchParallelAnalyses() {
+  const question = document.getElementById('analysis-question').value.trim();
+  const templates = selectedTemplates();
+  if (!question) {
+    setLaunchNote('Enter a technical decision first.', 'error');
+    return;
+  }
+  if (templates.length < 2 || templates.length > 3) {
+    setLaunchNote('Select two or three specialists.', 'error');
+    return;
+  }
+
+  const button = document.getElementById('launch-button');
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  button.innerHTML = '<span class="spinner"></span> Launching branches';
+  setLaunchNote(`Starting ${templates.length} independent runs…`);
+
+  const results = await Promise.allSettled(templates.map(async template => {
+    const agent = await api('POST', `/rooms/${roomId}/agents`, {
+      template_id: template.template_id,
+      name: template.name
+    });
+    const session = await api('POST', `/rooms/${roomId}/agents/${agent.agent_id}/sessions`);
+    const execution = await api('POST', `/sessions/${session.session_id}/execute`);
+    const prompt = `Analyze this decision independently from the ${template.role} perspective. State your recommendation, decisive evidence, risks, and unresolved questions.\n\nDecision: ${question}`;
+    return api('POST', `/executions/${execution.execution_id}/step`, {prompt});
+  }));
+
+  const succeeded = results.filter(r => r.status === 'fulfilled').length;
+  const failed = results.length - succeeded;
+  button.removeAttribute('aria-busy');
+  button.textContent = 'Run selected in parallel';
+  updateTemplateSelection();
+  await loadState();
+  if (failed) {
+    setLaunchNote(`${succeeded} completed; ${failed} failed. Successful outputs remain persisted.`, 'error');
+  } else {
+    setLaunchNote(`${succeeded} authored outputs completed and persisted.`, 'success');
+  }
+}
+
+function renderOutputs(outputs, runs) {
+  const panel = document.getElementById('outputs-panel');
+  document.getElementById('outputs-count').textContent =
+    `${outputs.length} authored ${outputs.length === 1 ? 'branch' : 'branches'}`;
+  if (!outputs.length) {
+    const active = runs.filter(r => r.status === 'PENDING' || r.status === 'RUNNING').length;
+    panel.innerHTML = `<div class="empty-outputs">${active
+      ? `${active} specialist ${active === 1 ? 'run is' : 'runs are'} in progress. Outputs will reappear here after reconnect.`
+      : 'Launch two or three specialists to compare independent, attributed analyses side by side.'}</div>`;
+    updateSelectionSummary();
+    return;
+  }
+
+  panel.innerHTML = outputs.map(output => {
+    const agent = roomAgents.find(a => a.agent_id === output.agent_id);
+    const selection = outputSelections.get(output.output_id) || '';
+    const cardClass = selection ? ` ${selection}` : '';
+    const stateLabel = selection || 'not reviewed';
+    return `
+      <article class="output-card${cardClass}">
+        <div class="output-card-head">
+          <div><div class="output-author">${escHtml(agent ? agent.name : 'Specialist')}</div>
+          <div class="output-role">${escHtml(agent ? agent.role : output.agent_id)}</div></div>
+          <span class="review-state ${selection}">${stateLabel}</span>
+        </div>
+        <div class="output-content">${escHtml(output.content || 'No readable content returned.')}</div>
+        <div class="output-provenance">
+          Source output <code>${escHtml(shortId(output.output_id))}</code> · run <code>${escHtml(shortId(output.execution_id))}</code>
+          <details class="prompt-detail"><summary>Exact source prompt</summary><div>${escHtml(output.source_prompt || 'Unavailable')}</div></details>
+        </div>
+        <div class="review-actions">
+          <button class="include ${selection === 'included' ? 'active' : ''}" onclick="setOutputSelection('${output.output_id}','included')">Include</button>
+          <button class="exclude ${selection === 'excluded' ? 'active' : ''}" onclick="setOutputSelection('${output.output_id}','excluded')">Exclude</button>
+        </div>
+      </article>`;
+  }).join('');
+  updateSelectionSummary();
+}
+
+async function setOutputSelection(outputId, selection) {
+  try {
+    await api('PUT', `/rooms/${roomId}/output-selections/${outputId}`, {
+      disposition: selection.toUpperCase()
+    });
+    await loadState();
+  } catch (err) {
+    alert(`Selection was not saved: ${errorMessage(err)}`);
+  }
+}
+
+function updateSelectionSummary() {
+  const available = new Set(roomOutputs.map(o => o.output_id));
+  const included = [...outputSelections].filter(([id, state]) => available.has(id) && state === 'included').length;
+  const excluded = [...outputSelections].filter(([id, state]) => available.has(id) && state === 'excluded').length;
+  const reviewed = included + excluded;
+  document.getElementById('selection-summary').textContent = reviewed
+    ? `${included} included · ${excluded} excluded · ${roomOutputs.length - reviewed} unreviewed`
+    : 'No outputs selected';
+  const valid = roomOutputs.length >= 2 && reviewed === roomOutputs.length && included >= 2;
+  const synthesize = document.getElementById('synthesize-button');
+  synthesize.disabled = !valid;
+  synthesize.title = valid ? '' : 'Review every output and include at least two';
+}
+
+async function synthesizeDecisionBrief() {
+  const button = document.getElementById('synthesize-button');
+  button.disabled = true;
+  try {
+    await api('POST', `/rooms/${roomId}/syntheses/decision-brief`, {
+      title: 'Authentication migration decision'
+    });
+    await loadState();
+  } catch (err) {
+    alert(`Decision Brief was not published: ${errorMessage(err)}`);
+    updateSelectionSummary();
+  }
+}
+
+function metaDerivationLabel(record) {
+  if (record.review_status === 'CORRECTED') return 'human-corrected';
+  if (record.review_status === 'CONFIRMED') return 'human-confirmed';
+  return record.derivation_kind === 'AI_DERIVED' ? 'AI-derived' : 'system-materialized';
+}
+
+async function askMeta(preset = '') {
+  const input = document.getElementById('meta-question');
+  if (preset) input.value = preset;
+  const question = input.value.trim();
+  if (!question) return;
+  const answer = document.getElementById('meta-answer');
+  const evidence = document.getElementById('meta-evidence');
+  answer.className = 'meta-answer';
+  answer.textContent = 'Retrieving bounded room evidence…';
+  evidence.innerHTML = '';
+  try {
+    const result = await api('GET', `/rooms/${roomId}/meta?question=${encodeURIComponent(question)}&limit=10`);
+    const counts = result.retrieval_counts;
+    const freshness = result.freshness;
+    document.getElementById('meta-scope').innerHTML = `Scope <code>${escHtml(result.scope.room_id)}</code> · Decision Brief v${result.scope.version_number} · ` +
+      `cursor ${freshness.room_event_cursor} · ${counts.returned_claims}/${counts.available_claims} claims retrieved`;
+    answer.innerHTML = `<span class="ontology-badge ${result.decision.review_status.toLowerCase()}">${escHtml(metaDerivationLabel(result.decision))}</span> ` +
+      `${escHtml(result.summary)}<br><span class="ontology-meta">Confidence ${Number(result.decision.confidence).toFixed(2)} · freshness ${escHtml(freshness.decision_updated_at)}</span>`;
+    evidence.innerHTML = result.evidence_chains.map((chain, index) => {
+      const claim = chain.claim;
+      const source = chain.exact_source_evidence;
+      const decisionLink = chain.relationships.claim_to_decision;
+      const correction = claim.latest_review
+        ? `<br>Latest governance: ${escHtml(claim.latest_review.action)} by ${escHtml(claim.latest_review.reviewed_by)} · ${escHtml(claim.latest_review.reason || 'no reason supplied')}`
+        : '';
+      return `<article class="meta-chain">
+        <strong>Decision → Claim ${index + 1} → AgentOutput</strong><br>
+        <span class="ontology-badge ${claim.review_status.toLowerCase()}">${escHtml(metaDerivationLabel(claim))}</span>
+        ${escHtml(claim.label)}<br>
+        Confidence ${Number(claim.confidence).toFixed(2)} · output <code>${escHtml(source.output_id)}</code>${correction}<br>
+        Governed link: <span class="ontology-badge ${decisionLink.review_status.toLowerCase()}">${escHtml(decisionLink.kind)}</span>
+        confidence ${Number(decisionLink.confidence).toFixed(2)}
+        <details><summary>Exact provider/source evidence</summary><pre>${escHtml(JSON.stringify({
+          source_prompt: source.source_prompt,
+          provider_input: source.provider_input,
+          provider_name: source.provider_name,
+          provider_model: source.provider_model,
+          provider_response_id: source.provider_response_id,
+          provider_interventions: source.provider_interventions,
+          provider_evidence: source.provider_evidence,
+          evidence: source.evidence
+        }, null, 2))}</pre></details>
+      </article>`;
+    }).join('');
+  } catch (err) {
+    answer.className = 'meta-answer meta-error';
+    answer.textContent = errorMessage(err);
+  }
+}
+
+async function loadProvenance(versionId) {
+  const target = document.getElementById(`provenance-${versionId}`);
+  try {
+    const result = await api('GET', `/artifact-versions/${versionId}/provenance`);
+    target.innerHTML = result.claims.map(claim => `
+      <div class="detail"><strong>Claim ${claim.ordinal}</strong> · AI-derived<br>
+      Source <code>${escHtml(claim.output_id)}</code><br>${escHtml(claim.evidence)}</div>`).join('');
+  } catch (err) {
+    target.textContent = errorMessage(err);
+  }
+}
+
+function bytesToBase64Url(bytes) {
+  let binary = '';
+  bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function setLaunchNote(text, tone = '') {
+  const note = document.getElementById('launch-note');
+  note.textContent = text;
+  note.className = `launch-note${tone ? ` ${tone}` : ''}`;
+}
+
+function shortId(value) {
+  if (!value) return 'unknown';
+  return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
+}
+
+function errorMessage(err) {
+  const raw = err && err.message ? err.message : String(err || 'Unknown error');
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed.detail || raw;
+  } catch (_) {
+    return raw;
+  }
 }
 
 function logEvent(msg) {
@@ -397,7 +1060,7 @@ async function sendMessage() {
 
   try {
     await api('POST', `/rooms/${roomId}/messages`, {
-      content: text, role: 'HUMAN', sender_id: userId
+      content: text, role: 'HUMAN'
     });
   } catch(err) {
     console.error('Failed to send message:', err);
@@ -416,8 +1079,8 @@ async function rejectAction(approvalId) {
 }
 
 function escHtml(s) {
-  if (!s) return '';
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  if (s === undefined || s === null) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 </script>
 </body>

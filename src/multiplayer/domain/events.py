@@ -18,6 +18,7 @@ class EventType(StrEnum):
 
     # Member events
     USER_JOINED_ROOM = "user.joined_room"
+    USER_INVITED_ROOM = "user.invited_room"
     USER_LEFT_ROOM = "user.left_room"
     AGENT_JOINED_ROOM = "agent.joined_room"
     AGENT_LEFT_ROOM = "agent.left_room"
@@ -51,10 +52,22 @@ class EventType(StrEnum):
     EXECUTION_PAUSED = "execution.paused"
     EXECUTION_CANCELLED = "execution.cancelled"
 
+    # Canonical agent run/output events used by reconnect and provenance.
+    AGENT_RUN_STARTED = "agent.run.started"
+    AGENT_OUTPUT_CREATED = "agent.output.created"
+    AGENT_RUN_COMPLETED = "agent.run.completed"
+    OUTPUT_SELECTION_UPDATED = "output.selection.updated"
+
     # Artifacts
     ARTIFACT_CREATED = "artifact.created"
     ARTIFACT_UPDATED = "artifact.updated"
     ARTIFACT_VERSION_CREATED = "artifact.version_created"
+    DECISION_BRIEF_SYNTHESIZED = "artifact.decision_brief_synthesized"
+
+    # Evidence-backed ontology projection and human governance.
+    ONTOLOGY_MATERIALIZED = "ontology.materialized"
+    ONTOLOGY_ASSERTION_CONFIRMED = "ontology.assertion_confirmed"
+    ONTOLOGY_ASSERTION_CORRECTED = "ontology.assertion_corrected"
 
     # Decisions
     DECISION_CREATED = "decision.created"

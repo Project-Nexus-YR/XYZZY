@@ -8,9 +8,13 @@ from multiplayer.server import create_app
 
 @pytest.fixture
 async def client():
-    app = create_app(":memory:")
+    app = create_app(":memory:", auth_tokens={"owner-token": "user_1"})
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": "Bearer owner-token"},
+    ) as c:
         # Wait for lifespan startup
         async with app.router.lifespan_context(app):
             yield c
@@ -32,14 +36,16 @@ async def test_full_api_workflow(client):
     assert org["name"] == "Acme"
 
     # Create workspace
-    r = await client.post(f"/api/v1/organizations/{org['org_id']}/workspaces",
-                          json={"name": "Main", "slug": "main"})
+    r = await client.post(
+        f"/api/v1/organizations/{org['org_id']}/workspaces", json={"name": "Main", "slug": "main"}
+    )
     assert r.status_code == 200
     ws = r.json()
 
     # Create room
-    r = await client.post(f"/api/v1/workspaces/{ws['workspace_id']}/rooms",
-                          json={"name": "Auth Migration"})
+    r = await client.post(
+        f"/api/v1/workspaces/{ws['workspace_id']}/rooms", json={"name": "Auth Migration"}
+    )
     assert r.status_code == 200
     room = r.json()
 
@@ -49,7 +55,7 @@ async def test_full_api_workflow(client):
     assert r.json()["name"] == "Auth Migration"
 
     # Join room
-    r = await client.post(f"/api/v1/rooms/{room['room_id']}/join?user_id=user_1")
+    r = await client.post(f"/api/v1/rooms/{room['room_id']}/join")
     assert r.status_code == 200
 
     # List agents templates
@@ -59,8 +65,10 @@ async def test_full_api_workflow(client):
     assert len(templates) >= 4
 
     # Spawn agent
-    r = await client.post(f"/api/v1/rooms/{room['room_id']}/agents",
-                          json={"template_id": templates[0]["template_id"], "name": "Forge"})
+    r = await client.post(
+        f"/api/v1/rooms/{room['room_id']}/agents",
+        json={"template_id": templates[0]["template_id"], "name": "Forge"},
+    )
     assert r.status_code == 200
     agent = r.json()
     assert agent["name"] == "Forge"
@@ -76,9 +84,18 @@ async def test_full_api_workflow(client):
     execution = r.json()
 
     # Execute step
-    r = await client.post(f"/api/v1/executions/{execution['execution_id']}/step",
-                          json={"prompt": "Analyze the codebase"})
+    r = await client.post(
+        f"/api/v1/executions/{execution['execution_id']}/step",
+        json={"prompt": "Analyze the codebase"},
+    )
     assert r.status_code == 200
+    output_id = r.json()["output_id"]
+
+    # Inspect the immutable output independently of the execution response.
+    r = await client.get(f"/api/v1/rooms/{room['room_id']}/outputs")
+    assert r.status_code == 200
+    assert r.json()[0]["output_id"] == output_id
+    assert r.json()[0]["source_prompt"] == "Analyze the codebase"
 
     # Pause
     r = await client.post(f"/api/v1/executions/{execution['execution_id']}/pause")
@@ -93,14 +110,16 @@ async def test_full_api_workflow(client):
     assert r.status_code == 200
 
     # Create task
-    r = await client.post(f"/api/v1/rooms/{room['room_id']}/tasks",
-                          json={"title": "Build auth", "priority": "HIGH"})
+    r = await client.post(
+        f"/api/v1/rooms/{room['room_id']}/tasks", json={"title": "Build auth", "priority": "HIGH"}
+    )
     assert r.status_code == 200
     task = r.json()
 
     # Assign task
-    r = await client.post(f"/api/v1/tasks/{task['task_id']}/assign",
-                          json={"agent_id": agent["agent_id"]})
+    r = await client.post(
+        f"/api/v1/tasks/{task['task_id']}/assign", json={"agent_id": agent["agent_id"]}
+    )
     assert r.status_code == 200
 
     # Complete task
@@ -108,8 +127,9 @@ async def test_full_api_workflow(client):
     assert r.status_code == 200
 
     # Send message
-    r = await client.post(f"/api/v1/rooms/{room['room_id']}/messages",
-                          json={"content": "Hello!", "role": "HUMAN"})
+    r = await client.post(
+        f"/api/v1/rooms/{room['room_id']}/messages", json={"content": "Hello!", "role": "HUMAN"}
+    )
     assert r.status_code == 200
     msg = r.json()
     assert msg["content"] == "Hello!"
@@ -120,9 +140,10 @@ async def test_full_api_workflow(client):
     assert len(r.json()) >= 1
 
     # Create artifact
-    r = await client.post(f"/api/v1/rooms/{room['room_id']}/artifacts",
-                          json={"name": "design.md", "artifact_type": "DOCUMENT",
-                                "content": "# Design"})
+    r = await client.post(
+        f"/api/v1/rooms/{room['room_id']}/artifacts",
+        json={"name": "design.md", "artifact_type": "DOCUMENT", "content": "# Design"},
+    )
     assert r.status_code == 200
     art = r.json()
 
@@ -132,13 +153,16 @@ async def test_full_api_workflow(client):
     assert len(r.json()) == 1
 
     # Update artifact
-    r = await client.post(f"/api/v1/artifacts/{art['artifact_id']}/versions",
-                          json={"content": "# Design v2"})
+    r = await client.post(
+        f"/api/v1/artifacts/{art['artifact_id']}/versions", json={"content": "# Design v2"}
+    )
     assert r.status_code == 200
 
     # Create decision
-    r = await client.post(f"/api/v1/rooms/{room['room_id']}/decisions",
-                          json={"title": "Use OAuth2", "content": "Industry standard"})
+    r = await client.post(
+        f"/api/v1/rooms/{room['room_id']}/decisions",
+        json={"title": "Use OAuth2", "content": "Industry standard"},
+    )
     assert r.status_code == 200
 
     # List decisions
@@ -147,8 +171,10 @@ async def test_full_api_workflow(client):
     assert len(r.json()) == 1
 
     # Create memory
-    r = await client.post(f"/api/v1/rooms/{room['room_id']}/memories",
-                          json={"content": "OAuth2 decided", "scope": "ROOM"})
+    r = await client.post(
+        f"/api/v1/rooms/{room['room_id']}/memories",
+        json={"content": "OAuth2 decided", "scope": "ROOM"},
+    )
     assert r.status_code == 200
 
     # List memories
@@ -172,13 +198,13 @@ async def test_full_api_workflow(client):
     assert "messages" in state
 
     # Interrupt agent
-    r = await client.post(f"/api/v1/agents/{agent['agent_id']}/interrupt",
-                          json={"reason": "Stop"})
+    r = await client.post(f"/api/v1/agents/{agent['agent_id']}/interrupt", json={"reason": "Stop"})
     assert r.status_code == 200
 
     # Redirect agent
-    r = await client.post(f"/api/v1/agents/{agent['agent_id']}/redirect",
-                          json={"instruction": "Use Redis"})
+    r = await client.post(
+        f"/api/v1/agents/{agent['agent_id']}/redirect", json={"instruction": "Use Redis"}
+    )
     assert r.status_code == 200
 
     # List rooms

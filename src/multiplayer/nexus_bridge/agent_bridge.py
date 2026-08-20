@@ -5,18 +5,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 from ..domain.models import (
     AgentInstance,
-    AgentStatus,
     DomainError,
     Execution,
     Session,
     new_id,
 )
+from ..model_providers import ModelProviderError, model_provider_from_environment
 
 log = logging.getLogger(__name__)
 
@@ -26,30 +27,38 @@ if _nexus_src not in sys.path:
     sys.path.insert(0, _nexus_src)
 
 try:
-    from nexus_runtime.agent import AgentExecutor
-    from nexus_runtime.contracts import MemoryProvider, ModelProvider
-    from nexus_runtime.events import InMemoryEventBus
-    from nexus_runtime.models import Agent, AgentRunState, Budget
-    from nexus_runtime.models import DomainError as NexusDomainError
-    from nexus_runtime.persistence import SQLiteStateStore
-    from nexus_runtime.policy import PolicyEngine
-    from nexus_runtime.tools import ToolRegistry
+    from nexus_runtime.agent import AgentExecutor  # type: ignore[import-not-found]
+    from nexus_runtime.contracts import (  # type: ignore[import-not-found]
+        MemoryProvider,
+        ModelProvider,
+    )
+    from nexus_runtime.events import InMemoryEventBus  # type: ignore[import-not-found]
+    from nexus_runtime.models import (  # type: ignore[import-not-found]
+        Agent,
+        AgentRunState,
+        Budget,
+    )
+    from nexus_runtime.models import (
+        DomainError as NexusDomainError,
+    )
+    from nexus_runtime.persistence import SQLiteStateStore  # type: ignore[import-not-found]
+    from nexus_runtime.policy import PolicyEngine  # type: ignore[import-not-found]
+    from nexus_runtime.tools import ToolRegistry  # type: ignore[import-not-found]
+
     _HAS_NEXUS = True
 except ImportError:
-    log.warning("NEXUS runtime not available; agent execution will be stub-only")
+    log.warning("NEXUS runtime not available; using bridge-native model execution")
     _HAS_NEXUS = False
-    NexusDomainError = Exception  # type: ignore
+    NexusDomainError = Exception
 
 
-class StubModelProvider:
-    """Placeholder model provider. Replace with real LLM integration."""
-
-    def complete(self, prompt: str, response_schema: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "action": "finish",
-            "output": {"result": "stub response"},
-            "token_usage": 100,
-        }
+@dataclass(frozen=True, slots=True)
+class _SpecialistContext:
+    name: str
+    role: str
+    instructions: str
+    provider_name: str
+    provider_model: str
 
 
 class StubMemoryProvider:
@@ -80,7 +89,7 @@ class NexusAgentBridge:
         memory_provider: MemoryProvider | None = None,
         db_path: str | Path = ":memory:",
     ) -> None:
-        self._model = model_provider or StubModelProvider()
+        self._model = model_provider or model_provider_from_environment()
         self._memory = memory_provider or StubMemoryProvider()
         self._lock = asyncio.Lock()
 
@@ -102,9 +111,14 @@ class NexusAgentBridge:
         self._agent_executions: dict[str, str] = {}  # agent_id -> execution_id
         self._cancellation_flags: dict[str, bool] = {}
         self._interventions: dict[str, list[str]] = {}  # run_id -> list of interventions
+        self._pending_execution_interventions: dict[str, list[str]] = {}
+        self._fallback_states: dict[str, str] = {}
+        self._specialist_contexts: dict[str, _SpecialistContext] = {}
 
     def create_nexus_agent(self, agent_instance: AgentInstance) -> Agent:
         """Convert a multiplayer AgentInstance to a NEXUS Agent."""
+        if not _HAS_NEXUS:
+            return agent_instance
         return Agent(
             name=agent_instance.name,
             role=agent_instance.role,
@@ -122,6 +136,25 @@ class NexusAgentBridge:
     ) -> tuple[Agent, Budget]:
         """Create a NEXUS agent run for a multiplayer execution."""
         nexus_agent = self.create_nexus_agent(agent_instance)
+        specialist_context = _SpecialistContext(
+            name=agent_instance.name,
+            role=agent_instance.role,
+            instructions=agent_instance.system_prompt,
+            provider_name=agent_instance.model_provider,
+            provider_model=agent_instance.model_name,
+        )
+        if not _HAS_NEXUS:
+            run_id = f"run_{execution.execution_id}"
+            async with self._lock:
+                self._active_runs[execution.execution_id] = run_id
+                self._run_executions[run_id] = execution.execution_id
+                self._agent_executions[agent_instance.agent_id] = execution.execution_id
+                self._fallback_states[run_id] = "CREATED"
+                self._specialist_contexts[execution.execution_id] = specialist_context
+                pending = self._pending_execution_interventions.pop(execution.execution_id, [])
+                if pending:
+                    self._interventions.setdefault(run_id, []).extend(pending)
+            return nexus_agent, None
         budget = Budget(
             max_tokens=100_000,
             max_wall_time=timedelta(minutes=30),
@@ -140,6 +173,10 @@ class NexusAgentBridge:
             self._active_runs[execution.execution_id] = run.run_id
             self._run_executions[run.run_id] = execution.execution_id
             self._agent_executions[agent_instance.agent_id] = execution.execution_id
+            self._specialist_contexts[execution.execution_id] = specialist_context
+            pending = self._pending_execution_interventions.pop(execution.execution_id, [])
+            if pending:
+                self._interventions.setdefault(run.run_id, []).extend(pending)
         return nexus_agent, budget
 
     async def execute_step(
@@ -179,6 +216,60 @@ class NexusAgentBridge:
             intervention_text = "\n".join(f"- HUMAN INTERVENTION: {i}" for i in interventions)
             prompt = f"{prompt}\n\n{intervention_text}\n\nPlease incorporate these instructions."
 
+        context = self._specialist_contexts.get(execution_id)
+        provider_prompt = self._build_specialist_prompt(prompt, context)
+
+        if not _HAS_NEXUS:
+            try:
+                async_complete = getattr(self._model, "acomplete", None)
+                if callable(async_complete):
+                    response = await async_complete(provider_prompt, schema)
+                else:
+                    response = await asyncio.to_thread(
+                        self._model.complete, provider_prompt, schema
+                    )
+            except ModelProviderError as exc:
+                async with self._lock:
+                    self._fallback_states[run_id] = "FAILED"
+                return {"status": "error", "error": str(exc)}
+            except Exception as exc:
+                log.error(
+                    "Unexpected model provider failure for execution %s (%s)",
+                    execution_id,
+                    type(exc).__name__,
+                )
+                async with self._lock:
+                    self._fallback_states[run_id] = "FAILED"
+                return {"status": "error", "error": "internal model provider error"}
+            if not isinstance(response, dict):
+                async with self._lock:
+                    self._fallback_states[run_id] = "FAILED"
+                return {"status": "error", "error": "model provider returned invalid data"}
+            action = str(response.get("action", "finish"))
+            raw_output = response.get("output", {})
+            output = dict(raw_output) if isinstance(raw_output, dict) else {"content": raw_output}
+            if context:
+                output.update(
+                    {
+                        "agent_name": context.name,
+                        "analysis_role": context.role,
+                    }
+                )
+            async with self._lock:
+                self._fallback_states[run_id] = "COMPLETED" if action == "finish" else "RUNNING"
+            return {
+                "status": "ok",
+                "result": output,
+                "action": action,
+                "provenance": self._provider_provenance(
+                    response=response,
+                    output=output,
+                    provider_input=provider_prompt,
+                    interventions=interventions,
+                    context=context,
+                ),
+            }
+
         run = self._executor.get_run(run_id)
 
         # Start if created
@@ -187,18 +278,79 @@ class NexusAgentBridge:
 
         # Execute one step
         try:
-            response = self._executor.reason(run_id, prompt, schema)
+            response = self._executor.reason(run_id, provider_prompt, schema)
             action = self._executor.choose_action(run_id, response)
             result = self._executor.execute_action(run_id, action)
             self._executor.update_state(run_id)
-            return {"status": "ok", "result": result, "action": action.get("action")}
+            result_data = result if isinstance(result, dict) else {"result": result}
+            return {
+                "status": "ok",
+                "result": result,
+                "action": action.get("action"),
+                "provenance": self._provider_provenance(
+                    response={},
+                    output=result_data,
+                    provider_input=provider_prompt,
+                    interventions=interventions,
+                    context=context,
+                ),
+            }
+        except ModelProviderError as e:
+            return {"status": "error", "error": str(e)}
         except DomainError as e:
             return {"status": "error", "error": str(e)}
         except NexusDomainError as e:
             return {"status": "error", "error": str(e)}
-        except Exception as e:
-            log.exception("Unexpected error in agent execution step")
-            return {"status": "error", "error": f"internal error: {e}"}
+        except Exception as exc:
+            log.error("Unexpected agent execution failure (%s)", type(exc).__name__)
+            return {"status": "error", "error": "internal agent execution error"}
+
+    @staticmethod
+    def _build_specialist_prompt(prompt: str, context: _SpecialistContext | None) -> str:
+        """Send only the requested task and this specialist's configured context."""
+        if context is None:
+            return prompt
+        instructions = context.instructions.strip() or "Analyze from your assigned role."
+        return (
+            "You are one specialist in a governed technical decision workflow.\n"
+            f"Specialist name: {context.name}\n"
+            f"Specialist role: {context.role}\n"
+            f"Template instructions: {instructions}\n\n"
+            "Work independently from the supplied decision prompt. Clearly distinguish known facts "
+            "from AI-derived judgment. Give a recommendation, supporting reasons, material risks, "
+            "uncertainties, and the next validation step. Do not claim access to context that is "
+            "not included below.\n\n"
+            f"Decision prompt:\n{prompt}"
+        )
+
+    @staticmethod
+    def _provider_provenance(
+        *,
+        response: dict[str, Any],
+        output: dict[str, Any],
+        provider_input: str,
+        interventions: list[str],
+        context: _SpecialistContext | None,
+    ) -> dict[str, Any]:
+        """Capture only request/response evidence, never provider credentials."""
+        evidence = response.get("provider_evidence")
+        if not isinstance(evidence, str):
+            content = output.get("content")
+            evidence = content if isinstance(content, str) else ""
+        provider_name = response.get("provider_name") or output.get("provider")
+        provider_model = response.get("provider_model") or output.get("model")
+        return {
+            "provider_input": provider_input,
+            "provider_name": str(
+                provider_name or (context.provider_name if context is not None else "")
+            ),
+            "provider_model": str(
+                provider_model or (context.provider_model if context is not None else "")
+            ),
+            "provider_response_id": str(response.get("provider_response_id") or ""),
+            "interventions": list(interventions),
+            "provider_evidence": evidence,
+        }
 
     async def request_cancellation(self, run_id: str) -> None:
         async with self._lock:
@@ -210,11 +362,22 @@ class NexusAgentBridge:
                 self._interventions[run_id] = []
             self._interventions[run_id].append(instruction)
 
+    async def add_execution_intervention(self, execution_id: str, instruction: str) -> None:
+        """Queue an intervention even when the provider run has not been created yet."""
+        async with self._lock:
+            run_id = self._active_runs.get(execution_id)
+            if run_id is not None:
+                self._interventions.setdefault(run_id, []).append(instruction)
+                return
+            self._pending_execution_interventions.setdefault(execution_id, []).append(instruction)
+
     async def get_run_state(self, execution_id: str) -> AgentRunState | None:
         async with self._lock:
             run_id = self._active_runs.get(execution_id)
         if not run_id:
             return None
+        if not _HAS_NEXUS:
+            return self._fallback_states.get(run_id)
         run = self._executor.get_run(run_id)
         return run.state
 
@@ -223,6 +386,10 @@ class NexusAgentBridge:
             run_id = self._active_runs.get(execution_id)
         if not run_id:
             return False
+        if not _HAS_NEXUS:
+            async with self._lock:
+                self._fallback_states[run_id] = "PAUSED"
+            return True
         try:
             self._executor.transition(run_id, AgentRunState.PAUSED, "human requested pause")
             return True
@@ -234,6 +401,10 @@ class NexusAgentBridge:
             run_id = self._active_runs.get(execution_id)
         if not run_id:
             return False
+        if not _HAS_NEXUS:
+            async with self._lock:
+                self._fallback_states[run_id] = "RUNNING"
+            return True
         try:
             self._executor.transition(run_id, AgentRunState.RUNNING, "human requested resume")
             return True
@@ -246,6 +417,9 @@ class NexusAgentBridge:
             if not run_id:
                 return False
             self._cancellation_flags[run_id] = True
+            if not _HAS_NEXUS:
+                self._fallback_states[run_id] = "CANCELLED"
+                return True
         try:
             self._executor.transition(run_id, AgentRunState.CANCELLED, "human requested cancel")
             return True
@@ -288,7 +462,7 @@ class NexusAgentBridge:
             task=task,
             budget=child_budget,
         )
-        return child.run_id
+        return str(child.run_id)
 
     async def checkpoint(self, execution_id: str) -> None:
         async with self._lock:
@@ -302,7 +476,8 @@ class NexusAgentBridge:
         if not run_id:
             return {}
         run = self._executor.get_run(run_id)
-        return run.outputs
+        outputs = run.outputs
+        return dict(outputs) if isinstance(outputs, dict) else {}
 
     async def cleanup_execution(self, execution_id: str) -> None:
         """Remove tracking state for a completed/failed execution."""
@@ -312,6 +487,8 @@ class NexusAgentBridge:
                 self._run_executions.pop(run_id, None)
                 self._cancellation_flags.pop(run_id, None)
                 self._interventions.pop(run_id, None)
+            self._pending_execution_interventions.pop(execution_id, None)
+            self._specialist_contexts.pop(execution_id, None)
             # Remove from agent_executions
             agent_to_remove = None
             for aid, eid in self._agent_executions.items():

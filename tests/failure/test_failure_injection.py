@@ -1,13 +1,11 @@
 """Failure injection tests: verify graceful handling of errors."""
 
-import asyncio
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+
 from multiplayer.db.connection import Database
-from multiplayer.services.service import MultiplayerService
-from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.domain.models import DomainError, MessageRole
-from multiplayer.domain.events import EventType
+from multiplayer.realtime.hub import RealtimeHub
+from multiplayer.services.service import MultiplayerService
 
 
 @pytest.fixture
@@ -30,8 +28,10 @@ async def test_broadcast_failure_does_not_rollback_event(service):
 
     # Make broadcast fail
     original_broadcast = service.hub.broadcast_room_event
+
     async def failing_broadcast(event):
         raise RuntimeError("broadcast exploded")
+
     service.hub.broadcast_room_event = failing_broadcast
 
     # This should succeed even though broadcast fails
@@ -120,15 +120,21 @@ async def test_id_too_long_rejected(service):
 
 @pytest.mark.asyncio
 async def test_nexus_bridge_stub_step():
-    """StubModelProvider should return finish action."""
+    """Credential-free mode must be conspicuously labelled as simulated."""
+    from multiplayer.domain.models import AgentInstance, Execution, Session
     from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
-    from multiplayer.domain.models import AgentInstance, Session, Execution, AgentStatus
 
     bridge = NexusAgentBridge()
     agent = AgentInstance(
-        agent_id="a1", template_id="t1", room_id="r1",
-        name="Test", role="Coder", system_prompt="test",
-        capabilities=frozenset(), model_provider="", model_name="",
+        agent_id="a1",
+        template_id="t1",
+        room_id="r1",
+        name="Test",
+        role="Coder",
+        system_prompt="test",
+        capabilities=frozenset(),
+        model_provider="",
+        model_name="",
     )
     session = Session(session_id="s1", room_id="r1", agent_id="a1")
     execution = Execution(execution_id="e1", session_id="s1", agent_id="a1")
@@ -138,6 +144,9 @@ async def test_nexus_bridge_stub_step():
 
     assert result["status"] == "ok"
     assert result["action"] == "finish"
+    assert result["result"]["simulated"] is True
+    assert "SIMULATED WORKFLOW OUTPUT" in result["result"]["content"]
+    assert "stub response" not in result["result"]["content"]
 
 
 @pytest.mark.asyncio
@@ -153,6 +162,7 @@ async def test_nexus_bridge_execute_step_unknown_execution():
 @pytest.mark.asyncio
 async def test_nexus_bridge_pause_unknown_returns_false():
     from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
+
     bridge = NexusAgentBridge()
     assert await bridge.pause_execution("unknown") is False
     assert await bridge.resume_execution("unknown") is False

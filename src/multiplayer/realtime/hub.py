@@ -115,6 +115,7 @@ class RealtimeHub:
         """Get subscription IDs for a specific user in a specific room."""
         async with self._lock:
             return [
-                sid for sid, sub in self._subscriptions.items()
+                sid
+                for sid, sub in self._subscriptions.items()
                 if sub.user_id == user_id and sub.room_id == room_id
             ]

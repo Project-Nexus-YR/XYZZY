@@ -1,15 +1,16 @@
 """Scope isolation tests: ensure rooms/workspaces don't leak state."""
 
 import pytest
+
 from multiplayer.db.connection import Database
-from multiplayer.services.service import MultiplayerService
 from multiplayer.domain.models import (
-    DomainError,
-    MessageRole,
     ArtifactType,
+    DomainError,
     MemoryScope,
+    MessageRole,
 )
 from multiplayer.realtime.hub import RealtimeHub
+from multiplayer.services.service import MultiplayerService
 
 
 @pytest.fixture
@@ -69,8 +70,12 @@ async def test_artifacts_isolated_to_room(service):
     room_a = await service.create_room(ws.workspace_id, "A", "u1")
     room_b = await service.create_room(ws.workspace_id, "B", "u1")
 
-    await service.create_artifact(room_a.room_id, "doc_a.md", ArtifactType.DOCUMENT, "A doc", "u1", "content a")
-    await service.create_artifact(room_b.room_id, "doc_b.md", ArtifactType.DOCUMENT, "B doc", "u1", "content b")
+    await service.create_artifact(
+        room_a.room_id, "doc_a.md", ArtifactType.DOCUMENT, "A doc", "u1", "content a"
+    )
+    await service.create_artifact(
+        room_b.room_id, "doc_b.md", ArtifactType.DOCUMENT, "B doc", "u1", "content b"
+    )
 
     arts_a = await service.list_room_artifacts(room_a.room_id)
     arts_b = await service.list_room_artifacts(room_b.room_id)
@@ -124,8 +129,12 @@ async def test_memories_isolated_to_room(service):
     room_a = await service.create_room(ws.workspace_id, "A", "u1")
     room_b = await service.create_room(ws.workspace_id, "B", "u1")
 
-    await service.create_memory(room_a.room_id, None, None, MemoryScope.ROOM, "Memory A", "fact", "u1")
-    await service.create_memory(room_b.room_id, None, None, MemoryScope.ROOM, "Memory B", "fact", "u1")
+    await service.create_memory(
+        room_a.room_id, None, None, MemoryScope.ROOM, "Memory A", "fact", "u1"
+    )
+    await service.create_memory(
+        room_b.room_id, None, None, MemoryScope.ROOM, "Memory B", "fact", "u1"
+    )
 
     mems_a = await service.list_room_memories(room_a.room_id)
     mems_b = await service.list_room_memories(room_b.room_id)

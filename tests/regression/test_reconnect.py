@@ -1,16 +1,17 @@
 """Reconnect correctness tests: verify state reconstruction."""
 
 import pytest
+
 from multiplayer.db.connection import Database
-from multiplayer.services.service import MultiplayerService
 from multiplayer.domain.models import (
-    MessageRole,
+    AgentStatus,
     ArtifactType,
     MemoryScope,
-    AgentStatus,
+    MessageRole,
     TaskStatus,
 )
 from multiplayer.realtime.hub import RealtimeHub
+from multiplayer.services.service import MultiplayerService
 
 
 @pytest.fixture
@@ -34,7 +35,7 @@ async def test_full_room_state_after_activities(service):
 
     # Build up state
     await service.send_message(room.room_id, MessageRole.HUMAN, "u1", "Hello")
-    agent = await service.spawn_agent(room.room_id, templates[0].template_id, "Coder")
+    await service.spawn_agent(room.room_id, templates[0].template_id, "Coder")
     await service.create_task(room.room_id, "Build API", "REST endpoints")
     await service.create_artifact(
         room.room_id, "api.md", ArtifactType.DOCUMENT, "API doc", "u1", "# API"

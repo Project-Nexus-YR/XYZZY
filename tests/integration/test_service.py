@@ -75,8 +75,9 @@ async def test_full_workflow(service):
     # Delegate task
     templates2 = await service.list_agent_templates()
     security = await service.spawn_agent(room.room_id, templates2[3].template_id)
-    child = await service.delegate_task(task.task_id, architect.agent_id, security.agent_id,
-                                         "Security review")
+    child = await service.delegate_task(
+        task.task_id, architect.agent_id, security.agent_id, "Security review"
+    )
     assert child.parent_task_id == task.task_id
 
     # Complete task
@@ -88,8 +89,14 @@ async def test_full_workflow(service):
     assert msg.content == "Looks good!"
 
     # Create artifact
-    art = await service.create_artifact(room.room_id, "auth_design.md", ArtifactType.DOCUMENT,
-                                         "Auth design doc", "u1", "# Auth Design\n\nOAuth2 flow")
+    art = await service.create_artifact(
+        room.room_id,
+        "auth_design.md",
+        ArtifactType.DOCUMENT,
+        "Auth design doc",
+        "u1",
+        "# Auth Design\n\nOAuth2 flow",
+    )
     assert art.current_version == 1
 
     # Update artifact
@@ -101,13 +108,15 @@ async def test_full_workflow(service):
     assert dec.title == "Use OAuth2"
 
     # Create memory
-    mem = await service.create_memory(room.room_id, None, None, MemoryScope.ROOM,
-                                       "We decided OAuth2 is the way", "decision", "u1")
+    mem = await service.create_memory(
+        room.room_id, None, None, MemoryScope.ROOM, "We decided OAuth2 is the way", "decision", "u1"
+    )
     assert mem.memory_type == "decision"
 
     # Request approval
-    approval = await service.request_approval(room.room_id, execution.execution_id,
-                                               architect.agent_id, "Deploy to production")
+    approval = await service.request_approval(
+        room.room_id, execution.execution_id, architect.agent_id, "Deploy to production"
+    )
     assert approval.status.value == "PENDING"
 
     # Approve
@@ -153,7 +162,9 @@ async def test_room_state_reconnect(service):
 
 @pytest.mark.asyncio
 async def test_notification(service):
-    notif = await service.create_notification("u1", "Task Complete", "Auth is done", notification_type="info")
+    await service.create_notification(
+        "u1", "Task Complete", "Auth is done", notification_type="info"
+    )
     notifs = await service.list_notifications("u1")
     assert len(notifs) == 1
     assert notifs[0].title == "Task Complete"
