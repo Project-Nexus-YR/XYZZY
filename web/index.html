@@ -164,6 +164,9 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
 @media(max-width:1180px){.main{grid-template-columns:48px 200px minmax(380px,1fr) 330px}}
 @media(max-width:960px){.main{grid-template-columns:48px 200px minmax(0,1fr)!important}.right-panel{display:flex!important;position:fixed;z-index:50;right:0;top:0;bottom:0;width:min(380px,92vw);transform:translateX(105%);transition:transform .18s cubic-bezier(.16,1,.3,1);box-shadow:0 16px 42px oklch(20% .01 55/.16)}.right-panel.open{transform:translateX(0)}}
 @media(max-width:700px){#setup-screen{display:flex;padding:20px}.setup-intro{display:none}.main{grid-template-columns:minmax(0,1fr)!important}.workspace-rail{display:none}.sidebar{display:flex!important;position:fixed;z-index:60;left:0;top:0;bottom:0;width:min(260px,88vw);transform:translateX(-105%);transition:transform .18s cubic-bezier(.16,1,.3,1);box-shadow:0 16px 42px oklch(20% .01 55/.16)}.sidebar.open{transform:translateX(0)}.center{min-width:0}.mobile-nav{display:grid!important}.messages{padding-inline:14px}.input-bar{padding-inline:10px}.turn-lock{margin-inline:10px}.template-grid{grid-template-columns:1fr}.strategy-toggle{grid-template-columns:1fr}.studio-footer{align-items:flex-start;flex-direction:column}.studio-footer .btn-primary{width:100%}}
+.member-row{display:flex;align-items:center;gap:8px}.member-row>div{flex:1;min-width:0}
+.member-row select,.invite-form input,.invite-form select{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:5px 8px;color:var(--text);font-size:11px;min-width:0}
+.invite-form{display:flex;gap:6px;margin:10px 0 6px}.invite-form input{flex:1}
 </style>
 </head>
 <body>
@@ -318,6 +321,7 @@ let currentBranchMode = '';
 let currentTurnLock = null;
 let roomOntology = {entities: [], relationships: [], reviews: []};
 let currentRoomRole = 'viewer';
+let myRooms = [];
 let roomBranches = [];
 let roomRuns = [];
 const outputSelections = new Map();
@@ -418,6 +422,90 @@ function rememberRoomId(value) {
   catch (_) { /* Private browsing can disable storage; server discovery still reconnects. */ }
 }
 
+function renderRoomsList() {
+  const list = document.getElementById('rooms-list');
+  if (!myRooms.length) {
+    list.innerHTML = '<div class="nav-item"><span class="nav-icon">#</span><span class="nav-name">No channels</span></div>';
+    return;
+  }
+  list.innerHTML = myRooms.map(room => `
+    <button class="nav-item${room.room_id === roomId ? ' active' : ''}" data-room-id="${escHtml(room.room_id)}" onclick="switchRoom(this.dataset.roomId)"><span class="nav-icon">#</span><span class="nav-name">${escHtml(room.name)}</span></button>
+  `).join('');
+}
+
+async function refreshRooms() {
+  const context = await api('GET', '/me/context');
+  myRooms = context.rooms;
+  renderRoomsList();
+}
+
+async function switchRoom(targetRoomId) {
+  const room = myRooms.find(item => item.room_id === targetRoomId);
+  if (!room || targetRoomId === roomId) return;
+  roomId = room.room_id;
+  workspaceId = room.workspace_id;
+  rememberRoomId(roomId);
+  currentBranchId = '';
+  lastSequence = 0;
+  document.getElementById('sidebar').classList.remove('open');
+  renderRoomsList();
+  if (ws) ws.close();
+  connectWS();
+  try { await loadState(); }
+  catch (err) { toast(`Could not open #${room.name}: ${errorMessage(err)}`, 'error'); }
+}
+
+function handleAccessRevoked() {
+  const removedRoom = myRooms.find(item => item.room_id === roomId);
+  const removedName = removedRoom ? removedRoom.name : 'this channel';
+  myRooms = myRooms.filter(item => item.room_id !== roomId);
+  toast(`You were removed from #${removedName}.`, 'error');
+  document.getElementById('ws-status').textContent = 'Removed';
+  document.getElementById('ws-status').classList.remove('connected');
+  if (myRooms.length) {
+    roomId = '';
+    switchRoom(myRooms[0].room_id);
+    return;
+  }
+  ws = null;
+  rememberRoomId('');
+  renderRoomsList();
+  document.getElementById('messages').innerHTML = '';
+  appendSystemMessage(`You no longer have access to #${removedName}. Ask an admin for a new invitation.`);
+  document.getElementById('msg-input').disabled = true;
+  document.getElementById('send-message-button').disabled = true;
+}
+
+async function inviteMember(event) {
+  event.preventDefault();
+  const input = document.getElementById('invite-user-id');
+  const invitedUserId = input.value.trim();
+  const role = document.getElementById('invite-role').value;
+  if (!invitedUserId) return;
+  try {
+    await api('POST', `/rooms/${roomId}/members/invitations`, {user_id: invitedUserId, role});
+    input.value = '';
+    toast(`Invited ${invitedUserId} as ${role}.`);
+    await loadState();
+  } catch (err) { toast(`Could not invite ${invitedUserId}: ${errorMessage(err)}`, 'error'); }
+}
+
+async function changeMemberRole(memberUserId, role) {
+  try {
+    await api('PATCH', `/rooms/${roomId}/members/${encodeURIComponent(memberUserId)}`, {role});
+    toast(`${memberUserId} is now ${role}.`);
+  } catch (err) { toast(`Could not change access for ${memberUserId}: ${errorMessage(err)}`, 'error'); }
+  await loadState();
+}
+
+async function removeMember(memberUserId) {
+  try {
+    await api('DELETE', `/rooms/${roomId}/members/${encodeURIComponent(memberUserId)}`);
+    toast(`Removed ${memberUserId} from the channel.`);
+    await loadState();
+  } catch (err) { toast(`Could not remove ${memberUserId}: ${errorMessage(err)}`, 'error'); }
+}
+
 async function setup() {
   userName = document.getElementById('setup-name').value.trim();
   accessToken = document.getElementById('setup-token').value;
@@ -433,6 +521,7 @@ async function setup() {
     // writes. Only the non-secret active room ID is stored in the browser.
     const context = await api('GET', '/me/context');
     userId = context.user_id;
+    myRooms = context.rooms;
     const savedRoomId = storedRoomId();
     const roomsNamedForDecision = context.rooms.filter(room => room.name === roomName);
     const room = context.rooms.find(item => item.room_id === savedRoomId)
@@ -476,14 +565,18 @@ async function setup() {
 let wsReconnectDelay = 1000;
 const WS_MAX_DELAY = 30000;
 let wsReconnectAttempts = 0;
+let wsReconnectTimer = null;
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const encRoomId = encodeURIComponent(roomId);
   const encodedToken = bytesToBase64Url(new TextEncoder().encode(accessToken));
-  ws = new WebSocket(`${proto}://${location.host}/ws?room_id=${encRoomId}`,
+  clearTimeout(wsReconnectTimer);
+  const socket = new WebSocket(`${proto}://${location.host}/ws?room_id=${encRoomId}`,
     ['multiai.v1', `bearer.${encodedToken}`]);
-  ws.onopen = () => {
+  ws = socket;
+  socket.onopen = () => {
+    if (socket !== ws) return;
     document.getElementById('ws-status').textContent = 'Connected';
     document.getElementById('ws-status').classList.add('connected');
     wsReconnectDelay = 1000;
@@ -492,15 +585,19 @@ function connectWS() {
     // remain the synchronization source; state restores anything missed offline.
     loadState();
   };
-  ws.onclose = () => {
+  socket.onclose = (event) => {
+    // A socket replaced by a channel switch must neither reconnect nor repaint.
+    if (socket !== ws) return;
+    if (event.code === 4403) { handleAccessRevoked(); return; }
     document.getElementById('ws-status').textContent = 'Reconnecting';
     document.getElementById('ws-status').classList.remove('connected');
     wsReconnectAttempts++;
     const delay = Math.min(wsReconnectDelay * Math.pow(1.5, wsReconnectAttempts - 1), WS_MAX_DELAY);
-    setTimeout(connectWS, delay);
+    wsReconnectTimer = setTimeout(connectWS, delay);
   };
-  ws.onerror = () => {};
-  ws.onmessage = (e) => {
+  socket.onerror = () => {};
+  socket.onmessage = (e) => {
+    if (socket !== ws) return;
     try {
       const msg = JSON.parse(e.data);
       handleRealtimeEvent(msg);
@@ -514,7 +611,10 @@ async function loadState() {
   const state = await api('GET', `/rooms/${roomId}/state?last_sequence=0`);
   document.getElementById('room-name').textContent = state.room.name;
   document.getElementById('room-meta').textContent = state.room.description || 'No description';
-  document.getElementById('rooms-list').innerHTML = `<button class="nav-item active"><span class="nav-icon">#</span><span class="nav-name">${escHtml(state.room.name)}</span></button>`;
+  const listedRoom = myRooms.find(room => room.room_id === roomId);
+  if (listedRoom) listedRoom.name = state.room.name;
+  else myRooms.push({room_id: roomId, workspace_id: workspaceId, name: state.room.name});
+  renderRoomsList();
 
   // Messages
   const msgDiv = document.getElementById('messages');
@@ -602,6 +702,19 @@ async function loadState() {
 
 function handleRealtimeEvent(msg) {
   if (msg.type === 'ping' || msg.type === 'pong' || msg.type === 'connected') return;
+  if (msg.type === 'room_removed') {
+    // Removal from the open channel arrives as a 4403 close on its socket instead.
+    if (msg.room_id === roomId) return;
+    const removedRoom = myRooms.find(room => room.room_id === msg.room_id);
+    myRooms = myRooms.filter(room => room.room_id !== msg.room_id);
+    renderRoomsList();
+    toast(`You were removed from #${removedRoom ? removedRoom.name : msg.room_id}.`, 'error');
+    return;
+  }
+  if (msg.type === 'room_invited') {
+    refreshRooms().then(() => toast(`You were invited to #${msg.room_name} as ${msg.role}.`));
+    return;
+  }
   if (msg.type === 'room_event') {
     lastSequence = Math.max(lastSequence, msg.sequence || 0);
     logEvent(msg);
@@ -615,6 +728,15 @@ function handleRealtimeEvent(msg) {
         break;
       case 'user.left_room':
         appendSystemMessage(`${msg.payload.user_id} left the room`);
+        break;
+      case 'user.invited_room':
+        loadState().then(() => appendSystemMessage(`${msg.payload.user_id} was invited as ${msg.payload.role}`));
+        break;
+      case 'user.role_changed':
+        loadState().then(() => appendSystemMessage(`${msg.payload.user_id} is now ${msg.payload.role}`));
+        break;
+      case 'user.removed_room':
+        loadState().then(() => appendSystemMessage(`${msg.payload.user_id} was removed from the channel`));
         break;
       case 'agent.joined_room':
         appendSystemMessage(`Agent ${msg.payload.name} (${msg.payload.role}) joined`);
@@ -945,7 +1067,37 @@ function renderMembers(members) {
   el.innerHTML = members.map(m => `
     <button class="nav-item" onclick="openContext('members')"><span class="presence-dot"></span><span class="nav-name">${escHtml(m.user_id)}</span><span class="nav-meta">${escHtml(m.role)}</span></button>
   `).join('');
-  document.getElementById('members-panel').innerHTML = members.map(m => `<div class="card"><div class="title">${escHtml(m.user_id)}${m.user_id === userId ? ' · you' : ''}</div><div class="detail">${escHtml(m.role)} · channel member</div></div>`).join('');
+  const isAdmin = currentRoomRole === 'admin';
+  const canInvite = ['admin','editor','member'].includes(currentRoomRole);
+  const panel = document.getElementById('members-panel');
+  if (!document.getElementById('members-cards')) {
+    panel.innerHTML = '<div id="members-cards"></div><div id="members-controls"></div>';
+  }
+  document.getElementById('members-cards').innerHTML = members.map(m => {
+    const you = m.user_id === userId ? ' · you' : '';
+    if (!isAdmin || m.role === 'admin') {
+      return `<div class="card"><div class="title">${escHtml(m.user_id)}${you}</div><div class="detail">${escHtml(roleLabel(m.role))}</div></div>`;
+    }
+    return `<div class="card member-row"><div><div class="title">${escHtml(m.user_id)}</div><div class="detail">${escHtml(roleLabel(m.role))}</div></div><select aria-label="Access for ${escHtml(m.user_id)}" data-user-id="${escHtml(m.user_id)}" onchange="changeMemberRole(this.dataset.userId, this.value)"><option value="editor"${m.role === 'editor' ? ' selected' : ''}>Can contribute</option><option value="viewer"${m.role === 'viewer' ? ' selected' : ''}>Read only</option></select><button class="btn-sm" type="button" data-user-id="${escHtml(m.user_id)}" onclick="removeMember(this.dataset.userId)">Remove</button></div>`;
+  }).join('');
+  // The invite form is rebuilt only when the caller's own access changes, so a
+  // half-typed user id survives the re-render every membership event triggers.
+  const controls = document.getElementById('members-controls');
+  const controlsKey = `${isAdmin}:${canInvite}`;
+  if (controls.dataset.key === controlsKey) return;
+  controls.dataset.key = controlsKey;
+  if (!canInvite) {
+    controls.innerHTML = '<div class="panel-copy">Editors and admins can invite people. A channel admin changes access or removes members.</div>';
+    return;
+  }
+  const copy = isAdmin
+    ? 'Invited people see this channel in their sidebar at once. Removing someone ends their live feed and access immediately.'
+    : 'Invited people see this channel in their sidebar at once. A channel admin changes access or removes members.';
+  controls.innerHTML = `<form class="invite-form" onsubmit="inviteMember(event)"><input id="invite-user-id" placeholder="User ID" autocomplete="off" aria-label="User ID to invite" required><select id="invite-role" aria-label="Access level"><option value="editor">Can contribute</option><option value="viewer">Read only</option></select><button class="btn-sm" type="submit">Invite</button></form><div class="panel-copy">${copy}</div>`;
+}
+
+function roleLabel(role) {
+  return {admin: 'admin · manages people', editor: 'editor · can contribute', viewer: 'viewer · read only'}[role] || role;
 }
 
 async function loadTemplates() {
@@ -1072,13 +1224,18 @@ async function selectBranch(branchId) {
 
 function applyPermissions() {
   const canEdit = ['admin','editor','member'].includes(currentRoomRole);
-  ['ai-trigger','send-message-button','synthesize-button'].forEach(id => {
-    const element = document.getElementById(id);
-    if (element && !canEdit) { element.disabled = true; element.title = 'Your viewer role is read-only'; }
-  });
+  const readOnly = 'Your viewer role is read-only';
+  // Re-enable on promotion, not only disable on demotion; the send button also
+  // honours the turn lock, and synthesis keeps its own selection-based state.
+  const aiTrigger = document.getElementById('ai-trigger');
+  if (aiTrigger) { aiTrigger.disabled = !canEdit; aiTrigger.title = canEdit ? '' : readOnly; }
+  const sendButton = document.getElementById('send-message-button');
+  if (sendButton) { sendButton.disabled = !canEdit || Boolean(currentTurnLock); sendButton.title = canEdit ? '' : readOnly; }
+  const synthesizeButton = document.getElementById('synthesize-button');
+  if (synthesizeButton && !canEdit) { synthesizeButton.disabled = true; synthesizeButton.title = readOnly; }
   document.querySelectorAll('.review-actions button').forEach(button => {
     button.disabled = !canEdit;
-    if (!canEdit) button.title = 'Your viewer role is read-only';
+    button.title = canEdit ? '' : readOnly;
   });
 }
 
