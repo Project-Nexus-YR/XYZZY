@@ -258,10 +258,13 @@ class NexusAgentBridge:
                 )
             async with self._lock:
                 self._fallback_states[run_id] = "COMPLETED" if action == "finish" else "RUNNING"
+            raw_input = response.get("input", {})
             return {
                 "status": "ok",
                 "result": output,
                 "action": action,
+                "tool": str(response.get("tool", "")),
+                "input": dict(raw_input) if isinstance(raw_input, dict) else {},
                 "provenance": self._provider_provenance(
                     response=response,
                     output=output,

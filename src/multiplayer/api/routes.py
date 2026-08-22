@@ -39,6 +39,7 @@ from ..security import (
     AuthorizationError,
     RoomCapability,
     TokenAuthenticator,
+    allowed_tools,
 )
 from ..services.service import MultiplayerService
 
@@ -226,6 +227,12 @@ class InviteRoomMemberRequest(BaseModel):
 
 class UpdateRoomMemberRequest(BaseModel):
     role: str
+
+
+class PolicyRequest(BaseModel):
+    """A capability list, or null to lift the policy entirely."""
+
+    allowed_capabilities: list[str] | None = None
 
 
 class SpawnAgentRequest(BaseModel):
@@ -601,6 +608,75 @@ async def update_room_member(
     except DomainError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"user_id": member.user_id, "role": member.role}
+
+
+@router.get("/rooms/{room_id}/agents/{agent_id}/capabilities")
+async def agent_capabilities(
+    room_id: str,
+    agent_id: str,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    """The five terms and what they permit for a run this caller would initiate."""
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.READ)
+    try:
+        terms = await svc.agent_capability_terms(agent_id, principal.user_id)
+    except DomainError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    effective = terms.effective
+    return {
+        "terms": terms.as_dict(),
+        "effective": sorted(effective),
+        "tools": allowed_tools(effective),
+    }
+
+
+@router.patch("/rooms/{room_id}/policy")
+async def set_room_policy(
+    room_id: str,
+    req: PolicyRequest,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.ADMINISTER)
+    try:
+        await svc.set_room_policy(room_id, req.allowed_capabilities, principal.user_id)
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"allowed_capabilities": req.allowed_capabilities}
+
+
+@router.patch("/rooms/{room_id}/members/{user_id}/capabilities")
+async def set_member_capabilities(
+    room_id: str,
+    user_id: str,
+    req: PolicyRequest,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.ADMINISTER)
+    try:
+        await svc.set_member_capabilities(
+            room_id, user_id, req.allowed_capabilities, principal.user_id
+        )
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"user_id": user_id, "allowed_capabilities": req.allowed_capabilities}
+
+
+@router.patch("/workspaces/{workspace_id}/policy")
+async def set_workspace_policy(
+    workspace_id: str,
+    req: PolicyRequest,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _require_workspace(workspace_id, principal)
+    try:
+        await svc.set_workspace_policy(workspace_id, req.allowed_capabilities, principal.user_id)
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"allowed_capabilities": req.allowed_capabilities}
 
 
 @router.delete("/rooms/{room_id}/members/{user_id}")

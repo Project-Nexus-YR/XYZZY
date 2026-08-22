@@ -65,6 +65,7 @@ from ..domain.models import (
     TaskPriority,
     TaskStatus,
     ToolPermission,
+    ToolRequest,
     TurnLock,
     TurnLockScopeType,
     TurnLockStatus,
@@ -109,6 +110,7 @@ class Repos:
         self.notifications = NotificationRepo(db)
         self.presence = PresenceRepo(db)
         self.tool_permissions = ToolPermissionRepo(db)
+        self.tool_requests = ToolRequestRepo(db)
         self.idempotency = IdempotencyRepo(db)
         self.ontology = OntologyRepo(db)
 
@@ -327,9 +329,16 @@ class WorkspaceRepo:
 
     async def create(self, ws: Workspace) -> Workspace:
         await self.db.execute(
-            "INSERT INTO workspaces(workspace_id, org_id, name, slug, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (ws.workspace_id, ws.org_id, ws.name, ws.slug, serialize_datetime(ws.created_at)),
+            "INSERT INTO workspaces(workspace_id, org_id, name, slug, created_at, "
+            "allowed_capabilities) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                ws.workspace_id,
+                ws.org_id,
+                ws.name,
+                ws.slug,
+                serialize_datetime(ws.created_at),
+                ws.allowed_capabilities,
+            ),
         )
         await self.db.commit()
         return ws
@@ -347,6 +356,7 @@ class WorkspaceRepo:
                 name=row["name"],
                 slug=row["slug"],
                 created_at=datetime.fromisoformat(row["created_at"]),
+                allowed_capabilities=row["allowed_capabilities"],
             )
         )
 
@@ -361,9 +371,17 @@ class WorkspaceRepo:
                 name=r["name"],
                 slug=r["slug"],
                 created_at=datetime.fromisoformat(r["created_at"]),
+                allowed_capabilities=r["allowed_capabilities"],
             )
             for r in rows
         ]
+
+    async def set_allowed_capabilities(self, workspace_id: str, allowed: str | None) -> None:
+        await self.db.execute(
+            "UPDATE workspaces SET allowed_capabilities = ? WHERE workspace_id = ?",
+            (allowed, workspace_id),
+        )
+        await self.db.commit()
 
     async def add_member(self, member: WorkspaceMember) -> None:
         await self.db.execute(
@@ -409,6 +427,7 @@ class WorkspaceRepo:
                 name=row["name"],
                 slug=row["slug"],
                 created_at=datetime.fromisoformat(row["created_at"]),
+                allowed_capabilities=row["allowed_capabilities"],
             )
             for row in rows
         ]
@@ -453,6 +472,85 @@ class BootstrapContextRepo:
         return context
 
 
+class ToolRequestRepo:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create(self, request: ToolRequest) -> ToolRequest:
+        await self.db.execute(
+            "INSERT INTO tool_requests(request_id, room_id, execution_id, agent_id, "
+            "requested_by, tool, input_json, required_capability, effective_json, status, "
+            "reason, approval_id, result_json, created_at, resolved_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                request.request_id,
+                request.room_id,
+                request.execution_id,
+                request.agent_id,
+                request.requested_by,
+                request.tool,
+                request.input_json,
+                request.required_capability,
+                request.effective_json,
+                request.status,
+                request.reason,
+                request.approval_id,
+                request.result_json,
+                serialize_datetime(request.created_at),
+                serialize_datetime(request.resolved_at) if request.resolved_at else None,
+            ),
+        )
+        await self.db.commit()
+        return request
+
+    async def get(self, request_id: str) -> ToolRequest | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM tool_requests WHERE request_id = ?", (request_id,)
+        )
+        return None if row is None else self._from_row(row)
+
+    async def get_by_approval(self, approval_id: str) -> ToolRequest | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM tool_requests WHERE approval_id = ?", (approval_id,)
+        )
+        return None if row is None else self._from_row(row)
+
+    async def set_effective(self, request_id: str, effective_json: str) -> None:
+        await self.db.execute(
+            "UPDATE tool_requests SET effective_json = ? WHERE request_id = ?",
+            (effective_json, request_id),
+        )
+        await self.db.commit()
+
+    async def resolve(self, request_id: str, status: str, reason: str, result_json: str) -> None:
+        await self.db.execute(
+            "UPDATE tool_requests SET status = ?, reason = ?, result_json = ?, "
+            "resolved_at = ? WHERE request_id = ?",
+            (status, reason, result_json, serialize_datetime(utcnow()), request_id),
+        )
+        await self.db.commit()
+
+    def _from_row(self, row: dict[str, Any]) -> ToolRequest:
+        resolved = row["resolved_at"]
+        return ToolRequest(
+            request_id=row["request_id"],
+            room_id=row["room_id"],
+            execution_id=row["execution_id"],
+            agent_id=row["agent_id"],
+            requested_by=row["requested_by"],
+            tool=row["tool"],
+            input_json=row["input_json"],
+            required_capability=row["required_capability"],
+            effective_json=row["effective_json"],
+            status=row["status"],
+            reason=row["reason"],
+            approval_id=row["approval_id"],
+            result_json=row["result_json"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            resolved_at=datetime.fromisoformat(resolved) if resolved else None,
+        )
+
+
 class RoomRepo:
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -460,8 +558,8 @@ class RoomRepo:
     async def create(self, room: Room) -> Room:
         await self.db.execute(
             "INSERT INTO rooms(room_id, workspace_id, name, description, status, "
-            "created_by, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "created_by, created_at, allowed_capabilities) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 room.room_id,
                 room.workspace_id,
@@ -470,6 +568,7 @@ class RoomRepo:
                 room.status.value,
                 room.created_by,
                 serialize_datetime(room.created_at),
+                room.allowed_capabilities,
             ),
         )
         await self.db.commit()
@@ -510,7 +609,15 @@ class RoomRepo:
             status=RoomStatus(row["status"]),
             created_by=row["created_by"],
             created_at=datetime.fromisoformat(row["created_at"]),
+            allowed_capabilities=row["allowed_capabilities"],
         )
+
+    async def set_allowed_capabilities(self, room_id: str, allowed: str | None) -> None:
+        await self.db.execute(
+            "UPDATE rooms SET allowed_capabilities = ? WHERE room_id = ?",
+            (allowed, room_id),
+        )
+        await self.db.commit()
 
 
 class RoomMemberRepo:
@@ -519,9 +626,15 @@ class RoomMemberRepo:
 
     async def add(self, member: RoomMember) -> None:
         await self.db.execute(
-            "INSERT OR IGNORE INTO room_members(room_id, user_id, role, joined_at) "
-            "VALUES (?, ?, ?, ?)",
-            (member.room_id, member.user_id, member.role, serialize_datetime(member.joined_at)),
+            "INSERT OR IGNORE INTO room_members(room_id, user_id, role, joined_at, "
+            "allowed_capabilities) VALUES (?, ?, ?, ?, ?)",
+            (
+                member.room_id,
+                member.user_id,
+                member.role,
+                serialize_datetime(member.joined_at),
+                member.allowed_capabilities,
+            ),
         )
         await self.db.commit()
 
@@ -538,8 +651,18 @@ class RoomMemberRepo:
                 user_id=row["user_id"],
                 role=row["role"],
                 joined_at=datetime.fromisoformat(row["joined_at"]),
+                allowed_capabilities=row["allowed_capabilities"],
             )
         )
+
+    async def set_allowed_capabilities(
+        self, room_id: str, user_id: str, allowed: str | None
+    ) -> None:
+        await self.db.execute(
+            "UPDATE room_members SET allowed_capabilities = ? WHERE room_id = ? AND user_id = ?",
+            (allowed, room_id, user_id),
+        )
+        await self.db.commit()
 
     async def update_role(self, room_id: str, user_id: str, role: str) -> None:
         await self.db.execute(
@@ -562,6 +685,7 @@ class RoomMemberRepo:
                 user_id=r["user_id"],
                 role=r["role"],
                 joined_at=datetime.fromisoformat(r["joined_at"]),
+                allowed_capabilities=r["allowed_capabilities"],
             )
             for r in rows
         ]

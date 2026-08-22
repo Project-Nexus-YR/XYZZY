@@ -62,6 +62,7 @@ from ..domain.models import (
     Task,
     TaskPriority,
     TaskStatus,
+    ToolRequest,
     TurnLock,
     TurnLockScopeType,
     TurnLockStatus,
@@ -79,6 +80,14 @@ from ..security.authorization import (
     RoomCapability,
     RoomPolicy,
     capabilities_for_role,
+)
+from ..security.capabilities import (
+    CapabilityTerms,
+    GatewayDecision,
+    allowed_tools,
+    decide,
+    policy_capabilities,
+    user_capabilities,
 )
 from ..services.presence import PresenceService
 
@@ -164,6 +173,19 @@ def _validate_transition(
     allowed = valid.get(current, set())
     if target not in allowed:
         raise DomainError(f"invalid {entity_name} transition: {current.value} -> {target.value}")
+
+
+def _policy_json(allowed: list[str] | None) -> str | None:
+    """Store a policy as JSON; None means the policy is not set."""
+    return None if allowed is None else json.dumps(sorted(set(allowed)))
+
+
+def _policy_list(raw: str | None) -> list[str] | None:
+    """A stored policy is a JSON list; never set means no restriction."""
+    if raw is None:
+        return None
+    parsed = json.loads(raw)
+    return [str(item) for item in parsed] if isinstance(parsed, list) else None
 
 
 class MultiplayerService:
@@ -664,6 +686,69 @@ class MultiplayerService:
         await self._broadcast_persisted_events([event])
         return replace(member, role=role)
 
+    async def set_room_policy(
+        self, room_id: str, allowed: list[str] | None, changed_by: str
+    ) -> None:
+        """Bound every run in this channel to a capability list. None lifts the bound."""
+        stored = _policy_json(allowed)
+        async with self.db.transaction():
+            await self._require_capability_in_transaction(
+                room_id, changed_by, RoomCapability.ADMINISTER
+            )
+            await self.repos.rooms.set_allowed_capabilities(room_id, stored)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.ROOM_POLICY_UPDATED,
+                    payload={"allowed_capabilities": allowed},
+                    actor_id=changed_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
+
+    async def set_member_capabilities(
+        self, room_id: str, user_id: str, allowed: list[str] | None, changed_by: str
+    ) -> None:
+        """Bound what one member may lend to the agents they run. None restores the role default."""
+        stored = _policy_json(allowed)
+        async with self.db.transaction():
+            await self._require_capability_in_transaction(
+                room_id, changed_by, RoomCapability.ADMINISTER
+            )
+            member = await self.repos.room_members.get(room_id, user_id)
+            if member is None:
+                raise DomainError("user is not a channel member")
+            await self.repos.room_members.set_allowed_capabilities(room_id, user_id, stored)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.ROOM_POLICY_UPDATED,
+                    payload={"user_id": user_id, "allowed_capabilities": allowed},
+                    actor_id=changed_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
+
+    async def set_workspace_policy(
+        self, workspace_id: str, allowed: list[str] | None, changed_by: str
+    ) -> None:
+        """Bound every channel in the workspace. Logged in each of its rooms."""
+        await self.authorization.require_workspace_member(workspace_id, changed_by)
+        stored = _policy_json(allowed)
+        await self.repos.workspaces.set_allowed_capabilities(workspace_id, stored)
+        for room in await self.repos.rooms.list_by_workspace(workspace_id):
+            await self._append_room_event(
+                room.room_id,
+                EventType.WORKSPACE_POLICY_UPDATED,
+                {"workspace_id": workspace_id, "allowed_capabilities": allowed},
+                changed_by,
+                "user",
+            )
+
     async def remove_room_member(self, room_id: str, user_id: str, removed_by: str) -> None:
         """Revoke a non-admin member's access, including any live realtime subscription."""
         if user_id == removed_by:
@@ -1049,6 +1134,199 @@ class MultiplayerService:
         persisted = await self.repos.executions.get(execution.execution_id)
         return persisted or execution
 
+    async def _capability_terms(
+        self, agent: AgentInstance, room_id: str, initiated_by: str
+    ) -> CapabilityTerms:
+        """The five durable terms of PRD §13, read from records alone."""
+        member = await self.repos.room_members.get(room_id, initiated_by)
+        granted = _policy_list(member.allowed_capabilities if member else None)
+        user = user_capabilities(member.role if member else None) & policy_capabilities(granted)
+        template = await self.repos.agents.get_template(agent.template_id)
+        room = await self.repos.rooms.get(room_id)
+        workspace = await self.repos.workspaces.get(room.workspace_id) if room is not None else None
+        return CapabilityTerms(
+            user=user,
+            agent=frozenset(agent.capabilities),
+            skill=frozenset(template.capabilities) if template else frozenset(),
+            channel=policy_capabilities(_policy_list(room.allowed_capabilities if room else None)),
+            workspace=policy_capabilities(
+                _policy_list(workspace.allowed_capabilities if workspace else None)
+            ),
+        )
+
+    @staticmethod
+    def _step_schema(effective: frozenset[str]) -> dict[str, Any]:
+        """Offer only the tools this run may call, so the rest are unavailable."""
+        offered = allowed_tools(effective)
+        properties: dict[str, Any] = {
+            "action": {"type": "string", "enum": ["finish", "delegate", "wait"]},
+            "output": {"type": "object"},
+        }
+        if offered:
+            properties["action"]["enum"] = ["tool", *properties["action"]["enum"]]
+            properties["tool"] = {"type": "string", "enum": offered}
+            properties["input"] = {"type": "object"}
+        return {"type": "object", "properties": properties, "required": ["action"]}
+
+    async def agent_capability_terms(self, agent_id: str, requested_by: str) -> CapabilityTerms:
+        """Terms as they would apply to a run this member initiated."""
+        agent = await self.get_agent(agent_id)
+        return await self._capability_terms(agent, agent.room_id, requested_by)
+
+    async def _handle_tool_request(
+        self,
+        execution: Execution,
+        session: Session,
+        agent: AgentInstance,
+        terms: CapabilityTerms,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Permission check, policy check, approval gate, execution, audit event."""
+        effective = terms.effective
+        tool = str(result.get("tool", ""))
+        raw_input = result.get("input")
+        tool_input = raw_input if isinstance(raw_input, dict) else {}
+        decision = decide(tool, effective)
+        request = ToolRequest(
+            request_id=new_id("toolreq"),
+            room_id=session.room_id,
+            execution_id=execution.execution_id,
+            agent_id=agent.agent_id,
+            requested_by=agent.agent_id,
+            tool=tool,
+            input_json=json.dumps(tool_input, default=str),
+            required_capability=decision.required_capability,
+            effective_json=json.dumps(sorted(effective)),
+            status="REJECTED" if not decision.allowed else "PENDING_APPROVAL",
+            reason=decision.reason,
+        )
+        payload = {
+            "request_id": request.request_id,
+            "tool": tool,
+            "agent_id": agent.agent_id,
+            "execution_id": execution.execution_id,
+            "required_capability": decision.required_capability,
+            "effective": sorted(effective),
+            "reason": decision.reason,
+        }
+        if not decision.allowed:
+            await self.repos.tool_requests.create(request)
+            await self._append_room_event(
+                session.room_id,
+                EventType.TOOL_CALL_REJECTED,
+                payload,
+                agent.agent_id,
+                "agent",
+            )
+            return self._tool_response(request)
+        if decision.requires_approval:
+            approval = await self.request_approval(
+                session.room_id,
+                execution.execution_id,
+                agent.agent_id,
+                f"{tool}: {decision.required_capability}",
+            )
+            request = replace(request, approval_id=approval.approval_id)
+            await self.repos.tool_requests.create(request)
+            return self._tool_response(request)
+        await self.repos.tool_requests.create(request)
+        return self._tool_response(await self._execute_tool_request(request))
+
+    async def _current_tool_decision(
+        self, request: ToolRequest
+    ) -> tuple[GatewayDecision, frozenset[str]]:
+        """Decide a stored request again from the records as they stand right now."""
+        agent = await self.get_agent(request.agent_id)
+        execution = await self.repos.executions.get(request.execution_id)
+        initiated_by = ""
+        if execution is not None:
+            branch = await self.get_branch(execution.branch_id)
+            initiated_by = branch.initiated_by
+        terms = await self._capability_terms(agent, request.room_id, initiated_by)
+        effective = terms.effective
+        return decide(request.tool, effective), effective
+
+    async def _execute_tool_request(self, request: ToolRequest) -> ToolRequest:
+        """Run an authorised tool and audit the outcome. Never raises to the caller."""
+        await self._append_room_event(
+            request.room_id,
+            EventType.TOOL_CALL_STARTED,
+            {"request_id": request.request_id, "tool": request.tool},
+            request.agent_id,
+            "agent",
+        )
+        try:
+            output = await self._run_tool(request)
+        except DomainError as exc:
+            await self.repos.tool_requests.resolve(request.request_id, "FAILED", str(exc), "{}")
+            await self._append_room_event(
+                request.room_id,
+                EventType.TOOL_CALL_FAILED,
+                {"request_id": request.request_id, "tool": request.tool, "error": str(exc)},
+                request.agent_id,
+                "agent",
+            )
+            return replace(request, status="FAILED", reason=str(exc))
+        result_json = json.dumps(output, default=str)
+        await self.repos.tool_requests.resolve(
+            request.request_id, "EXECUTED", "executed", result_json
+        )
+        await self._append_room_event(
+            request.room_id,
+            EventType.TOOL_CALL_COMPLETED,
+            {"request_id": request.request_id, "tool": request.tool},
+            request.agent_id,
+            "agent",
+        )
+        return replace(request, status="EXECUTED", reason="executed", result_json=result_json)
+
+    async def _run_tool(self, request: ToolRequest) -> dict[str, Any]:
+        """The registry's executable side. Each tool is a small, auditable action."""
+        tool_input = json.loads(request.input_json)
+        if request.tool == "channel.read_context":
+            messages = await self.repos.messages.list_by_room(request.room_id, limit=20)
+            return {
+                "messages": [
+                    {"message_id": m.message_id, "content": m.content, "role": m.role.value}
+                    for m in messages
+                ]
+            }
+        if request.tool == "task.create":
+            task = await self.create_task(
+                request.room_id,
+                str(tool_input.get("title", "")),
+                str(tool_input.get("description", "")),
+                created_by=request.agent_id,
+            )
+            return {"task_id": task.task_id}
+        if request.tool == "artifact.write":
+            artifact = await self.create_artifact(
+                request.room_id,
+                str(tool_input.get("name", "Untitled")),
+                ArtifactType.DOCUMENT,
+                str(tool_input.get("description", "")),
+                created_by=request.agent_id,
+            )
+            return {"artifact_id": artifact.artifact_id}
+        raise DomainError(f"tool not executable: {request.tool}")
+
+    @staticmethod
+    def _tool_response(request: ToolRequest) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "action": "tool",
+            "tool_request": {
+                "request_id": request.request_id,
+                "tool": request.tool,
+                "status": request.status,
+                "reason": request.reason,
+                "required_capability": request.required_capability,
+                "effective": json.loads(request.effective_json),
+                "approval_id": request.approval_id,
+                "result": json.loads(request.result_json),
+            },
+        }
+
     async def execute_agent_step(self, execution_id: str, prompt: str) -> dict[str, Any]:
         prompt = self._validate_non_empty(prompt, "agent prompt")
         execution = await self.repos.executions.get(execution_id)
@@ -1091,7 +1369,11 @@ class MultiplayerService:
             )
             await self.repos.executions.mark_running(execution.execution_id, run_id)
 
-        result = await self.nexus.execute_step(execution_id, provider_prompt)
+        terms = await self._capability_terms(agent, session.room_id, branch.initiated_by)
+        effective = terms.effective
+        result = await self.nexus.execute_step(
+            execution_id, provider_prompt, self._step_schema(effective)
+        )
         if result.get("status") == "error":
             error = str(result.get("error", ""))
             persisted_events = await self.repos.executions.terminalize_without_output(
@@ -1116,6 +1398,8 @@ class MultiplayerService:
             await self._broadcast_persisted_events(persisted_events)
             await self._set_agent_status_safe(execution.agent_id, AgentStatus.FAILED)
             return result
+        if result.get("action") == "tool":
+            return await self._handle_tool_request(execution, session, agent, terms, result)
         if result.get("action") == "finish":
             raw_output = result.get("result")
             output_data = raw_output if isinstance(raw_output, dict) else {"result": raw_output}
@@ -2673,6 +2957,33 @@ class MultiplayerService:
             )
         await self._set_agent_status_safe(approval.agent_id, AgentStatus.WORKING)
         await self._broadcast_persisted_events([event])
+        pending = await self.repos.tool_requests.get_by_approval(approval_id)
+        if pending is not None and pending.status == "PENDING_APPROVAL":
+            decision, effective = await self._current_tool_decision(pending)
+            stamped = json.dumps(sorted(effective))
+            await self.repos.tool_requests.set_effective(pending.request_id, stamped)
+            pending = replace(pending, effective_json=stamped)
+            if decision.allowed:
+                await self._execute_tool_request(pending)
+            else:
+                # The capability was withdrawn between the request and the grant; a
+                # human's approval cannot restore what the policy no longer permits.
+                await self.repos.tool_requests.resolve(
+                    pending.request_id, "REJECTED", decision.reason, "{}"
+                )
+                await self._append_room_event(
+                    pending.room_id,
+                    EventType.TOOL_CALL_REJECTED,
+                    {
+                        "request_id": pending.request_id,
+                        "tool": pending.tool,
+                        "required_capability": decision.required_capability,
+                        "effective": sorted(effective),
+                        "reason": decision.reason,
+                    },
+                    pending.agent_id,
+                    "agent",
+                )
         return approval
 
     async def reject_action(
@@ -2714,6 +3025,22 @@ class MultiplayerService:
                 )
             )
         await self._broadcast_persisted_events([event])
+        pending = await self.repos.tool_requests.get_by_approval(approval_id)
+        if pending is not None and pending.status == "PENDING_APPROVAL":
+            await self.repos.tool_requests.resolve(
+                pending.request_id, "REJECTED", "approval rejected", "{}"
+            )
+            await self._append_room_event(
+                pending.room_id,
+                EventType.TOOL_CALL_REJECTED,
+                {
+                    "request_id": pending.request_id,
+                    "tool": pending.tool,
+                    "reason": "approval rejected",
+                },
+                pending.agent_id,
+                "agent",
+            )
         return approval
 
     async def list_pending_approvals(self, room_id: str) -> list[Approval]:

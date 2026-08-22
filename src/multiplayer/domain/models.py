@@ -67,6 +67,7 @@ class Workspace:
     name: str
     slug: str
     created_at: datetime = field(default_factory=utcnow)
+    allowed_capabilities: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +106,7 @@ class Room:
     status: RoomStatus = RoomStatus.ACTIVE
     created_by: str = ""
     created_at: datetime = field(default_factory=utcnow)
+    allowed_capabilities: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +115,28 @@ class RoomMember:
     user_id: str
     role: str = "member"
     joined_at: datetime = field(default_factory=utcnow)
+    allowed_capabilities: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolRequest:
+    """A durable gateway decision for one agent tool request (PRD §14)."""
+
+    request_id: str
+    room_id: str
+    execution_id: str
+    agent_id: str
+    requested_by: str
+    tool: str
+    input_json: str = "{}"
+    required_capability: str | None = None
+    effective_json: str = "[]"
+    status: str = "PENDING_APPROVAL"
+    reason: str = ""
+    approval_id: str | None = None
+    result_json: str = "{}"
+    created_at: datetime = field(default_factory=utcnow)
+    resolved_at: datetime | None = None
 
 
 # ── Agent ────────────────────────────────────────────────────────────────────

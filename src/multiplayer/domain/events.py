@@ -115,6 +115,9 @@ class EventType(StrEnum):
     TOOL_CALL_STARTED = "tool.call_started"
     TOOL_CALL_COMPLETED = "tool.call_completed"
     TOOL_CALL_FAILED = "tool.call_failed"
+    TOOL_CALL_REJECTED = "tool.call_rejected"
+    ROOM_POLICY_UPDATED = "room.policy_updated"
+    WORKSPACE_POLICY_UPDATED = "workspace.policy_updated"
 
     # Session
     SESSION_STARTED = "session.started"
