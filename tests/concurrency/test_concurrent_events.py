@@ -1,6 +1,7 @@
 """Concurrency tests: verify atomic sequence generation under concurrent writes."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -8,22 +9,15 @@ from multiplayer.db.connection import Database
 from multiplayer.db.repositories import Repos
 from multiplayer.domain.events import EventType, RoomEvent
 
+MIGRATIONS = Path(__file__).parents[2] / "src" / "multiplayer" / "migrations"
+
 
 @pytest.fixture
 async def repos():
     db = Database(":memory:")
     await db.connect()
-    await db.execute_script(
-        open(
-            str(
-                __import__("pathlib").Path(__file__).parents[2]
-                / "src"
-                / "multiplayer"
-                / "migrations"
-                / "001_initial.sql"
-            )
-        ).read()
-    )
+    for migration in sorted(MIGRATIONS.glob("*.sql")):
+        await db.execute_script(migration.read_text())
     yield Repos(db)
     await db.close()
 
