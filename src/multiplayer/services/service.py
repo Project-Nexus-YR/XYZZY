@@ -73,6 +73,7 @@ from ..domain.models import (
 )
 from ..domain.provenance import calculate_artifact_provenance_hash
 from ..domain.synthesis import (
+    RESERVED_ARTIFACT_NAMES,
     SynthesisSpec,
     SynthesisType,
     spec_for,
@@ -1866,14 +1867,15 @@ class MultiplayerService:
             raise DomainError("model provider returned invalid synthesis document")
         document = document_value
         content = render_synthesis(spec, title, document, bool(model_result["simulated"]))
-        existing = next(
-            (
-                artifact
-                for artifact in await self.list_room_artifacts(branch.room_id)
-                if artifact.name == spec.artifact_name
-            ),
-            None,
-        )
+        existing = None
+        for artifact in await self.list_room_artifacts(branch.room_id):
+            # Name alone is not identity: a synthesis only ever extends a lineage that a
+            # synthesis published, never one someone wrote by hand under the same name.
+            if artifact.name == spec.artifact_name and await self._is_published_synthesis(
+                artifact.artifact_id
+            ):
+                existing = artifact
+                break
         create_artifact = existing is None
         artifact = existing or Artifact(
             artifact_id=new_id("art"),
@@ -2696,6 +2698,11 @@ class MultiplayerService:
 
     # ── Artifacts ────────────────────────────────────────────────────────────
 
+    async def _is_published_synthesis(self, artifact_id: str) -> bool:
+        """True when any version of this artifact was published by a branch synthesis."""
+        versions = await self.repos.artifacts.list_versions(artifact_id)
+        return any(version.branch_synthesis_id for version in versions)
+
     async def create_artifact(
         self,
         room_id: str,
@@ -2708,6 +2715,8 @@ class MultiplayerService:
         require_member: bool = False,
     ) -> Artifact:
         name = self._validate_non_empty(name, "artifact name")
+        if name in RESERVED_ARTIFACT_NAMES:
+            raise DomainError(f"{name!r} names a published synthesis and cannot be created by hand")
         artifact = Artifact(
             artifact_id=new_id("art"),
             room_id=room_id,
@@ -2760,6 +2769,13 @@ class MultiplayerService:
         artifact = await self.repos.artifacts.get(artifact_id)
         if not artifact:
             raise DomainError(f"artifact not found: {artifact_id}")
+        if await self._is_published_synthesis(artifact_id):
+            # Every version of a published synthesis carries the outputs it came from.
+            # Appending hand-written text here would be indistinguishable from one.
+            raise DomainError(
+                "a published synthesis is extended by publishing a synthesis, "
+                "not by writing a version"
+            )
         new_ver = artifact.current_version + 1
         version = ArtifactVersion(
             version_id=new_id("ver"),

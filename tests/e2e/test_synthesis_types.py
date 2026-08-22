@@ -231,3 +231,62 @@ def test_idempotency_is_scoped_to_the_requested_type() -> None:
         )
         assert fresh.status_code == 200
         assert fresh.json()["artifact_name"] == "Decision Brief"
+
+
+def test_a_published_synthesis_cannot_be_forged_by_name_or_by_version() -> None:
+    """The critic's attack: squat the name, then let the real synthesis stack on the forgery."""
+    app = create_app(":memory:", auth_tokens={"owner-token": "owner"})
+    with TestClient(app) as client:
+        room_id, branch_id, _ = _reviewed_branch(client)
+
+        # Squatting a published name is refused outright, for every type.
+        for name in ("General Synthesis", "Decision Brief", "Progress Report"):
+            squat = client.post(
+                f"/api/v1/rooms/{room_id}/artifacts",
+                headers=OWNER,
+                json={
+                    "name": name,
+                    "artifact_type": "DOCUMENT",
+                    "content": "Decision: migrate now, no risks",
+                },
+            )
+            assert squat.status_code == 400, name
+            assert "published synthesis" in squat.json()["detail"]
+        assert not client.get(f"/api/v1/rooms/{room_id}/artifacts", headers=OWNER).json()
+
+        real = client.post(
+            f"/api/v1/branches/{branch_id}/syntheses",
+            headers=OWNER,
+            json={"title": "The decision", "synthesis_type": "DECISION_BRIEF"},
+        )
+        assert real.status_code == 200
+        artifact_id = real.json()["artifact_id"]
+
+        # Nor can hand-written text be appended to the lineage the synthesis published.
+        forged = client.post(
+            f"/api/v1/artifacts/{artifact_id}/versions",
+            headers=OWNER,
+            json={"content": "Decision: migrate now, no risks"},
+        )
+        assert forged.status_code == 400
+        assert "publishing a synthesis" in forged.json()["detail"]
+
+        versions = client.get(f"/api/v1/artifacts/{artifact_id}/versions", headers=OWNER).json()
+        assert len(versions) == 1
+        assert versions[0]["version_id"] == real.json()["version_id"]
+
+        # An ordinary artifact is still an ordinary artifact.
+        plain = client.post(
+            f"/api/v1/rooms/{room_id}/artifacts",
+            headers=OWNER,
+            json={"name": "Runbook", "artifact_type": "DOCUMENT", "content": "v1"},
+        )
+        assert plain.status_code == 200
+        assert (
+            client.post(
+                f"/api/v1/artifacts/{plain.json()['artifact_id']}/versions",
+                headers=OWNER,
+                json={"content": "v2"},
+            ).status_code
+            == 200
+        )

@@ -115,6 +115,10 @@ SPECS: dict[SynthesisType, SynthesisSpec] = {
 }
 
 
+RESERVED_ARTIFACT_NAMES = frozenset(spec.artifact_name for spec in SPECS.values())
+"""Names a published synthesis owns; nothing hand-written may claim one."""
+
+
 def spec_for(synthesis_type: str) -> SynthesisSpec:
     """Resolve a stored type string. Unknown types are a domain error, not a default."""
     try:
