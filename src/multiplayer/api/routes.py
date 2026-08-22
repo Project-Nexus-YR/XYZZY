@@ -20,6 +20,7 @@ from ..domain.models import (
     BranchMode,
     DomainError,
     Execution,
+    IdempotencyConflict,
     MemoryScope,
     MessageRole,
     OntologyRelationshipKind,
@@ -83,6 +84,9 @@ def _current_user(
 
 
 CurrentUser = Annotated[AuthenticatedUser, Depends(_current_user)]
+# Optional `Idempotency-Key` header: a retried write with the same key replays
+# the original result instead of appending a second ordered event.
+IdempotencyKey = Annotated[str | None, Header()]
 
 
 async def _require_room(
@@ -618,14 +622,22 @@ async def start_branch(
     room_id: str,
     req: StartBranchRequest,
     principal: CurrentUser,
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.MUTATE)
     mode = _safe_enum(req.mode.upper(), BranchMode, "branch mode")
     try:
         branch, runs = await svc.start_branch(
-            room_id, mode, req.prompt, principal.user_id, req.agent_ids
+            room_id,
+            mode,
+            req.prompt,
+            principal.user_id,
+            req.agent_ids,
+            idempotency_key=idempotency_key,
         )
+    except IdempotencyConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     except DomainError as exc:
         status = 409 if "turn is locked" in str(exc) else 400
         raise HTTPException(status, str(exc)) from exc
@@ -880,13 +892,16 @@ async def synthesize_branch_decision_brief(
     branch_id: str,
     req: SynthesizeDecisionBriefRequest,
     principal: CurrentUser,
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     svc = _svc_or_404()
     await _authorized_branch(branch_id, principal, RoomCapability.MUTATE)
     try:
         artifact, version = await svc.synthesize_branch_decision_brief(
-            branch_id, req.title, principal.user_id
+            branch_id, req.title, principal.user_id, idempotency_key=idempotency_key
         )
+    except IdempotencyConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     except DomainError as exc:
         raise HTTPException(400, str(exc)) from exc
     provenance = await svc.repos.artifacts.get_version_provenance(version.version_id)
@@ -1258,7 +1273,10 @@ async def cancel_task(
 
 @router.post("/rooms/{room_id}/messages")
 async def send_message(
-    room_id: str, req: CreateMessageRequest, principal: CurrentUser
+    room_id: str,
+    req: CreateMessageRequest,
+    principal: CurrentUser,
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.MUTATE)
@@ -1269,7 +1287,11 @@ async def send_message(
         raise HTTPException(403, "sender identity cannot be overridden")
     sender = principal.user_id
     try:
-        msg = await svc.send_message(room_id, role, sender, req.content)
+        msg = await svc.send_message(
+            room_id, role, sender, req.content, idempotency_key=idempotency_key
+        )
+    except IdempotencyConflict as e:
+        raise HTTPException(409, str(e)) from e
     except DomainError as e:
         status = 409 if "turn is locked" in str(e) else 400
         raise HTTPException(status, str(e)) from e

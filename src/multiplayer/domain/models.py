@@ -21,6 +21,10 @@ class DomainError(ValueError):
     pass
 
 
+class IdempotencyConflict(DomainError):
+    """An idempotency key was replayed for a different or unfinished request."""
+
+
 # ── User & Auth ──────────────────────────────────────────────────────────────
 
 
@@ -345,6 +349,22 @@ class TurnLock:
     acquired_at: datetime = field(default_factory=utcnow)
     released_at: datetime | None = None
     release_reason: str = ""
+
+
+# ── Idempotency ──────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class IdempotencyRecord:
+    """Durable claim that one principal's keyed write already produced a result."""
+
+    scope_id: str
+    user_id: str
+    idempotency_key: str
+    operation: str
+    request_hash: str
+    result_ref: str
+    created_at: datetime = field(default_factory=utcnow)
 
 
 # ── Task ─────────────────────────────────────────────────────────────────────

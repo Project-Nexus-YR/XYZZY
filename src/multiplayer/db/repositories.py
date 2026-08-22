@@ -34,6 +34,7 @@ from ..domain.models import (
     DomainError,
     Execution,
     ExecutionStatus,
+    IdempotencyRecord,
     Memory,
     MemoryScope,
     Message,
@@ -108,6 +109,7 @@ class Repos:
         self.notifications = NotificationRepo(db)
         self.presence = PresenceRepo(db)
         self.tool_permissions = ToolPermissionRepo(db)
+        self.idempotency = IdempotencyRepo(db)
         self.ontology = OntologyRepo(db)
 
 
@@ -1651,16 +1653,26 @@ class MessageRepo:
     ) -> RoomEvent:
         """Serialize human messages against room turn-lock acquisition."""
         async with self.db.transaction():
-            if message.role == MessageRole.HUMAN:
-                lock = await TurnLockRepo(self.db).get_active(
-                    TurnLockScopeType.ROOM, message.room_id
+            return await self.create_with_event_and_turn_guard_in_transaction(message, event)
+
+    async def create_with_event_and_turn_guard_in_transaction(
+        self, message: Message, event: RoomEvent
+    ) -> RoomEvent:
+        """Append while the caller owns a wider atomic state transition."""
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("message append requires transaction ownership")
+        if message.role == MessageRole.HUMAN:
+            lock = await TurnLockRepo(self.db).get_active(TurnLockScopeType.ROOM, message.room_id)
+            if lock is not None:
+                raise ValueError(
+                    f"room turn is locked by branch {lock.branch_id} until it is terminal"
                 )
-                if lock is not None:
-                    raise ValueError(
-                        f"room turn is locked by branch {lock.branch_id} until it is terminal"
-                    )
-            await self.create(message)
-            return await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
+        await self.create(message)
+        return await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
+
+    async def get(self, message_id: str) -> Message | None:
+        row = await self.db.fetch_one("SELECT * FROM messages WHERE message_id = ?", (message_id,))
+        return self._from_row(row) if row else None
 
     async def list_by_room(self, room_id: str, limit: int = 100, offset: int = 0) -> list[Message]:
         limit = min(limit, 500)
@@ -1668,18 +1680,19 @@ class MessageRepo:
             "SELECT * FROM messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (room_id, limit, offset),
         )
-        return [
-            Message(
-                message_id=r["message_id"],
-                room_id=r["room_id"],
-                role=MessageRole(r["role"]),
-                sender_id=r["sender_id"],
-                content=r["content"],
-                metadata=json.loads(r["metadata"]),
-                created_at=datetime.fromisoformat(r["created_at"]),
-            )
-            for r in reversed(rows)
-        ]
+        return [self._from_row(r) for r in reversed(rows)]
+
+    @staticmethod
+    def _from_row(r: dict[str, Any]) -> Message:
+        return Message(
+            message_id=r["message_id"],
+            room_id=r["room_id"],
+            role=MessageRole(r["role"]),
+            sender_id=r["sender_id"],
+            content=r["content"],
+            metadata=json.loads(r["metadata"]),
+            created_at=datetime.fromisoformat(r["created_at"]),
+        )
 
 
 class EventRepo:
@@ -2797,6 +2810,49 @@ class PresenceRepo:
 
     async def get_room_presence(self, room_id: str) -> list[Presence]:
         return []
+
+
+class IdempotencyRepo:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(
+        self, scope_id: str, user_id: str, idempotency_key: str
+    ) -> IdempotencyRecord | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM idempotency_keys "
+            "WHERE scope_id = ? AND user_id = ? AND idempotency_key = ?",
+            (scope_id, user_id, idempotency_key),
+        )
+        if row is None:
+            return None
+        return IdempotencyRecord(
+            scope_id=row["scope_id"],
+            user_id=row["user_id"],
+            idempotency_key=row["idempotency_key"],
+            operation=row["operation"],
+            request_hash=row["request_hash"],
+            result_ref=row["result_ref"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    async def create_in_transaction(self, record: IdempotencyRecord) -> None:
+        """Claim a key while the caller owns the transaction that produces its result."""
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("idempotency claim requires transaction ownership")
+        await self.db.execute(
+            "INSERT INTO idempotency_keys(scope_id, user_id, idempotency_key, operation, "
+            "request_hash, result_ref, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                record.scope_id,
+                record.user_id,
+                record.idempotency_key,
+                record.operation,
+                record.request_hash,
+                record.result_ref,
+                serialize_datetime(record.created_at),
+            ),
+        )
 
 
 class ToolPermissionRepo:

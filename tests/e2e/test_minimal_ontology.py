@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from multiplayer.db.connection import Database
+from multiplayer.domain.events import EventType
 from multiplayer.domain.models import OutputDisposition
 from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.server import create_app
@@ -335,7 +336,13 @@ async def test_ontology_failure_rolls_back_artifact_provenance_and_events() -> N
         assert await service.list_room_artifacts(room.room_id) == []
         assert await service.repos.ontology.list_entities(room.room_id) == []
         assert await service.repos.ontology.list_relationships(room.room_id) == []
-        assert await service.get_room_events(room.room_id) == events_before
+        # The result rolls back; the failure itself is recorded, never left running.
+        events_after = await service.get_room_events(room.room_id)
+        assert events_after[: len(events_before)] == events_before
+        assert [event.event_type for event in events_after[len(events_before) :]] == [
+            EventType.BRANCH_SYNTHESIS_STARTED,
+            EventType.BRANCH_SYNTHESIS_FAILED,
+        ]
         assert {
             selection.output_id: selection.disposition
             for selection in await service.list_output_selections(room.room_id)

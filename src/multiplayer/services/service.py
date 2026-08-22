@@ -37,6 +37,8 @@ from ..domain.models import (
     DomainError,
     Execution,
     ExecutionStatus,
+    IdempotencyConflict,
+    IdempotencyRecord,
     Memory,
     MemoryScope,
     Message,
@@ -624,9 +626,13 @@ class MultiplayerService:
         initiating_prompt: str,
         initiated_by: str,
         agent_ids: list[str],
+        idempotency_key: str | None = None,
     ) -> tuple[Branch, list[Execution]]:
         """Atomically freeze context, create AgentRuns, and optionally own the room turn."""
         initiating_prompt = self._validate_non_empty(initiating_prompt, "branch prompt")
+        if idempotency_key is not None:
+            idempotency_key = self._validate_idempotency_key(idempotency_key)
+        request = {"mode": mode.value, "prompt": initiating_prompt, "agent_ids": list(agent_ids)}
         unique_agent_ids = list(dict.fromkeys(agent_ids))
         if unique_agent_ids != agent_ids:
             raise DomainError("branch agent ids must be unique")
@@ -642,6 +648,15 @@ class MultiplayerService:
         persisted_events: list[RoomEvent] = []
         executions: list[Execution] = []
         async with self.db.transaction():
+            if idempotency_key is not None:
+                prior = await self._claim_idempotency(
+                    room_id, initiated_by, idempotency_key, "branch.start", request
+                )
+                if prior is not None:
+                    replay = await self.repos.branches.get(prior.result_ref)
+                    if replay is None:
+                        raise DomainError("idempotent branch replay lost its result")
+                    return replay, await self.repos.executions.list_by_branch(replay.branch_id)
             active_lock = await self.repos.turn_locks.get_active(TurnLockScopeType.ROOM, room_id)
             if active_lock is not None:
                 raise DomainError(f"room turn is locked by branch {active_lock.branch_id}")
@@ -789,6 +804,15 @@ class MultiplayerService:
             for event in events_to_persist:
                 persisted_events.append(
                     await self.repos.events.append_with_next_sequence_in_transaction(event)
+                )
+            if idempotency_key is not None:
+                await self._record_idempotency(
+                    room_id,
+                    initiated_by,
+                    idempotency_key,
+                    "branch.start",
+                    request,
+                    branch.branch_id,
                 )
         await self._broadcast_persisted_events(persisted_events)
         return branch, executions
@@ -1177,10 +1201,18 @@ class MultiplayerService:
         return await self.synthesize_branch_decision_brief(branch_ids.pop(), title, created_by)
 
     async def synthesize_branch_decision_brief(
-        self, branch_id: str, title: str, created_by: str
+        self,
+        branch_id: str,
+        title: str,
+        created_by: str,
+        idempotency_key: str | None = None,
     ) -> tuple[Artifact, ArtifactVersion]:
         """Run model-backed synthesis over this Branch's explicit selected outputs."""
         title = self._validate_non_empty(title, "decision brief title")
+        if idempotency_key is not None:
+            idempotency_key = self._validate_idempotency_key(idempotency_key)
+        operation = "branch.synthesis.decision_brief"
+        request = {"title": title}
         branch = await self.get_branch(branch_id)
         outputs = await self.repos.agent_outputs.list_by_branch(branch_id)
         selections = await self.repos.output_selections.list_by_branch(branch_id)
@@ -1241,44 +1273,94 @@ class MultiplayerService:
             for ordinal, output in enumerate(included, start=1)
         ]
         async with self.db.transaction():
+            if idempotency_key is not None:
+                prior = await self._claim_idempotency(
+                    branch_id, created_by, idempotency_key, operation, request
+                )
+                if prior is not None:
+                    return await self._replay_branch_synthesis(prior.result_ref)
             await self.repos.branch_syntheses.create_with_inputs(synthesis, inputs)
+            if idempotency_key is not None:
+                await self._record_idempotency(
+                    branch_id,
+                    created_by,
+                    idempotency_key,
+                    operation,
+                    request,
+                    synthesis.synthesis_id,
+                )
         try:
             model_result = await self.nexus.synthesize_selected_outputs(
                 title=title,
                 prompt=branch.initiating_prompt,
                 outputs=selected_records,
             )
-        except ModelProviderError as exc:
-            async with self.db.transaction():
-                await self.repos.branch_syntheses.mark_failed(synthesis.synthesis_id, str(exc))
-                started_event = await self.repos.events.append_with_next_sequence_in_transaction(
-                    RoomEvent(
-                        room_id=branch.room_id,
-                        sequence=0,
-                        event_type=EventType.BRANCH_SYNTHESIS_STARTED,
-                        payload={
-                            "branch_id": branch_id,
-                            "synthesis_id": synthesis.synthesis_id,
-                            "selected_output_ids": [item.output_id for item in inputs],
-                        },
-                        actor_id=created_by,
-                        actor_type="user",
-                        timestamp=synthesis.created_at,
-                    )
-                )
-                failed_event = await self.repos.events.append_with_next_sequence_in_transaction(
-                    RoomEvent(
-                        room_id=branch.room_id,
-                        sequence=0,
-                        event_type=EventType.BRANCH_SYNTHESIS_FAILED,
-                        payload={"branch_id": branch_id, "synthesis_id": synthesis.synthesis_id},
-                        actor_id=created_by,
-                        actor_type="user",
-                    )
-                )
-            await self._broadcast_persisted_events([started_event, failed_event])
-            raise DomainError(str(exc)) from exc
+            return await self._complete_branch_synthesis(
+                branch, synthesis, inputs, included, title, created_by, model_result
+            )
+        except Exception as exc:
+            # The key was claimed before the model call. Any failure after that
+            # point must leave a terminal FAILED row, so a replay says "retry with
+            # a new key" instead of reporting the synthesis as running forever.
+            await self._fail_branch_synthesis(branch, synthesis, inputs, created_by, str(exc))
+            if isinstance(exc, ModelProviderError):
+                raise DomainError(str(exc)) from exc
+            raise
 
+    async def _fail_branch_synthesis(
+        self,
+        branch: Branch,
+        synthesis: BranchSynthesis,
+        inputs: list[BranchSynthesisInput],
+        created_by: str,
+        error: str,
+    ) -> None:
+        async with self.db.transaction():
+            current = await self.repos.branch_syntheses.get(synthesis.synthesis_id)
+            if current is None or current.status is not BranchSynthesisStatus.RUNNING:
+                return
+            await self.repos.branch_syntheses.mark_failed(synthesis.synthesis_id, error)
+            started_event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=branch.room_id,
+                    sequence=0,
+                    event_type=EventType.BRANCH_SYNTHESIS_STARTED,
+                    payload={
+                        "branch_id": branch.branch_id,
+                        "synthesis_id": synthesis.synthesis_id,
+                        "selected_output_ids": [item.output_id for item in inputs],
+                    },
+                    actor_id=created_by,
+                    actor_type="user",
+                    timestamp=synthesis.created_at,
+                )
+            )
+            failed_event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=branch.room_id,
+                    sequence=0,
+                    event_type=EventType.BRANCH_SYNTHESIS_FAILED,
+                    payload={
+                        "branch_id": branch.branch_id,
+                        "synthesis_id": synthesis.synthesis_id,
+                    },
+                    actor_id=created_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([started_event, failed_event])
+
+    async def _complete_branch_synthesis(
+        self,
+        branch: Branch,
+        synthesis: BranchSynthesis,
+        inputs: list[BranchSynthesisInput],
+        included: list[AgentOutput],
+        title: str,
+        created_by: str,
+        model_result: dict[str, Any],
+    ) -> tuple[Artifact, ArtifactVersion]:
+        branch_id = branch.branch_id
         document_value = model_result.get("document")
         if not isinstance(document_value, dict):
             raise DomainError("model provider returned invalid synthesis document")
@@ -1922,6 +2004,83 @@ class MultiplayerService:
 
     # ── Messages ─────────────────────────────────────────────────────────────
 
+    # ── Idempotency ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _validate_idempotency_key(value: str) -> str:
+        value = value.strip()
+        if not value or len(value) > 128:
+            raise DomainError("idempotency key must be 1-128 characters")
+        return value
+
+    @staticmethod
+    def _request_hash(operation: str, request: dict[str, Any]) -> str:
+        canonical = json.dumps(
+            {"operation": operation, "request": request},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    async def _claim_idempotency(
+        self,
+        scope_id: str,
+        user_id: str,
+        idempotency_key: str,
+        operation: str,
+        request: dict[str, Any],
+    ) -> IdempotencyRecord | None:
+        """Within a transaction: the prior claim on replay, None when the write is fresh."""
+        existing = await self.repos.idempotency.get(scope_id, user_id, idempotency_key)
+        if existing is None:
+            return None
+        if existing.operation != operation or existing.request_hash != self._request_hash(
+            operation, request
+        ):
+            raise IdempotencyConflict("idempotency key was already used for a different request")
+        return existing
+
+    async def _record_idempotency(
+        self,
+        scope_id: str,
+        user_id: str,
+        idempotency_key: str,
+        operation: str,
+        request: dict[str, Any],
+        result_ref: str,
+    ) -> None:
+        await self.repos.idempotency.create_in_transaction(
+            IdempotencyRecord(
+                scope_id=scope_id,
+                user_id=user_id,
+                idempotency_key=idempotency_key,
+                operation=operation,
+                request_hash=self._request_hash(operation, request),
+                result_ref=result_ref,
+            )
+        )
+
+    async def _replay_branch_synthesis(self, synthesis_id: str) -> tuple[Artifact, ArtifactVersion]:
+        synthesis = await self.repos.branch_syntheses.get(synthesis_id)
+        if synthesis is None:
+            raise DomainError("idempotent synthesis replay lost its result")
+        if synthesis.status is BranchSynthesisStatus.FAILED:
+            raise IdempotencyConflict(
+                f"synthesis {synthesis_id} failed; retry with a new idempotency key"
+            )
+        if synthesis.artifact_version_id is None:
+            raise IdempotencyConflict(
+                f"synthesis {synthesis_id} is still running; replay the key after it completes"
+            )
+        version = await self.repos.artifacts.get_version(synthesis.artifact_version_id)
+        artifact = await self.repos.artifacts.get(version.artifact_id) if version else None
+        if version is None or artifact is None:
+            raise DomainError("idempotent synthesis replay lost its artifact")
+        return artifact, version
+
+    # ── Messages ─────────────────────────────────────────────────────────────
+
     async def send_message(
         self,
         room_id: str,
@@ -1929,8 +2088,12 @@ class MultiplayerService:
         sender_id: str,
         content: str,
         metadata: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> Message:
         content = self._validate_non_empty(content, "message content")
+        if idempotency_key is not None:
+            idempotency_key = self._validate_idempotency_key(idempotency_key)
+        request = {"role": role.value, "content": content, "metadata": metadata or {}}
         msg = Message(
             message_id=new_id("msg"),
             room_id=room_id,
@@ -1940,22 +2103,43 @@ class MultiplayerService:
             metadata=metadata or {},
         )
         try:
-            event = await self.repos.messages.create_with_event_and_turn_guard(
-                msg,
-                RoomEvent(
-                    room_id=room_id,
-                    sequence=0,
-                    event_type=EventType.MESSAGE_CREATED,
-                    payload={
-                        "message_id": msg.message_id,
-                        "role": role.value,
-                        "sender_id": sender_id,
-                        "content": content[:500],
-                    },
-                    actor_id=sender_id,
-                    actor_type=role.value.lower(),
-                ),
-            )
+            async with self.db.transaction():
+                if idempotency_key is not None:
+                    prior = await self._claim_idempotency(
+                        room_id, sender_id, idempotency_key, "message.create", request
+                    )
+                    if prior is not None:
+                        replay = await self.repos.messages.get(prior.result_ref)
+                        if replay is None:
+                            raise DomainError("idempotent message replay lost its result")
+                        return replay
+                event = await self.repos.messages.create_with_event_and_turn_guard_in_transaction(
+                    msg,
+                    RoomEvent(
+                        room_id=room_id,
+                        sequence=0,
+                        event_type=EventType.MESSAGE_CREATED,
+                        payload={
+                            "message_id": msg.message_id,
+                            "role": role.value,
+                            "sender_id": sender_id,
+                            "content": content[:500],
+                        },
+                        actor_id=sender_id,
+                        actor_type=role.value.lower(),
+                    ),
+                )
+                if idempotency_key is not None:
+                    await self._record_idempotency(
+                        room_id,
+                        sender_id,
+                        idempotency_key,
+                        "message.create",
+                        request,
+                        msg.message_id,
+                    )
+        except DomainError:
+            raise
         except ValueError as exc:
             raise DomainError(str(exc)) from exc
         await self._broadcast_persisted_events([event])
