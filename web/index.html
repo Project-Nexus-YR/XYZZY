@@ -124,7 +124,7 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
 .empty-outputs{grid-column:1/-1;border:1px dashed var(--border);border-radius:var(--radius);padding:22px;text-align:center;color:var(--text2);font-size:11px;line-height:1.5}
 .synthesis-gate{margin:0 16px 14px;padding:11px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface2)}
 .synthesis-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.synthesis-title{font-size:11px;font-weight:700}.synthesis-meta{font-size:9px;color:var(--text2);margin-top:3px;line-height:1.4}
+.synthesis-actions{display:flex;align-items:center;gap:7px;flex-shrink:0}#synthesis-type{font:inherit;font-size:10px;padding:6px 7px;border:1px solid var(--border);border-radius:5px;background:var(--surface);color:var(--text)}.synthesis-title{font-size:11px;font-weight:700}.synthesis-meta{font-size:9px;color:var(--text2);margin-top:3px;line-height:1.4}
 .records{margin:0 16px 16px;border-top:1px solid var(--border);padding-top:10px}.records summary{font-size:10px;color:var(--text2);cursor:pointer}
 .records h3{padding:12px 0 5px}.records .panel-section{padding:0;border:0}
 .ontology-panel{margin:0 16px 16px;border:1px solid var(--border);border-radius:11px;background:var(--surface2);overflow:hidden}
@@ -254,7 +254,14 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
       <div class="synthesis-title" id="selection-summary">No outputs selected</div>
       <div class="synthesis-meta">Selections are shared with room members and every published claim links to exact source evidence.</div>
     </div>
-    <button class="btn-primary" id="synthesize-button" onclick="synthesizeDecisionBrief()" disabled>Synthesize decision brief</button>
+    <div class="synthesis-actions">
+      <select id="synthesis-type" aria-label="Synthesis type" onchange="updateSelectionSummary()">
+        <option value="GENERAL_SYNTHESIS">General Synthesis</option>
+        <option value="DECISION_BRIEF" selected>Decision Brief</option>
+        <option value="PROGRESS_REPORT">Progress Report</option>
+      </select>
+      <button class="btn-primary" id="synthesize-button" onclick="publishSynthesis()" disabled>Publish Decision Brief</button>
+    </div>
   </div>
 </div>
 </section>
@@ -747,6 +754,7 @@ function handleRealtimeEvent(msg) {
         break;
       case 'agent.run.started': case 'agent.output.created': case 'agent.run.completed':
       case 'output.selection.updated': case 'artifact.decision_brief_synthesized':
+      case 'artifact.synthesis_published':
       case 'ontology.materialized': case 'ontology.assertion_confirmed':
       case 'ontology.assertion_corrected':
         loadState();
@@ -1233,6 +1241,8 @@ function applyPermissions() {
   if (sendButton) { sendButton.disabled = !canEdit || Boolean(currentTurnLock); sendButton.title = canEdit ? '' : readOnly; }
   const synthesizeButton = document.getElementById('synthesize-button');
   if (synthesizeButton && !canEdit) { synthesizeButton.disabled = true; synthesizeButton.title = readOnly; }
+  const synthesisType = document.getElementById('synthesis-type');
+  if (synthesisType) { synthesisType.disabled = !canEdit; }
   document.querySelectorAll('.review-actions button').forEach(button => {
     button.disabled = !canEdit;
     button.title = canEdit ? '' : readOnly;
@@ -1374,23 +1384,34 @@ function updateSelectionSummary() {
     && reviewed === roomOutputs.length
     && included >= minimumIncluded;
   const synthesize = document.getElementById('synthesize-button');
+  const chosen = SYNTHESIS_TYPES[document.getElementById('synthesis-type').value];
   synthesize.disabled = !valid;
-  synthesize.textContent = included ? `Synthesize ${included} selected` : 'Synthesize';
+  synthesize.textContent = included
+    ? `Publish ${chosen.name} from ${included}`
+    : `Publish ${chosen.name}`;
   synthesize.title = valid ? '' : `Review every output and include at least ${minimumIncluded}`;
 }
 
-async function synthesizeDecisionBrief() {
+const SYNTHESIS_TYPES = {
+  GENERAL_SYNTHESIS: { name: 'General Synthesis', title: 'Authentication migration synthesis' },
+  DECISION_BRIEF: { name: 'Decision Brief', title: 'Authentication migration decision' },
+  PROGRESS_REPORT: { name: 'Progress Report', title: 'Authentication migration progress' }
+};
+
+async function publishSynthesis() {
   const button = document.getElementById('synthesize-button');
+  const type = document.getElementById('synthesis-type').value;
+  const chosen = SYNTHESIS_TYPES[type];
   button.disabled = true;
   try {
-    await api('POST', `/branches/${currentBranchId}/syntheses/decision-brief`, {
-      title: 'Authentication migration decision'
+    await api('POST', `/branches/${currentBranchId}/syntheses`, {
+      title: chosen.title, synthesis_type: type
     }, { idempotencyKey: idempotencyKey() });
     await loadState();
     openContext('artifacts');
-    toast('Decision Brief published.');
+    toast(`${chosen.name} published.`);
   } catch (err) {
-    toast(`Decision Brief was not published: ${errorMessage(err)}`, 'error');
+    toast(`${chosen.name} was not published: ${errorMessage(err)}`, 'error');
     updateSelectionSummary();
   }
 }

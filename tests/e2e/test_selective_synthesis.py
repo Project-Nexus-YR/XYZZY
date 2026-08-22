@@ -145,7 +145,8 @@ def test_selective_synthesis_persists_choices_and_exact_provenance_on_reconnect(
         assert "'Authorization': `Bearer ${accessToken}`" in ui
         assert "['multiai.v1', `bearer.${encodedToken}`]" in ui
         assert "output-selections/${outputId}" in ui
-        assert "syntheses/decision-brief" in ui
+        assert "/syntheses`," in ui
+        assert "synthesis_type: type" in ui
         assert "user_id=${userId}" not in ui
 
         with client.websocket_connect(
