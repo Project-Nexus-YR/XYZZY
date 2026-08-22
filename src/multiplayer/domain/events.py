@@ -58,6 +58,18 @@ class EventType(StrEnum):
     AGENT_RUN_COMPLETED = "agent.run.completed"
     OUTPUT_SELECTION_UPDATED = "output.selection.updated"
 
+    # First-class branch and turn ownership lifecycle.
+    BRANCH_STARTED = "branch.started"
+    BRANCH_COMPLETED = "branch.completed"
+    BRANCH_PARTIAL = "branch.partial"
+    BRANCH_FAILED = "branch.failed"
+    BRANCH_CANCELLED = "branch.cancelled"
+    TURN_LOCK_ACQUIRED = "turn_lock.acquired"
+    TURN_LOCK_RELEASED = "turn_lock.released"
+    BRANCH_SYNTHESIS_STARTED = "branch.synthesis.started"
+    BRANCH_SYNTHESIS_COMPLETED = "branch.synthesis.completed"
+    BRANCH_SYNTHESIS_FAILED = "branch.synthesis.failed"
+
     # Artifacts
     ARTIFACT_CREATED = "artifact.created"
     ARTIFACT_UPDATED = "artifact.updated"

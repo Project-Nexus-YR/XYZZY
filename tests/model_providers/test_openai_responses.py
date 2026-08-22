@@ -158,6 +158,34 @@ def test_environment_configuration_does_not_require_a_request_credential() -> No
 
 
 @pytest.mark.asyncio
+async def test_synthesis_schema_opts_into_responses_structured_output() -> None:
+    transport = _RoleAwareTransport()
+    provider = OpenAIResponsesProvider(
+        api_key="sk-test-not-real",
+        model="gpt-test",
+        async_transport=transport,
+    )
+    schema = {
+        "type": "object",
+        "properties": {"claims": {"type": "array", "items": {"type": "string"}}},
+        "required": ["claims"],
+        "additionalProperties": False,
+    }
+
+    # The transport only needs a Specialist role marker to synthesize its test
+    # response; this assertion is about the outgoing Responses request.
+    await provider.acomplete("Specialist role: Synthesizer", schema)
+
+    request = transport.requests[0]
+    assert request["text"]["format"] == {
+        "type": "json_schema",
+        "name": "multiai_response",
+        "strict": True,
+        "schema": schema,
+    }
+
+
+@pytest.mark.asyncio
 async def test_provider_timeout_is_explicit_and_sanitized() -> None:
     provider = OpenAIResponsesProvider(
         api_key="sk-test-must-never-appear",

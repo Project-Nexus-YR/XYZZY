@@ -164,6 +164,43 @@ class AgentRoomMembership:
     joined_at: datetime = field(default_factory=utcnow)
 
 
+# ── Branch ───────────────────────────────────────────────────────────────────
+
+
+class BranchMode(StrEnum):
+    TURN_LOCKED_SINGLE = "TURN_LOCKED_SINGLE"
+    PARALLEL = "PARALLEL"
+
+
+class BranchStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+@dataclass(frozen=True, slots=True)
+class Branch:
+    """One immutable AI-work context inside a durable room/channel."""
+
+    branch_id: str
+    room_id: str
+    mode: BranchMode
+    status: BranchStatus
+    initiated_by: str
+    initiating_prompt: str
+    context_event_sequence: int
+    context_message_ids: tuple[str, ...]
+    context_snapshot: dict[str, Any]
+    context_hash: str
+    lifecycle_managed: bool = True
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+    completed_at: datetime | None = None
+
+
 # ── Session & Execution ──────────────────────────────────────────────────────
 
 
@@ -200,6 +237,7 @@ class Execution:
     execution_id: str
     session_id: str
     agent_id: str
+    branch_id: str = ""
     run_id: str | None = None
     status: ExecutionStatus = ExecutionStatus.PENDING
     input_data: dict[str, Any] = field(default_factory=dict)
@@ -219,6 +257,7 @@ class AgentOutput:
     execution_id: str
     agent_id: str
     content: str
+    branch_id: str = ""
     output_data: dict[str, Any] = field(default_factory=dict)
     # The human-authored prompt and the exact rendered provider request are
     # intentionally separate. The latter includes template instructions and
@@ -246,7 +285,66 @@ class OutputSelection:
     output_id: str
     disposition: OutputDisposition
     decided_by: str
+    branch_id: str = ""
     updated_at: datetime = field(default_factory=utcnow)
+
+
+class BranchSynthesisStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class BranchSynthesis:
+    synthesis_id: str
+    branch_id: str
+    room_id: str
+    title: str
+    initiated_by: str
+    status: BranchSynthesisStatus = BranchSynthesisStatus.PENDING
+    synthesis_type: str = "DECISION_BRIEF"
+    provider_input: str = ""
+    provider_name: str = ""
+    provider_model: str = ""
+    provider_response_id: str = ""
+    provider_evidence: str = ""
+    simulated: bool = False
+    content: str = ""
+    error: str = ""
+    artifact_version_id: str | None = None
+    created_at: datetime = field(default_factory=utcnow)
+    completed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BranchSynthesisInput:
+    synthesis_id: str
+    output_id: str
+    ordinal: int
+
+
+class TurnLockScopeType(StrEnum):
+    ROOM = "ROOM"
+
+
+class TurnLockStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    RELEASED = "RELEASED"
+
+
+@dataclass(frozen=True, slots=True)
+class TurnLock:
+    lock_id: str
+    scope_type: TurnLockScopeType
+    scope_id: str
+    branch_id: str
+    status: TurnLockStatus
+    acquired_by: str
+    acquired_at: datetime = field(default_factory=utcnow)
+    released_at: datetime | None = None
+    release_reason: str = ""
 
 
 # ── Task ─────────────────────────────────────────────────────────────────────
@@ -346,6 +444,7 @@ class ArtifactVersion:
     content: str = ""
     content_hash: str = ""
     provenance_hash: str = ""
+    branch_synthesis_id: str | None = None
     created_by: str = ""
     created_at: datetime = field(default_factory=utcnow)
 

@@ -1,0 +1,209 @@
+{
+  "version": 1,
+  "skills": {
+    "adapt": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/adapt/SKILL.md",
+      "computedHash": "65085998d643c3b64ff323ca74d76496b47484046b030730c00c03a0208bf410"
+    },
+    "animate": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/animate/SKILL.md",
+      "computedHash": "598aa75213d0b6b35789d6dcea8c65a736959d96b6378902555e876a5a6d2eb0"
+    },
+    "audit": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/audit/SKILL.md",
+      "computedHash": "115a00d21d91d52123115af789948cb22bd604de0084837b5533f5e4af3c4055"
+    },
+    "bolder": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/bolder/SKILL.md",
+      "computedHash": "b201a3b0d9b7f60ddd829783adfe48d4733763147af836853b11ff911ee50be3"
+    },
+    "brandkit": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/brandkit/SKILL.md",
+      "computedHash": "b63012f3c3d21197e0185d3e9cc7ec40c589fb10e0b5a32a561739de31aa3f20"
+    },
+    "clarify": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/clarify/SKILL.md",
+      "computedHash": "42877142fcc51dcc6be696349aa7df8887eb29510e2a5868beac913f5f84de31"
+    },
+    "colorize": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/colorize/SKILL.md",
+      "computedHash": "d3a831cc5ce7660628e07175ba40a60c8341dc81ea1e8ee8ea6be10c9702ceae"
+    },
+    "cosmic-glass-dashboard": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/cosmic-glass-dashboard/SKILL.md",
+      "computedHash": "94621f50623d35637d398e26f4a3d7055e9eb6090c4ff3e257f8b237c10f533c"
+    },
+    "critique": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/critique/SKILL.md",
+      "computedHash": "1217790cec89f8bf55f45ab0d98c30b04613af7dca162ac111f5d2e0f92d4964"
+    },
+    "delight": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/delight/SKILL.md",
+      "computedHash": "9f83cb80f31bf2b3f7e2f49925bcf4d4995285d46e8025b7c71f2b0035aba92d"
+    },
+    "design-taste-frontend": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/design-taste-frontend/SKILL.md",
+      "computedHash": "9d1e82c5c409d2b0247245a005bc0f7e4447c0999b78dcea60f568c1ba4a6694"
+    },
+    "distill": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/distill/SKILL.md",
+      "computedHash": "3a66a8ff1ec099ed2fd08c4dea17fd2eb5deb44bf1643197ca418b1351c88460"
+    },
+    "emil-design-eng": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/emil-design-eng/SKILL.md",
+      "computedHash": "8bdf9e4e6de7a4969147bf4828a4ad2c5aacd9fba4b690b250a85e0467ca387d"
+    },
+    "frontend-design": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/frontend-design/SKILL.md",
+      "computedHash": "4eabc66183767153e404b39d1b839b1c37f2d82d86f0a0d7e880a579d8d62336"
+    },
+    "full-output-enforcement": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/full-output-enforcement/SKILL.md",
+      "computedHash": "26bd29ce4c5e02c7666b2d503609bf466bd32290822e91f0e984147048dbb924"
+    },
+    "gpt-taste": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/gpt-taste/SKILL.md",
+      "computedHash": "cc8f0c601d8240a124e1d11634351a2be7b8a72fd807c75e5b6bf7afcd5ddee0"
+    },
+    "high-end-visual-design": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/high-end-visual-design/SKILL.md",
+      "computedHash": "7db385e4c5370e5a7fca9704a1361b056e4504ea6a03924bb86f33a4f00b5c73"
+    },
+    "image-to-code": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/image-to-code/SKILL.md",
+      "computedHash": "58517b03b2a01f4c9ba65861559d03df931400871bbc200978c975b24bb92c73"
+    },
+    "imagegen-frontend-mobile": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/imagegen-frontend-mobile/SKILL.md",
+      "computedHash": "9ab7f4f6ce66a3cff02bbf5894e5bd5af50bf5d6ef0adffdc88e8fab772fe44f"
+    },
+    "imagegen-frontend-web": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/imagegen-frontend-web/SKILL.md",
+      "computedHash": "65f5ae59fa317567809438310b1c54f78cd133426deb43e4d3d4ca4c8f541628"
+    },
+    "impeccable": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/impeccable/SKILL.md",
+      "computedHash": "8cdf2e788eaca3af7d02026ef9cec55b506100a00d130f938e3fb1ad669c0ad0"
+    },
+    "industrial-brutalist-ui": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/industrial-brutalist-ui/SKILL.md",
+      "computedHash": "8fc355c4aadb7d29c53ca28bc41be3cd6eea765d121e3737c4dc2d0f90a8effa"
+    },
+    "layout": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/layout/SKILL.md",
+      "computedHash": "6b5fd49587616ca1e594e9c6b11bc1cef5eb0b2d137c307de54a8a650770f4ce"
+    },
+    "minimalist-ui": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/minimalist-ui/SKILL.md",
+      "computedHash": "08873a3131d3be27bef9bf3304b310b16b44ca6e3561aebe532797be3443f6bd"
+    },
+    "optimize": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/optimize/SKILL.md",
+      "computedHash": "979ffc76a4345c081fdf89078b7107c216d70696e027b23e8e24972dd4e457b2"
+    },
+    "overdrive": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/overdrive/SKILL.md",
+      "computedHash": "f057bbd0cf136e080ed27e7df6c5925e1f4970297a435230c1850882a031c59d"
+    },
+    "polish": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/polish/SKILL.md",
+      "computedHash": "c294f2570dcc5b8865d17f0dc5ef339a700c868f1b20fa9994297f64ace2d4de"
+    },
+    "quieter": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/quieter/SKILL.md",
+      "computedHash": "73df5b87ec715a181eef0d51b8f6f0c39bef4ceb6c4e5ccd28d90bef1b00fba5"
+    },
+    "redesign-existing-projects": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/redesign-existing-projects/SKILL.md",
+      "computedHash": "b405eee0e0e80fc243f731d9aa368bca307e356db7e6157d27101d369dac6726"
+    },
+    "shape": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/shape/SKILL.md",
+      "computedHash": "afb18fe64453596a822603a67c0fd9803d79244649ce629f4d3650c193e822d9"
+    },
+    "stitch-design-taste": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/stitch-design-taste/SKILL.md",
+      "computedHash": "3aa58992f0fd9673b975cd48cd4f8ae4b4976fd5cdd9f20e26d3d447aee317fb"
+    },
+    "typeset": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/typeset/SKILL.md",
+      "computedHash": "1cd76e560d1ba25b0bd5f7adfa2957a9f653a3ad0b031d467221154fcd1e0423"
+    },
+    "ui-ux-pro-max": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/ui-ux-pro-max/SKILL.md",
+      "computedHash": "85745980494a4f9a8064b5f2139a36f775a4c910b857d3e1a6befb8db928ad91"
+    },
+    "website": {
+      "source": "tyfarrago-hub/taste",
+      "sourceType": "github",
+      "skillPath": "skills/website/SKILL.md",
+      "computedHash": "ad83ae428e2782c70cabdecb591c2412586be002c3f6a5597720b63ac0bdc50b"
+    }
+  }
+}

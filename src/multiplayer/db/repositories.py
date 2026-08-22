@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import replace
@@ -21,9 +22,16 @@ from ..domain.models import (
     ArtifactType,
     ArtifactVersion,
     BootstrapContext,
+    Branch,
+    BranchMode,
+    BranchStatus,
+    BranchSynthesis,
+    BranchSynthesisInput,
+    BranchSynthesisStatus,
     ClaimSource,
     Decision,
     DecisionStatus,
+    DomainError,
     Execution,
     ExecutionStatus,
     Memory,
@@ -56,10 +64,14 @@ from ..domain.models import (
     TaskPriority,
     TaskStatus,
     ToolPermission,
+    TurnLock,
+    TurnLockScopeType,
+    TurnLockStatus,
     User,
     UserStatus,
     Workspace,
     WorkspaceMember,
+    new_id,
     utcnow,
 )
 from .connection import Database, serialize_datetime
@@ -79,10 +91,13 @@ class Repos:
         self.rooms = RoomRepo(db)
         self.room_members = RoomMemberRepo(db)
         self.agents = AgentRepo(db)
+        self.branches = BranchRepo(db)
         self.sessions = SessionRepo(db)
         self.executions = ExecutionRepo(db)
         self.agent_outputs = AgentOutputRepo(db)
         self.output_selections = OutputSelectionRepo(db)
+        self.branch_syntheses = BranchSynthesisRepo(db)
+        self.turn_locks = TurnLockRepo(db)
         self.tasks = TaskRepo(db)
         self.messages = MessageRepo(db)
         self.events = EventRepo(db)
@@ -94,6 +109,83 @@ class Repos:
         self.presence = PresenceRepo(db)
         self.tool_permissions = ToolPermissionRepo(db)
         self.ontology = OntologyRepo(db)
+
+
+async def _finish_managed_branch_if_terminal(
+    db: Database,
+    branch_id: str,
+    room_id: str,
+    actor_id: str,
+) -> list[RoomEvent]:
+    """Derive a branch terminal status from every owned AgentRun."""
+    branch_row = await db.fetch_one(
+        "SELECT lifecycle_managed, status FROM branches WHERE branch_id = ?", (branch_id,)
+    )
+    if branch_row is None or not bool(branch_row["lifecycle_managed"]):
+        return []
+    if branch_row["status"] in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
+        return []
+    rows = await db.fetch_all(
+        "SELECT status FROM executions WHERE branch_id = ? ORDER BY execution_id", (branch_id,)
+    )
+    if not rows:
+        return []
+    terminal_values = {"COMPLETED", "FAILED", "CANCELLED"}
+    statuses = [str(row["status"]) for row in rows]
+    if any(status not in terminal_values for status in statuses):
+        return []
+    distinct = set(statuses)
+    if len(distinct) > 1:
+        branch_status = BranchStatus.PARTIAL
+        event_type = EventType.BRANCH_PARTIAL
+    elif statuses[0] == "COMPLETED":
+        branch_status = BranchStatus.COMPLETED
+        event_type = EventType.BRANCH_COMPLETED
+    elif statuses[0] == "FAILED":
+        branch_status = BranchStatus.FAILED
+        event_type = EventType.BRANCH_FAILED
+    else:
+        branch_status = BranchStatus.CANCELLED
+        event_type = EventType.BRANCH_CANCELLED
+    completed_at = serialize_datetime(utcnow())
+    await db.execute(
+        "UPDATE branches SET status = ?, updated_at = ?, completed_at = ? WHERE branch_id = ?",
+        (branch_status.value, completed_at, completed_at, branch_id),
+    )
+    events = [
+        RoomEvent(
+            room_id=room_id,
+            sequence=0,
+            event_type=event_type,
+            payload={"branch_id": branch_id, "status": branch_status.value},
+            actor_id=actor_id,
+            actor_type="agent",
+        )
+    ]
+    lock_row = await db.fetch_one(
+        "SELECT lock_id FROM turn_locks WHERE branch_id = ? AND status = 'ACTIVE'", (branch_id,)
+    )
+    if lock_row is not None:
+        await db.execute(
+            "UPDATE turn_locks SET status = 'RELEASED', released_at = ?, release_reason = ? "
+            "WHERE lock_id = ?",
+            (completed_at, branch_status.value, lock_row["lock_id"]),
+        )
+        events.append(
+            RoomEvent(
+                room_id=room_id,
+                sequence=0,
+                event_type=EventType.TURN_LOCK_RELEASED,
+                payload={
+                    "lock_id": lock_row["lock_id"],
+                    "branch_id": branch_id,
+                    "reason": branch_status.value,
+                },
+                actor_id=actor_id,
+                actor_type="agent",
+            )
+        )
+    return events
 
 
 class UserRepo:
@@ -623,6 +715,133 @@ class AgentRepo:
         )
 
 
+class BranchRepo:
+    """Durable branch context and lifecycle state."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create(self, branch: Branch) -> Branch:
+        await self.db.execute(
+            "INSERT INTO branches(branch_id, room_id, mode, status, initiated_by, "
+            "initiating_prompt, context_event_sequence, context_message_ids, context_snapshot, "
+            "context_hash, lifecycle_managed, created_at, updated_at, completed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                branch.branch_id,
+                branch.room_id,
+                branch.mode.value,
+                branch.status.value,
+                branch.initiated_by,
+                branch.initiating_prompt,
+                branch.context_event_sequence,
+                json.dumps(branch.context_message_ids),
+                json.dumps(branch.context_snapshot, sort_keys=True, separators=(",", ":")),
+                branch.context_hash,
+                int(branch.lifecycle_managed),
+                serialize_datetime(branch.created_at),
+                serialize_datetime(branch.updated_at),
+                serialize_datetime(branch.completed_at),
+            ),
+        )
+        await self.db.commit()
+        return branch
+
+    async def get(self, branch_id: str) -> Branch | None:
+        row = await self.db.fetch_one("SELECT * FROM branches WHERE branch_id = ?", (branch_id,))
+        return None if row is None else self._from_row(row)
+
+    async def list_by_room(self, room_id: str) -> list[Branch]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM branches WHERE room_id = ? ORDER BY created_at, branch_id",
+            (room_id,),
+        )
+        return [self._from_row(row) for row in rows]
+
+    async def get_or_create_legacy(self, room_id: str, initiated_by: str) -> Branch:
+        row = await self.db.fetch_one(
+            "SELECT * FROM branches WHERE room_id = ? AND lifecycle_managed = 0",
+            (room_id,),
+        )
+        if row is not None:
+            return self._from_row(row)
+        seq_row = await self.db.fetch_one(
+            "SELECT seq FROM room_sequences WHERE room_id = ?", (room_id,)
+        )
+        sequence = int(seq_row["seq"]) if seq_row else 0
+        snapshot = {"boundary": "LEGACY_LOW_LEVEL_API", "messages": []}
+        encoded = json.dumps(
+            {
+                "context_event_sequence": sequence,
+                "context_message_ids": [],
+                "context_snapshot": snapshot,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        branch = Branch(
+            branch_id=new_id("branch"),
+            room_id=room_id,
+            mode=BranchMode.PARALLEL,
+            status=BranchStatus.RUNNING,
+            initiated_by=initiated_by,
+            initiating_prompt="LEGACY_LOW_LEVEL_WORKFLOW",
+            context_event_sequence=sequence,
+            context_message_ids=(),
+            context_snapshot=snapshot,
+            context_hash=hashlib.sha256(encoded).hexdigest(),
+            lifecycle_managed=False,
+        )
+        return await self.create(branch)
+
+    async def update_status(self, branch_id: str, status: BranchStatus) -> None:
+        completed_at = (
+            serialize_datetime(utcnow())
+            if status
+            in {
+                BranchStatus.COMPLETED,
+                BranchStatus.PARTIAL,
+                BranchStatus.FAILED,
+                BranchStatus.CANCELLED,
+            }
+            else None
+        )
+        await self.db.execute(
+            "UPDATE branches SET status = ?, updated_at = ?, completed_at = ? WHERE branch_id = ?",
+            (status.value, serialize_datetime(utcnow()), completed_at, branch_id),
+        )
+        await self.db.commit()
+
+    @staticmethod
+    def _from_row(row: dict[str, Any]) -> Branch:
+        try:
+            message_ids = json.loads(row["context_message_ids"])
+        except (json.JSONDecodeError, TypeError):
+            message_ids = []
+        try:
+            snapshot = json.loads(row["context_snapshot"])
+        except (json.JSONDecodeError, TypeError):
+            snapshot = {}
+        return Branch(
+            branch_id=row["branch_id"],
+            room_id=row["room_id"],
+            mode=BranchMode(row["mode"]),
+            status=BranchStatus(row["status"]),
+            initiated_by=row["initiated_by"],
+            initiating_prompt=row["initiating_prompt"],
+            context_event_sequence=int(row["context_event_sequence"]),
+            context_message_ids=tuple(str(item) for item in message_ids),
+            context_snapshot=dict(snapshot) if isinstance(snapshot, dict) else {},
+            context_hash=row["context_hash"],
+            lifecycle_managed=bool(row["lifecycle_managed"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+            completed_at=(
+                datetime.fromisoformat(row["completed_at"]) if row.get("completed_at") else None
+            ),
+        )
+
+
 class SessionRepo:
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -683,14 +902,23 @@ class ExecutionRepo:
         self.db = db
 
     async def create(self, execution: Execution) -> Execution:
+        if not execution.branch_id:
+            session = await SessionRepo(self.db).get(execution.session_id)
+            if session is None:
+                raise ValueError("execution session not found")
+            branch = await BranchRepo(self.db).get_or_create_legacy(
+                session.room_id, execution.agent_id
+            )
+            execution = replace(execution, branch_id=branch.branch_id)
         await self.db.execute(
-            "INSERT INTO executions(execution_id, session_id, agent_id, run_id, status, "
-            "input_data, output_data, error, started_at, completed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO executions(execution_id, session_id, agent_id, branch_id, run_id, "
+            "status, input_data, output_data, error, started_at, completed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 execution.execution_id,
                 execution.session_id,
                 execution.agent_id,
+                execution.branch_id,
                 execution.run_id,
                 execution.status.value,
                 json.dumps(execution.input_data),
@@ -710,18 +938,32 @@ class ExecutionRepo:
     ) -> RoomEvent:
         """Atomically activate a session, create its execution, and append the run event."""
         async with self.db.transaction():
+            session = await SessionRepo(self.db).get(execution.session_id)
+            if session is None:
+                raise DomainError("execution session not found")
+            active_lock = await TurnLockRepo(self.db).get_active(
+                TurnLockScopeType.ROOM, session.room_id
+            )
+            if active_lock is not None and execution.branch_id != active_lock.branch_id:
+                raise DomainError(f"room turn is locked by branch {active_lock.branch_id}")
+            if not execution.branch_id:
+                branch = await BranchRepo(self.db).get_or_create_legacy(
+                    session.room_id, execution.agent_id
+                )
+                execution = replace(execution, branch_id=branch.branch_id)
             await self.db.execute(
                 "UPDATE sessions SET status = ? WHERE session_id = ?",
                 (SessionStatus.ACTIVE.value, execution.session_id),
             )
             await self.db.execute(
-                "INSERT INTO executions(execution_id, session_id, agent_id, run_id, status, "
-                "input_data, output_data, error, started_at, completed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO executions(execution_id, session_id, agent_id, branch_id, run_id, "
+                "status, input_data, output_data, error, started_at, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     execution.execution_id,
                     execution.session_id,
                     execution.agent_id,
+                    execution.branch_id,
                     execution.run_id,
                     execution.status.value,
                     json.dumps(execution.input_data),
@@ -791,6 +1033,39 @@ class ExecutionRepo:
         )
         await self.db.commit()
 
+    async def terminalize_without_output(
+        self,
+        execution: Execution,
+        status: ExecutionStatus,
+        error: str,
+        events: list[RoomEvent],
+    ) -> list[RoomEvent]:
+        if status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            raise ValueError("terminal execution status must be FAILED or CANCELLED")
+        persisted_events: list[RoomEvent] = []
+        async with self.db.transaction():
+            completed_at = serialize_datetime(utcnow())
+            await self.db.execute(
+                "UPDATE executions SET status = ?, error = ?, completed_at = ? "
+                "WHERE execution_id = ?",
+                (status.value, error, completed_at, execution.execution_id),
+            )
+            await self.db.execute(
+                "UPDATE sessions SET status = ?, ended_at = ? WHERE session_id = ?",
+                (SessionStatus.FAILED.value, completed_at, execution.session_id),
+            )
+            session = await SessionRepo(self.db).get(execution.session_id)
+            if session is None:
+                raise ValueError("execution session not found")
+            branch_events = await _finish_managed_branch_if_terminal(
+                self.db, execution.branch_id, session.room_id, execution.agent_id
+            )
+            for event in [*events, *branch_events]:
+                persisted_events.append(
+                    await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
+                )
+        return persisted_events
+
     async def list_by_session(self, session_id: str) -> list[Execution]:
         rows = await self.db.fetch_all(
             "SELECT * FROM executions WHERE session_id = ? ORDER BY started_at", (session_id,)
@@ -806,6 +1081,13 @@ class ExecutionRepo:
         )
         return [self._from_row(r) for r in rows]
 
+    async def list_by_branch(self, branch_id: str) -> list[Execution]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM executions WHERE branch_id = ? ORDER BY started_at, execution_id",
+            (branch_id,),
+        )
+        return [self._from_row(row) for row in rows]
+
     def _from_row(self, row: dict[str, Any]) -> Execution:
         try:
             input_data = json.loads(row["input_data"])
@@ -819,6 +1101,7 @@ class ExecutionRepo:
             execution_id=row["execution_id"],
             session_id=row["session_id"],
             agent_id=row["agent_id"],
+            branch_id=row.get("branch_id") or "",
             run_id=row.get("run_id"),
             status=ExecutionStatus(row["status"]),
             input_data=input_data,
@@ -839,20 +1122,35 @@ class AgentOutputRepo:
 
     async def get(self, output_id: str) -> AgentOutput | None:
         row = await self.db.fetch_one(
-            "SELECT * FROM agent_outputs WHERE output_id = ?", (output_id,)
+            "SELECT o.*, e.branch_id AS branch_id FROM agent_outputs o "
+            "LEFT JOIN executions e ON e.execution_id = o.execution_id WHERE o.output_id = ?",
+            (output_id,),
         )
         return None if row is None else self._from_row(row)
 
     async def get_by_execution(self, execution_id: str) -> AgentOutput | None:
         row = await self.db.fetch_one(
-            "SELECT * FROM agent_outputs WHERE execution_id = ?", (execution_id,)
+            "SELECT o.*, e.branch_id AS branch_id FROM agent_outputs o "
+            "LEFT JOIN executions e ON e.execution_id = o.execution_id WHERE o.execution_id = ?",
+            (execution_id,),
         )
         return None if row is None else self._from_row(row)
 
     async def list_by_room(self, room_id: str) -> list[AgentOutput]:
         rows = await self.db.fetch_all(
-            "SELECT * FROM agent_outputs WHERE room_id = ? ORDER BY created_at",
+            "SELECT o.*, e.branch_id AS branch_id FROM agent_outputs o "
+            "LEFT JOIN executions e ON e.execution_id = o.execution_id "
+            "WHERE o.room_id = ? ORDER BY o.created_at",
             (room_id,),
+        )
+        return [self._from_row(row) for row in rows]
+
+    async def list_by_branch(self, branch_id: str) -> list[AgentOutput]:
+        rows = await self.db.fetch_all(
+            "SELECT o.*, e.branch_id AS branch_id FROM agent_outputs o "
+            "JOIN executions e ON e.execution_id = o.execution_id "
+            "WHERE e.branch_id = ? ORDER BY o.created_at, o.output_id",
+            (branch_id,),
         )
         return [self._from_row(row) for row in rows]
 
@@ -903,7 +1201,10 @@ class AgentOutputRepo:
                 "UPDATE sessions SET status = ?, ended_at = ? WHERE session_id = ?",
                 (SessionStatus.COMPLETED.value, completed_at, output.session_id),
             )
-            for event in events:
+            branch_events = await _finish_managed_branch_if_terminal(
+                self.db, output.branch_id, output.room_id, output.agent_id
+            )
+            for event in [*events, *branch_events]:
                 cursor = await self.db.execute(
                     "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
                     "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
@@ -953,6 +1254,7 @@ class AgentOutputRepo:
             execution_id=row["execution_id"],
             agent_id=row["agent_id"],
             content=row["content"],
+            branch_id=row.get("branch_id") or "",
             output_data=output_data,
             source_prompt=row["source_prompt"],
             provider_input=row.get("provider_input", ""),
@@ -975,8 +1277,8 @@ class OutputSelectionRepo:
         async with self.db.transaction():
             await self.db.execute(
                 "INSERT INTO output_selections(room_id, output_id, disposition, decided_by, "
-                "updated_at) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(room_id, output_id) DO UPDATE SET "
+                "updated_at, branch_id) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(room_id, output_id) DO UPDATE SET "
                 "disposition = excluded.disposition, decided_by = excluded.decided_by, "
                 "updated_at = excluded.updated_at",
                 (
@@ -985,6 +1287,7 @@ class OutputSelectionRepo:
                     selection.disposition.value,
                     selection.decided_by,
                     serialize_datetime(selection.updated_at),
+                    selection.branch_id,
                 ),
             )
             cursor = await self.db.execute(
@@ -1024,10 +1327,215 @@ class OutputSelectionRepo:
                 output_id=row["output_id"],
                 disposition=OutputDisposition(row["disposition"]),
                 decided_by=row["decided_by"],
+                branch_id=row.get("branch_id") or "",
                 updated_at=datetime.fromisoformat(row["updated_at"]),
             )
             for row in rows
         ]
+
+    async def list_by_branch(self, branch_id: str) -> list[OutputSelection]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM output_selections WHERE branch_id = ? ORDER BY updated_at, output_id",
+            (branch_id,),
+        )
+        return [
+            OutputSelection(
+                room_id=row["room_id"],
+                output_id=row["output_id"],
+                disposition=OutputDisposition(row["disposition"]),
+                decided_by=row["decided_by"],
+                branch_id=row["branch_id"],
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+            )
+            for row in rows
+        ]
+
+
+class BranchSynthesisRepo:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create_with_inputs(
+        self,
+        synthesis: BranchSynthesis,
+        inputs: list[BranchSynthesisInput],
+    ) -> BranchSynthesis:
+        await self.db.execute(
+            "INSERT INTO branch_syntheses(synthesis_id, branch_id, room_id, synthesis_type, "
+            "status, title, initiated_by, provider_input, provider_name, provider_model, "
+            "provider_response_id, provider_evidence, simulated, content, error, "
+            "artifact_version_id, created_at, completed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                synthesis.synthesis_id,
+                synthesis.branch_id,
+                synthesis.room_id,
+                synthesis.synthesis_type,
+                synthesis.status.value,
+                synthesis.title,
+                synthesis.initiated_by,
+                synthesis.provider_input,
+                synthesis.provider_name,
+                synthesis.provider_model,
+                synthesis.provider_response_id,
+                synthesis.provider_evidence,
+                int(synthesis.simulated),
+                synthesis.content,
+                synthesis.error,
+                synthesis.artifact_version_id,
+                serialize_datetime(synthesis.created_at),
+                serialize_datetime(synthesis.completed_at),
+            ),
+        )
+        for item in inputs:
+            await self.db.execute(
+                "INSERT INTO branch_synthesis_inputs(synthesis_id, output_id, ordinal) "
+                "VALUES (?, ?, ?)",
+                (item.synthesis_id, item.output_id, item.ordinal),
+            )
+        await self.db.commit()
+        return synthesis
+
+    async def get(self, synthesis_id: str) -> BranchSynthesis | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM branch_syntheses WHERE synthesis_id = ?", (synthesis_id,)
+        )
+        return None if row is None else self._from_row(row)
+
+    async def list_by_branch(self, branch_id: str) -> list[BranchSynthesis]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM branch_syntheses WHERE branch_id = ? ORDER BY created_at, synthesis_id",
+            (branch_id,),
+        )
+        return [self._from_row(row) for row in rows]
+
+    async def list_inputs(self, synthesis_id: str) -> list[BranchSynthesisInput]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM branch_synthesis_inputs WHERE synthesis_id = ? ORDER BY ordinal",
+            (synthesis_id,),
+        )
+        return [
+            BranchSynthesisInput(
+                synthesis_id=row["synthesis_id"],
+                output_id=row["output_id"],
+                ordinal=int(row["ordinal"]),
+            )
+            for row in rows
+        ]
+
+    async def mark_running(self, synthesis_id: str, provider_input: str) -> None:
+        await self.db.execute(
+            "UPDATE branch_syntheses SET status = ?, provider_input = ? WHERE synthesis_id = ?",
+            (BranchSynthesisStatus.RUNNING.value, provider_input, synthesis_id),
+        )
+        await self.db.commit()
+
+    async def mark_failed(self, synthesis_id: str, error: str) -> None:
+        await self.db.execute(
+            "UPDATE branch_syntheses SET status = ?, error = ?, completed_at = ? "
+            "WHERE synthesis_id = ?",
+            (
+                BranchSynthesisStatus.FAILED.value,
+                error,
+                serialize_datetime(utcnow()),
+                synthesis_id,
+            ),
+        )
+        await self.db.commit()
+
+    @staticmethod
+    def _from_row(row: dict[str, Any]) -> BranchSynthesis:
+        return BranchSynthesis(
+            synthesis_id=row["synthesis_id"],
+            branch_id=row["branch_id"],
+            room_id=row["room_id"],
+            synthesis_type=row["synthesis_type"],
+            status=BranchSynthesisStatus(row["status"]),
+            title=row["title"],
+            initiated_by=row["initiated_by"],
+            provider_input=row["provider_input"],
+            provider_name=row["provider_name"],
+            provider_model=row["provider_model"],
+            provider_response_id=row["provider_response_id"],
+            provider_evidence=row["provider_evidence"],
+            simulated=bool(row["simulated"]),
+            content=row["content"],
+            error=row["error"],
+            artifact_version_id=row.get("artifact_version_id"),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            completed_at=(
+                datetime.fromisoformat(row["completed_at"]) if row.get("completed_at") else None
+            ),
+        )
+
+
+class TurnLockRepo:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create(self, lock: TurnLock) -> TurnLock:
+        await self.db.execute(
+            "INSERT INTO turn_locks(lock_id, scope_type, scope_id, branch_id, status, "
+            "acquired_by, acquired_at, released_at, release_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                lock.lock_id,
+                lock.scope_type.value,
+                lock.scope_id,
+                lock.branch_id,
+                lock.status.value,
+                lock.acquired_by,
+                serialize_datetime(lock.acquired_at),
+                serialize_datetime(lock.released_at),
+                lock.release_reason,
+            ),
+        )
+        await self.db.commit()
+        return lock
+
+    async def get_active(self, scope_type: TurnLockScopeType, scope_id: str) -> TurnLock | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM turn_locks WHERE scope_type = ? AND scope_id = ? AND status = 'ACTIVE'",
+            (scope_type.value, scope_id),
+        )
+        return None if row is None else self._from_row(row)
+
+    async def get_by_branch(self, branch_id: str) -> TurnLock | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM turn_locks WHERE branch_id = ? ORDER BY acquired_at DESC LIMIT 1",
+            (branch_id,),
+        )
+        return None if row is None else self._from_row(row)
+
+    async def release(self, branch_id: str, reason: str) -> None:
+        await self.db.execute(
+            "UPDATE turn_locks SET status = ?, released_at = ?, release_reason = ? "
+            "WHERE branch_id = ? AND status = ?",
+            (
+                TurnLockStatus.RELEASED.value,
+                serialize_datetime(utcnow()),
+                reason,
+                branch_id,
+                TurnLockStatus.ACTIVE.value,
+            ),
+        )
+        await self.db.commit()
+
+    @staticmethod
+    def _from_row(row: dict[str, Any]) -> TurnLock:
+        return TurnLock(
+            lock_id=row["lock_id"],
+            scope_type=TurnLockScopeType(row["scope_type"]),
+            scope_id=row["scope_id"],
+            branch_id=row["branch_id"],
+            status=TurnLockStatus(row["status"]),
+            acquired_by=row["acquired_by"],
+            acquired_at=datetime.fromisoformat(row["acquired_at"]),
+            released_at=(
+                datetime.fromisoformat(row["released_at"]) if row.get("released_at") else None
+            ),
+            release_reason=row["release_reason"],
+        )
 
 
 class TaskRepo:
@@ -1137,6 +1645,22 @@ class MessageRepo:
         )
         await self.db.commit()
         return message
+
+    async def create_with_event_and_turn_guard(
+        self, message: Message, event: RoomEvent
+    ) -> RoomEvent:
+        """Serialize human messages against room turn-lock acquisition."""
+        async with self.db.transaction():
+            if message.role == MessageRole.HUMAN:
+                lock = await TurnLockRepo(self.db).get_active(
+                    TurnLockScopeType.ROOM, message.room_id
+                )
+                if lock is not None:
+                    raise ValueError(
+                        f"room turn is locked by branch {lock.branch_id} until it is terminal"
+                    )
+            await self.create(message)
+            return await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
 
     async def list_by_room(self, room_id: str, limit: int = 100, offset: int = 0) -> list[Message]:
         limit = min(limit, 500)
@@ -1328,8 +1852,8 @@ class ArtifactRepo:
         async with self.db.transaction():
             await self.db.execute(
                 "INSERT INTO artifact_versions(version_id, artifact_id, version_number, content, "
-                "content_hash, provenance_hash, created_by, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "content_hash, provenance_hash, branch_synthesis_id, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     version.version_id,
                     version.artifact_id,
@@ -1337,6 +1861,7 @@ class ArtifactRepo:
                     version.content,
                     version.content_hash,
                     version.provenance_hash,
+                    version.branch_synthesis_id,
                     version.created_by,
                     serialize_datetime(version.created_at),
                 ),
@@ -1360,6 +1885,7 @@ class ArtifactRepo:
                 content=r["content"],
                 content_hash=r["content_hash"],
                 provenance_hash=r.get("provenance_hash", ""),
+                branch_synthesis_id=r.get("branch_synthesis_id"),
                 created_by=r["created_by"],
                 created_at=datetime.fromisoformat(r["created_at"]),
             )
@@ -1379,6 +1905,7 @@ class ArtifactRepo:
             content=row["content"],
             content_hash=row["content_hash"],
             provenance_hash=row.get("provenance_hash", ""),
+            branch_synthesis_id=row.get("branch_synthesis_id"),
             created_by=row["created_by"],
             created_at=datetime.fromisoformat(row["created_at"]),
         )
@@ -1399,6 +1926,7 @@ class ArtifactRepo:
             "v.version_number AS resolved_version_number, v.content AS resolved_content, "
             "v.content_hash AS resolved_content_hash, "
             "v.provenance_hash AS resolved_provenance_hash, "
+            "v.branch_synthesis_id AS resolved_branch_synthesis_id, "
             "v.created_by AS resolved_created_by, v.created_at AS resolved_created_at "
             "FROM artifacts a JOIN artifact_versions v ON v.artifact_id = a.artifact_id "
             "WHERE a.room_id = ? AND a.name = 'Decision Brief' "
@@ -1416,6 +1944,7 @@ class ArtifactRepo:
             content=row["resolved_content"],
             content_hash=row["resolved_content_hash"],
             provenance_hash=row["resolved_provenance_hash"],
+            branch_synthesis_id=row.get("resolved_branch_synthesis_id"),
             created_by=row["resolved_created_by"],
             created_at=datetime.fromisoformat(row["resolved_created_at"]),
         )
@@ -1431,6 +1960,7 @@ class ArtifactRepo:
         events: list[RoomEvent],
         *,
         create_artifact: bool,
+        synthesis: BranchSynthesis | None = None,
     ) -> list[RoomEvent]:
         """Atomically publish a version, complete provenance graph, and events."""
         persisted_events: list[RoomEvent] = []
@@ -1453,8 +1983,8 @@ class ArtifactRepo:
                 )
             await self.db.execute(
                 "INSERT INTO artifact_versions(version_id, artifact_id, version_number, content, "
-                "content_hash, provenance_hash, created_by, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "content_hash, provenance_hash, branch_synthesis_id, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     version.version_id,
                     version.artifact_id,
@@ -1462,23 +1992,27 @@ class ArtifactRepo:
                     version.content,
                     version.content_hash,
                     version.provenance_hash,
+                    version.branch_synthesis_id,
                     version.created_by,
                     serialize_datetime(version.created_at),
                 ),
             )
+            inserted_claim_ids: set[str] = set()
             for claim, source in claims_and_sources:
-                await self.db.execute(
-                    "INSERT INTO artifact_claims(claim_id, version_id, ordinal, text, "
-                    "is_ai_derived, confidence) VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        claim.claim_id,
-                        claim.version_id,
-                        claim.ordinal,
-                        claim.text,
-                        int(claim.is_ai_derived),
-                        claim.confidence,
-                    ),
-                )
+                if claim.claim_id not in inserted_claim_ids:
+                    await self.db.execute(
+                        "INSERT INTO artifact_claims(claim_id, version_id, ordinal, text, "
+                        "is_ai_derived, confidence) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            claim.claim_id,
+                            claim.version_id,
+                            claim.ordinal,
+                            claim.text,
+                            int(claim.is_ai_derived),
+                            claim.confidence,
+                        ),
+                    )
+                    inserted_claim_ids.add(claim.claim_id)
                 await self.db.execute(
                     "INSERT INTO artifact_claim_sources(claim_id, output_id, evidence, agent_id, "
                     "execution_id, source_prompt, provider_input, provider_name, provider_model, "
@@ -1503,6 +2037,26 @@ class ArtifactRepo:
                 "UPDATE artifacts SET current_version = ?, updated_at = ? WHERE artifact_id = ?",
                 (version.version_number, serialize_datetime(utcnow()), artifact.artifact_id),
             )
+            if synthesis is not None:
+                await self.db.execute(
+                    "UPDATE branch_syntheses SET status = ?, provider_input = ?, "
+                    "provider_name = ?, provider_model = ?, provider_response_id = ?, "
+                    "provider_evidence = ?, simulated = ?, content = ?, "
+                    "artifact_version_id = ?, completed_at = ? WHERE synthesis_id = ?",
+                    (
+                        BranchSynthesisStatus.COMPLETED.value,
+                        synthesis.provider_input,
+                        synthesis.provider_name,
+                        synthesis.provider_model,
+                        synthesis.provider_response_id,
+                        synthesis.provider_evidence,
+                        int(synthesis.simulated),
+                        synthesis.content,
+                        version.version_id,
+                        serialize_datetime(synthesis.completed_at or utcnow()),
+                        synthesis.synthesis_id,
+                    ),
+                )
             await OntologyRepo(self.db).materialize_in_transaction(
                 ontology_entities, ontology_relationships
             )
@@ -1602,6 +2156,7 @@ class ArtifactRepo:
                 content=row["content"],
                 content_hash=row["content_hash"],
                 provenance_hash="",
+                branch_synthesis_id=row.get("branch_synthesis_id"),
                 created_by=row["created_by"],
                 created_at=datetime.fromisoformat(row["created_at"]),
             )

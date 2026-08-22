@@ -139,21 +139,52 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
 .meta-panel{margin:0 16px 16px;border:1px solid var(--border);border-radius:11px;background:linear-gradient(145deg,rgba(109,124,255,.08),var(--surface2));overflow:hidden}.meta-head{padding:12px;border-bottom:1px solid var(--border)}.meta-head h3{padding:0;color:var(--text);font-size:12px;letter-spacing:0;text-transform:none}.meta-head p{font-size:9px;color:var(--text2);margin-top:3px;line-height:1.4}.meta-presets{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}.meta-presets button{border:1px solid var(--border);background:var(--surface3);color:var(--text);border-radius:999px;padding:5px 8px;font-size:9px;cursor:pointer}.meta-presets button:hover{border-color:var(--accent)}.meta-query{display:flex;gap:6px;padding:10px 12px}.meta-query input{min-width:0;flex:1;background:var(--surface);border:1px solid var(--border);border-radius:7px;color:var(--text);padding:7px 9px;font-size:10px;outline:none}.meta-query input:focus{border-color:var(--accent)}.meta-query button{border:0;background:var(--accent);color:white;border-radius:7px;padding:7px 10px;font-size:9px;font-weight:700;cursor:pointer}.meta-scope{padding:0 12px 9px;color:var(--text2);font-size:8px;line-height:1.5;overflow-wrap:anywhere}.meta-answer{margin:0 12px 10px;padding:10px;border-radius:8px;background:var(--surface);font-size:10px;line-height:1.5}.meta-evidence{padding:0 12px 12px}.meta-chain{margin-top:7px;border-left:2px solid var(--accent);padding:7px 0 7px 9px;font-size:9px;line-height:1.5;color:var(--text2)}.meta-chain strong{color:var(--text)}.meta-chain details{margin-top:5px}.meta-chain summary{cursor:pointer;color:var(--accent2)}.meta-chain pre{white-space:pre-wrap;overflow-wrap:anywhere;font:8px/1.45 ui-monospace,SFMono-Regular,monospace;color:#c0c8d8;margin-top:5px}.meta-error{color:#ff969c}
 @media(max-width:1050px){.sidebar{display:none}.right-panel{width:52vw;min-width:400px}}
 @media(max-width:760px){body{overflow:auto;height:auto}.main{display:block!important;overflow:visible}.center{min-height:65vh}.right-panel{width:100%;min-width:0;border-left:0;border-top:1px solid var(--border);overflow:visible}.template-grid,.outputs-grid{grid-template-columns:1fr}.workflow-tag{display:none}}
+
+/* MultiAI application shell */
+:root{--bg:oklch(97.8% .006 70);--surface:oklch(99.1% .004 70);--surface2:oklch(95.7% .008 70);--surface3:oklch(92.8% .011 70);--border:oklch(87% .012 65);--text:oklch(24% .018 55);--text2:oklch(51% .018 55);--accent:oklch(55% .145 38);--accent2:oklch(49% .15 38);--green:oklch(52% .09 185);--red:oklch(55% .16 25);--yellow:oklch(59% .11 78);--radius:7px}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;font-size:13px}
+button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.48}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#setup-screen{display:grid;grid-template-columns:minmax(300px,440px) minmax(340px,420px);gap:9vw;padding:48px;background:var(--bg)}
+.setup-intro{max-width:46ch}.setup-mark{display:flex;align-items:center;gap:10px;font-weight:750;margin-bottom:40px}.setup-intro h1{font-size:32px;line-height:1.12;letter-spacing:-.035em}.setup-intro p{font-size:14px;line-height:1.6;color:var(--text2);margin-top:15px}.setup-steps{display:grid;gap:10px;margin-top:26px;color:var(--text2)}.setup-steps span{display:flex;align-items:center;gap:9px}.step-no{width:22px;height:22px;border:1px solid var(--border);border-radius:50%;display:grid;place-items:center;font-size:10px;color:var(--text)}
+.setup-card{box-shadow:0 12px 36px oklch(20% .01 55/.08);border-radius:10px;padding:28px}.setup-card label{color:var(--text);font-weight:650}.setup-card input{background:var(--surface);border-color:oklch(76% .015 60)}
+.product-mark{background:var(--text);color:var(--surface);border-radius:7px}
+.header{display:none!important}.main{display:grid;grid-template-columns:52px 224px minmax(420px,1fr) 360px;background:var(--bg)}
+.workspace-rail{background:var(--text);color:var(--surface);padding:10px 8px;display:flex;flex-direction:column;align-items:center;gap:8px}.rail-logo,.rail-workspace{width:34px;height:34px;border:0;border-radius:8px;display:grid;place-items:center;font-weight:750}.rail-logo{background:var(--surface);color:var(--text);margin-bottom:8px}.rail-workspace{background:oklch(34% .02 55);color:var(--surface)}.rail-workspace.active{background:var(--accent)}.rail-spacer{flex:1}.rail-avatar{border-radius:50%;background:var(--green)}
+.sidebar{width:auto;background:var(--surface2);overflow:hidden}.workspace-head{height:54px;padding:9px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}.workspace-name{font-weight:720}.workspace-sub{font-size:10px;color:var(--text2);margin-top:2px}.sidebar-scroll{overflow:auto;padding:8px;flex:1}.nav-label{padding:13px 8px 5px;color:var(--text2);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em}.nav-item{width:100%;border:0;background:transparent;border-radius:5px;padding:6px 8px;display:flex;align-items:center;gap:8px;text-align:left;color:var(--text2);min-height:30px}.nav-item:hover{background:var(--surface3);color:var(--text)}.nav-item.active{background:var(--surface3);color:var(--text);font-weight:650}.nav-icon{width:16px;text-align:center;color:var(--text2)}.nav-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nav-meta{margin-left:auto;font-size:10px}.branch-summary{font-size:9px;color:var(--text2);margin-top:2px}.sidebar-footer{border-top:1px solid var(--border);padding:10px 12px;display:flex;align-items:center;gap:8px}.identity-avatar{width:28px;height:28px;border-radius:50%;background:var(--text);color:var(--surface);display:grid;place-items:center;font-size:11px;font-weight:750}.identity-name{font-size:11px;font-weight:700}.identity-role{font-size:9px;color:var(--text2)}
+.center{background:var(--surface)}.room-header{height:54px;padding:8px 16px;display:flex;align-items:center;gap:8px}.room-header h2{font-size:14px;font-weight:700}.room-header .meta{font-size:10px}.header-actions{margin-left:auto;display:flex;align-items:center;gap:6px}.status{display:flex;align-items:center;gap:5px;font-size:10px!important;color:var(--text2)!important}.status::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--yellow)}.status.connected::before{background:var(--green)}.icon-button{width:32px;height:32px;border:1px solid transparent;background:transparent;border-radius:6px;display:grid;place-items:center;color:var(--text2)}.icon-button:hover{background:var(--surface2);color:var(--text)}
+.messages{padding:18px max(20px,5vw) 24px;gap:0}.msg{max-width:74ch;display:grid;grid-template-columns:32px minmax(0,1fr);column-gap:10px;padding:7px 0;align-self:auto!important;text-align:left!important}.msg::before{content:"";grid-row:1/4;width:30px;height:30px;border-radius:6px;background:var(--surface3)}.msg.human::before{background:oklch(94% .03 185)}.msg.agent::before{background:oklch(94% .035 38)}.msg.system{display:block;padding-left:42px;color:var(--text2)}.msg.system::before{display:none}.msg .sender{font-size:11px;color:var(--text)!important;margin:0;display:inline}.msg .time{font-size:9px;display:inline;margin-left:6px}.msg .bubble,.msg.human .bubble,.msg.agent .bubble{padding:0;background:transparent;color:var(--text);border-radius:0;font-size:13px;line-height:1.55;margin-top:2px}
+.branch-activity{max-width:74ch;border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:11px 0;margin:10px 0}.branch-activity button{width:100%;border:0;background:transparent;display:grid;grid-template-columns:30px 1fr auto;gap:10px;text-align:left}.branch-symbol{width:30px;height:30px;border-radius:6px;background:oklch(94% .035 38);color:var(--accent);display:grid;place-items:center;font-weight:800}.branch-title{font-size:11px;font-weight:720}.branch-detail,.branch-progress{font-size:9px;color:var(--text2);margin-top:3px}.status-text{display:inline-flex;align-items:center;gap:5px;font-size:9px;font-weight:700}.status-text::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--text2)}.status-text.running::before{background:var(--yellow);animation:pulse 1.4s ease-out infinite}.status-text.completed::before{background:var(--green)}.status-text.failed::before{background:var(--red)}.status-text.partial::before{background:var(--yellow)}
+.input-bar{padding:0 max(20px,5vw) 14px;display:block;border:0;background:var(--surface)}.composer{border:1px solid oklch(76% .015 60);border-radius:8px;overflow:hidden}.composer textarea{width:100%;min-height:58px;max-height:150px;resize:none;border:0;outline:0;padding:10px 12px;background:transparent}.composer-tools{border-top:1px solid var(--border);display:flex;align-items:center;gap:6px;padding:6px}.composer-hint{font-size:9px;color:var(--text2)}.composer-tools .send{margin-left:auto}.turn-lock{margin:0 max(20px,5vw) 8px;border:1px solid oklch(85% .04 78);background:oklch(95% .035 78);border-radius:7px;padding:9px 11px;display:none;align-items:center;gap:9px}.turn-lock.visible{display:flex}.lock-copy{flex:1}.lock-title{font-size:11px;font-weight:720}.lock-detail{font-size:9px;color:var(--text2);margin-top:2px}
+.ai-tray{display:none;margin-bottom:8px;border:1px solid oklch(80% .015 60);background:var(--surface);border-radius:10px;box-shadow:0 18px 44px oklch(20% .01 55/.14);overflow:hidden;transform-origin:bottom center}.ai-tray.open{display:block;animation:tray-in .16s cubic-bezier(.16,1,.3,1)}
+.tray-head{display:grid;grid-template-columns:32px minmax(0,1fr) 32px;align-items:center;gap:10px;padding:12px 13px;border-bottom:1px solid var(--border)}.tray-glyph{width:32px;height:32px;border-radius:7px;background:oklch(94% .035 38);color:var(--accent);display:grid;place-items:center;font-size:16px;font-weight:750}.tray-title{font-size:12px;font-weight:750;letter-spacing:-.01em}.tray-subtitle{font-size:10px;color:var(--text2);margin-top:2px}.decision-studio{padding:13px;border:0}.studio-label{display:block;font-size:10px;font-weight:720;margin-bottom:6px}.strategy-toggle{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:13px}.strategy-toggle button{position:relative;border:1px solid var(--border);background:var(--surface);border-radius:7px;padding:9px 10px;text-align:left;min-height:58px}.strategy-toggle button:hover{background:var(--surface2);border-color:oklch(74% .02 60)}.strategy-toggle button.active{background:oklch(94% .035 38);border-color:oklch(73% .08 38);box-shadow:inset 0 0 0 1px oklch(73% .08 38/.2)}.strategy-name{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:720}.strategy-dot{width:12px;height:12px;border:1px solid var(--text2);border-radius:50%;display:grid;place-items:center}.strategy-toggle button.active .strategy-dot{border-color:var(--accent)}.strategy-toggle button.active .strategy-dot::after{content:"";width:6px;height:6px;border-radius:50%;background:var(--accent)}.strategy-help{display:block;margin-top:4px;padding-left:19px;font-size:9px;line-height:1.35;color:var(--text2)}.question-wrap{border:1px solid oklch(76% .015 60);border-radius:8px;overflow:hidden;background:var(--surface)}.question-wrap:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px oklch(94% .035 38)}.question-input{min-height:78px;max-height:130px;background:transparent;border:0!important;border-radius:0;box-shadow:none!important;padding:10px 11px;resize:vertical;font-size:12px}.question-meta{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border);padding:6px 9px;font-size:9px;color:var(--text2)}.field-label{margin:13px 0 6px}.template-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;border:0;overflow:visible}.template-option+.template-option{border:0}.template-body{border:1px solid var(--border);border-radius:7px;background:var(--surface);min-height:58px;padding:9px}.template-body:hover{background:var(--surface2);border-color:oklch(74% .02 60)}.template-option input:checked+.template-body{background:oklch(94% .03 185);border-color:oklch(72% .065 185);box-shadow:inset 0 0 0 1px oklch(72% .065 185/.18)}.template-option input:focus-visible+.template-body{outline:2px solid var(--accent);outline-offset:2px}.template-name{font-size:10px}.template-option input:checked+.template-body .template-name::after{color:var(--green)}.studio-footer{display:flex;align-items:center;gap:12px;margin:13px -13px -13px;padding:10px 13px;background:var(--surface2);border-top:1px solid var(--border)}.launch-note{flex:1;font-size:9px}.studio-footer .btn-primary{min-width:148px;padding:9px 12px}.studio-footer .btn-primary[aria-busy="true"]{display:flex;align-items:center;justify-content:center;gap:7px}
+.template-grid{grid-template-columns:1fr;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden}.template-option+.template-option{border-top:1px solid var(--border)}.template-body{display:grid;grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:9px;border:0;border-radius:0;min-height:52px;padding:8px 10px}.template-body:hover{background:var(--surface2)}.template-option input:checked+.template-body{border:0;box-shadow:none}.template-check{width:18px;height:18px;border:1px solid oklch(70% .018 60);border-radius:5px;display:grid;place-items:center;background:var(--surface);color:transparent;font-size:11px;font-weight:800}.template-option input:checked+.template-body .template-check{background:var(--green);border-color:var(--green);color:oklch(98% .004 70)}.template-copy{min-width:0}.template-name{display:block;font-size:11px}.template-name::after{display:none}.template-role{display:block;margin-top:2px;font-size:10px;white-space:normal;overflow:visible}.template-state{font-size:9px;color:var(--text2)}.template-option input:checked+.template-body .template-state{color:var(--green);font-weight:700}
+@keyframes tray-in{from{opacity:0;transform:translateY(7px) scale(.99)}to{opacity:1;transform:translateY(0) scale(1)}}
+.right-panel{width:auto;min-width:0;background:var(--bg);overflow:hidden}.context-head{height:54px;padding:8px 10px 8px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center}.context-head h2{font-size:12px}.context-head .icon-button{margin-left:auto}.context-tabs{display:flex;border-bottom:1px solid var(--border);padding:0 8px;overflow:auto}.context-tab{border:0;border-bottom:2px solid transparent;background:transparent;color:var(--text2);padding:9px 7px 7px;font-size:10px}.context-tab.active{border-bottom-color:var(--accent);color:var(--text);font-weight:700}.context-scroll{height:calc(100vh - 89px);overflow:auto}.context-view{display:none}.context-view.active{display:block}.panel-section{padding:10px 14px}.panel-title{font-size:11px;font-weight:720}.panel-copy{font-size:10px;color:var(--text2);line-height:1.45;margin-top:3px}.outputs-grid{display:block;padding:0 8px 10px}.output-card{border:0;border-bottom:1px solid var(--border);border-radius:0;background:transparent;padding:9px 6px}.output-card.included{background:oklch(94% .03 185)}.output-card.excluded{opacity:.62}.output-card-head{padding:0;border:0}.output-content{min-height:0;max-height:210px;overflow:auto;padding:0;margin:8px 0}.output-provenance{padding:0;font-size:10px}.review-state,.ontology-badge,.ontology-actions button{font-size:10px}.review-actions{display:flex;border:0;gap:5px;margin-top:8px}.review-actions button{border:1px solid var(--border)!important;border-radius:5px;padding:6px}.review-actions button.active.include{background:oklch(94% .03 185);color:var(--green)}.review-actions button.active.exclude{background:oklch(95% .03 25);color:var(--red)}.synthesis-gate{position:sticky;bottom:0;margin:0;border:0;border-top:1px solid var(--border);border-radius:0;background:var(--bg);padding:10px 14px}.ontology-panel,.meta-panel{margin:0;border:0;border-radius:0;background:transparent}.ontology-head,.meta-head{padding:11px 14px}.ontology-tree,.meta-evidence{padding:8px 14px}.ontology-node,.history-item,.meta-chain{border-left-width:1px}.ontology-meta,.history-item,.history-values,.meta-scope,.meta-chain,.meta-chain pre{font-size:10px}.meta-query{padding:9px 14px}.meta-answer{background:var(--surface2)}.records{margin:0;border:0;padding:0}.events-log{font-size:10px}.toast-region{position:fixed;right:16px;bottom:16px;z-index:200;display:grid;gap:7px}.toast{background:var(--text);color:var(--surface);padding:9px 12px;border-radius:6px;box-shadow:0 12px 30px oklch(20% .01 55/.18);max-width:340px;font-size:11px}
+@keyframes pulse{50%{opacity:.4}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important}}
+@media(max-width:1180px){.main{grid-template-columns:48px 200px minmax(380px,1fr) 330px}}
+@media(max-width:960px){.main{grid-template-columns:48px 200px minmax(0,1fr)!important}.right-panel{display:flex!important;position:fixed;z-index:50;right:0;top:0;bottom:0;width:min(380px,92vw);transform:translateX(105%);transition:transform .18s cubic-bezier(.16,1,.3,1);box-shadow:0 16px 42px oklch(20% .01 55/.16)}.right-panel.open{transform:translateX(0)}}
+@media(max-width:700px){#setup-screen{display:flex;padding:20px}.setup-intro{display:none}.main{grid-template-columns:minmax(0,1fr)!important}.workspace-rail{display:none}.sidebar{display:flex!important;position:fixed;z-index:60;left:0;top:0;bottom:0;width:min(260px,88vw);transform:translateX(-105%);transition:transform .18s cubic-bezier(.16,1,.3,1);box-shadow:0 16px 42px oklch(20% .01 55/.16)}.sidebar.open{transform:translateX(0)}.center{min-width:0}.mobile-nav{display:grid!important}.messages{padding-inline:14px}.input-bar{padding-inline:10px}.turn-lock{margin-inline:10px}.template-grid{grid-template-columns:1fr}.strategy-toggle{grid-template-columns:1fr}.studio-footer{align-items:flex-start;flex-direction:column}.studio-footer .btn-primary{width:100%}}
 </style>
 </head>
 <body>
 
 <div id="setup-screen">
+<section class="setup-intro" aria-labelledby="welcome-title">
+  <div class="setup-mark"><span class="product-mark">M</span> MultiAI</div>
+  <h1 id="welcome-title">Decide together. Keep every line of reasoning.</h1>
+  <p>One durable channel for your team, specialist branches, deliberate selection, and evidence-backed artifacts.</p>
+  <div class="setup-steps"><span><b class="step-no">1</b> Join with your configured test identity</span><span><b class="step-no">2</b> Talk in the shared channel</span><span><b class="step-no">3</b> Branch to specialists when the question is ready</span></div>
+</section>
 <div class="setup-card">
-<h2>Multiplayer AI Workspace</h2>
-<p>Persistent shared workspace for humans and AI agents</p>
-<label>Display Name</label>
+<h2>Open your workspace</h2>
+<p>Your token stays in this tab. Use a different token in another tab to test multiplayer.</p>
+<label for="setup-name">Display name</label>
 <input id="setup-name" placeholder="Your name" value="Yasser">
-<label>Access Token</label>
+<label for="setup-token">Access token</label>
 <input id="setup-token" type="password" placeholder="Configured server token" autocomplete="off" spellcheck="false">
-<label>Room Name</label>
+<label for="setup-room">Channel name</label>
 <input id="setup-room" placeholder="Room name" value="Authentication Migration">
-<button id="setup-button" onclick="setup()">Enter Workspace</button>
+<button id="setup-button" onclick="setup()">Enter workspace</button>
 </div>
 </div>
 
@@ -161,48 +192,55 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
 <span class="product-mark">M</span>
 <h1>Multiplayer AI Workspace</h1>
 <span class="workflow-tag">shared context → parallel branches → deliberate selection</span>
-<span class="status" id="ws-status">Connecting...</span>
+<span class="status" id="ws-status-shell">Connecting...</span>
 </div>
 
 <div class="main" id="app-main" style="display:none">
+<aside class="workspace-rail" aria-label="Workspaces"><div class="rail-logo">M</div><button class="rail-workspace active" aria-label="Current workspace">MA</button><div class="rail-spacer"></div><div class="rail-workspace rail-avatar" id="rail-avatar">Y</div></aside>
 <div class="sidebar" id="sidebar">
-<h3>Rooms</h3>
+<div class="workspace-head"><div><div class="workspace-name">MultiAI Workspace</div><div class="workspace-sub">Shared decision space</div></div><button class="icon-button" onclick="openContext('members')" aria-label="Workspace details">···</button></div><div class="sidebar-scroll">
+<div class="nav-label">Channels</div>
 <div id="rooms-list"></div>
-<h3>Team</h3>
+<div class="nav-label">AI work</div><div id="branches-list"><div class="nav-item"><span class="nav-icon">⑂</span><span class="nav-name">No branches yet</span></div></div>
+<button class="nav-item" onclick="openContext('meta')"><span class="nav-icon">◇</span><span class="nav-name">Meta</span></button>
+<button class="nav-item" onclick="openContext('artifacts')"><span class="nav-icon">□</span><span class="nav-name">Artifacts</span><span class="nav-meta" id="artifact-nav-count">0</span></button>
+<div class="nav-label">People</div>
 <div id="team-list"></div>
-<h3>Agents</h3>
-<div id="agents-sidebar"></div>
-<h3>Events</h3>
-<div class="events-log" id="events-log"></div>
+<div id="agents-sidebar" class="hidden"></div>
+<details><summary class="nav-label">Activity log</summary><div class="events-log" id="events-log"></div></details></div>
+<div class="sidebar-footer"><div class="identity-avatar" id="identity-avatar">Y</div><div><div class="identity-name" id="identity-name">You</div><div class="identity-role" id="identity-role">viewer</div></div></div>
 </div>
 
 <div class="center">
 <div class="room-header" id="room-header">
-<h2 id="room-name">Room</h2>
-<div class="meta" id="room-meta"></div>
+<button class="icon-button mobile-nav hidden" onclick="toggleSidebar()" aria-label="Open navigation">☰</button><div><h2># <span id="room-name">channel</span></h2><div class="meta" id="room-meta"></div></div><div class="header-actions"><span class="status" id="ws-status">Connecting</span><button class="icon-button" onclick="openContext('members')" aria-label="Open members">◉</button><button class="icon-button" onclick="openContext('branch')" aria-label="Open context">☷</button></div>
 </div>
-<div class="messages" id="messages"></div>
+<div class="messages" id="messages" role="log" aria-live="polite" aria-label="Channel conversation"></div>
+<div class="turn-lock" id="turn-lock-banner" role="status"><span class="spinner"></span><div class="lock-copy"><div class="lock-title" id="turn-lock-title">AI owns this turn</div><div class="lock-detail" id="turn-lock-detail">Messages resume when the branch finishes.</div></div><button class="btn-sm" onclick="openContext('branch')">Inspect branch</button><button class="btn-sm" id="cancel-turn-button" onclick="cancelCurrentTurn()">Cancel</button></div>
 <div class="input-bar">
-<input id="msg-input" placeholder="Send a message or instruction..." onkeydown="if(event.key==='Enter')sendMessage()">
-<button onclick="sendMessage()">Send</button>
+<div class="ai-tray" id="ai-tray">
+  <div class="tray-head"><span class="tray-glyph" aria-hidden="true">⑂</span><div><div class="tray-title">Start AI work</div><div class="tray-subtitle">Create a branch from the channel context as it exists now.</div></div><button class="icon-button" onclick="toggleAITray(false)" aria-label="Close AI launcher">×</button></div>
+  <section class="decision-studio" aria-labelledby="studio-title">
+    <span class="studio-label" id="studio-title">Execution strategy</span>
+    <div class="strategy-toggle" role="group" aria-label="Execution strategy">
+      <button id="strategy-single" type="button" aria-pressed="false" onclick="setStrategy('single')"><span class="strategy-name"><span class="strategy-dot"></span>Single agent</span><span class="strategy-help">One specialist owns the turn. Human messages pause until it finishes.</span></button>
+      <button id="strategy-parallel" type="button" class="active" aria-pressed="true" onclick="setStrategy('parallel')"><span class="strategy-name"><span class="strategy-dot"></span>Parallel</span><span class="strategy-help">Two or three specialists reason independently from one context boundary.</span></button>
+    </div>
+    <input id="turn-locked-mode" type="checkbox" hidden onchange="updateTemplateSelection()">
+    <label class="studio-label" for="analysis-question">Question for the branch</label>
+    <div class="question-wrap"><textarea class="question-input" id="analysis-question" placeholder="Describe the decision or problem to analyze">Should a 20-person AI-native SaaS startup migrate its authentication service from a self-managed PostgreSQL session store to a managed identity provider this quarter?</textarea><div class="question-meta"><span>Every specialist receives this exact prompt</span><span>⌘ Enter to launch</span></div></div>
+    <div class="field-label">Choose specialists <span id="template-selection-count">Choose 2 to 3</span></div>
+    <div class="template-grid" id="template-grid"><div class="empty-outputs">Loading specialists…</div></div>
+    <div class="studio-footer"><div class="launch-note" id="launch-note">The branch preserves every individual output and its provenance.</div><button class="btn-primary" id="launch-button" onclick="launchParallelAnalyses()" disabled>Run selected in parallel</button></div>
+  </section>
+</div>
+<div class="composer"><textarea id="msg-input" aria-label="Message channel" placeholder="Message #channel" onkeydown="handleComposerKey(event)"></textarea><div class="composer-tools"><button class="btn-sm" id="ai-trigger" onclick="toggleAITray()" aria-expanded="false">AI branch</button><span class="composer-hint">Enter to send · Shift Enter for newline</span><button class="btn-primary send" id="send-message-button" onclick="sendMessage()">Send</button></div></div>
 </div>
 </div>
 
 <div class="right-panel">
-<section class="decision-studio" aria-labelledby="studio-title">
-  <div class="section-kicker">Decision studio</div>
-  <div class="section-title" id="studio-title">Ask specialists independently</div>
-  <p class="section-copy">Each selected specialist gets the same decision context in an isolated run. Outputs stay visible and attributable after review.</p>
-  <textarea class="question-input" id="analysis-question">Should a 20-person AI-native SaaS startup migrate its authentication service from a self-managed PostgreSQL session store to a managed identity provider this quarter?</textarea>
-  <div class="field-label">Specialist branches <span id="template-selection-count">Choose 2–3</span></div>
-  <div class="template-grid" id="template-grid"><div class="empty-outputs">Loading specialist templates…</div></div>
-  <div class="launch-row">
-    <button class="btn-primary" id="launch-button" onclick="launchParallelAnalyses()" disabled>Run selected in parallel</button>
-    <div class="launch-note" id="launch-note">Runs and outputs are persisted to this room.</div>
-  </div>
-</section>
-
-<div class="outputs-head">
+<div class="context-head"><h2 id="context-title">AI branch</h2><button class="icon-button" onclick="closeContext()" aria-label="Close context panel">×</button></div><div class="context-tabs"><button class="context-tab active" data-view="branch" onclick="openContext('branch')">Branch</button><button class="context-tab" data-view="artifacts" onclick="openContext('artifacts')">Artifact</button><button class="context-tab" data-view="meta" onclick="openContext('meta')">Meta</button><button class="context-tab" data-view="ontology" onclick="openContext('ontology')">Evidence</button><button class="context-tab" data-view="members" onclick="openContext('members')">People</button></div><div class="context-scroll">
+<section class="context-view active" data-context-view="branch"><div class="panel-section"><div class="panel-title" id="branch-panel-title">No AI branch selected</div><div class="panel-copy" id="branch-panel-copy">Start AI work from the composer. Runs and outputs remain together here.</div><div id="branch-runs"></div></div><div class="outputs-head">
   <h3>Inspectable outputs</h3>
   <span class="outputs-count" id="outputs-count">0 authored branches</span>
 </div>
@@ -216,11 +254,12 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
     <button class="btn-primary" id="synthesize-button" onclick="synthesizeDecisionBrief()" disabled>Synthesize decision brief</button>
   </div>
 </div>
+</section>
 
-<section class="meta-panel" id="meta-panel" aria-labelledby="meta-title">
+<section class="meta-panel context-view" data-context-view="meta" id="meta-panel" aria-labelledby="meta-title">
   <div class="meta-head">
     <h3 id="meta-title">Ask Meta</h3>
-    <p>Room-scoped organizational intelligence from the published decision and its governed evidence—not another AI chat.</p>
+    <p>Room-scoped intelligence from the published decision and its governed evidence.</p>
     <div class="meta-presets">
       <button onclick="askMeta('Why was this decision made?')">Why this decision?</button>
       <button onclick="askMeta('What evidence supports this decision?')">Show supporting evidence</button>
@@ -236,7 +275,7 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
   <div class="meta-evidence" id="meta-evidence"></div>
 </section>
 
-<section class="ontology-panel" id="ontology-panel" aria-labelledby="ontology-title">
+<section class="ontology-panel context-view" data-context-view="ontology" id="ontology-panel" aria-labelledby="ontology-title">
   <div class="ontology-head">
     <div><h3 id="ontology-title">Evidence ontology</h3><p>Decision → Claim → exact AgentOutput. Every inferred link stays reviewable.</p></div>
     <span class="ontology-mode" id="ontology-mode">Read-only until published</span>
@@ -245,7 +284,8 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
   <details class="ontology-history" id="ontology-history"><summary>Review history · 0 entries</summary><div id="ontology-history-list"></div></details>
 </section>
 
-<details class="records">
+<section class="context-view" data-context-view="artifacts"><div class="panel-section"><div class="panel-title">Published artifacts</div><div class="panel-copy">Open the shared work product, then inspect its selected inputs.</div></div><div class="panel-section" id="artifact-surface"></div></section>
+<section class="context-view" data-context-view="members"><div class="panel-section"><div class="panel-title">People and permissions</div><div class="panel-copy">Your channel role determines which actions are available.</div><div id="members-panel"></div></div><details class="records">
   <summary>Workspace records</summary>
   <h3>Agents</h3><div class="panel-section" id="agents-panel"></div>
   <h3>Tasks</h3><div class="panel-section" id="tasks-panel"></div>
@@ -253,8 +293,11 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
   <h3>Artifacts</h3><div class="panel-section" id="artifacts-panel"></div>
   <h3>Decisions</h3><div class="panel-section" id="decisions-panel"></div>
 </details>
+</section>
 </div>
 </div>
+</div>
+<div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
 
 <script>
 const API = '/api/v1';
@@ -270,9 +313,69 @@ let workspaceId = '';
 let agentTemplates = [];
 let roomAgents = [];
 let roomOutputs = [];
+let currentBranchId = '';
+let currentBranchMode = '';
+let currentTurnLock = null;
 let roomOntology = {entities: [], relationships: [], reviews: []};
 let currentRoomRole = 'viewer';
+let roomBranches = [];
+let roomRuns = [];
 const outputSelections = new Map();
+
+function toast(message, tone = '') {
+  const region = document.getElementById('toast-region');
+  const item = document.createElement('div');
+  item.className = `toast ${tone}`;
+  item.textContent = message;
+  region.appendChild(item);
+  setTimeout(() => item.remove(), 4200);
+}
+
+function openContext(view = 'branch') {
+  const panel = document.querySelector('.right-panel');
+  panel.classList.add('open');
+  document.querySelectorAll('.context-view').forEach(el => el.classList.toggle('active', el.dataset.contextView === view));
+  document.querySelectorAll('.context-tab').forEach(el => el.classList.toggle('active', el.dataset.view === view));
+  const titles = {branch:'AI branch',artifacts:'Artifact',meta:'Meta',ontology:'Evidence',members:'People'};
+  document.getElementById('context-title').textContent = titles[view] || 'Context';
+}
+
+function closeContext() { document.querySelector('.right-panel').classList.remove('open'); }
+function toggleSidebar() { document.getElementById('sidebar').classList.toggle('open'); }
+function toggleAITray(force) {
+  const tray = document.getElementById('ai-tray');
+  const open = force === undefined ? !tray.classList.contains('open') : force;
+  tray.classList.toggle('open', open);
+  document.getElementById('ai-trigger').setAttribute('aria-expanded', String(open));
+  if (open) document.getElementById('analysis-question').focus();
+}
+function setStrategy(strategy) {
+  const single = strategy === 'single';
+  document.getElementById('turn-locked-mode').checked = single;
+  document.getElementById('strategy-single').classList.toggle('active', single);
+  document.getElementById('strategy-parallel').classList.toggle('active', !single);
+  document.getElementById('strategy-single').setAttribute('aria-pressed', String(single));
+  document.getElementById('strategy-parallel').setAttribute('aria-pressed', String(!single));
+  if (single) {
+    document.querySelectorAll('#template-grid input:checked').forEach((input, index) => { if (index) input.checked = false; });
+  }
+  document.querySelectorAll('.template-option').forEach(option => {
+    option.querySelector('.template-state').textContent = option.querySelector('input').checked ? 'Selected' : 'Select';
+  });
+  updateTemplateSelection();
+}
+function handleComposerKey(event) {
+  if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(); }
+}
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') { toggleAITray(false); closeContext(); document.getElementById('sidebar').classList.remove('open'); }
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.getElementById('msg-input').focus(); }
+  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && document.getElementById('ai-tray').classList.contains('open')) {
+    event.preventDefault();
+    if (!document.getElementById('launch-button').disabled) launchParallelAnalyses();
+  }
+});
 
 async function api(method, path, body) {
   const url = `${API}${path}`;
@@ -305,7 +408,7 @@ async function setup() {
   userName = document.getElementById('setup-name').value.trim();
   accessToken = document.getElementById('setup-token').value;
   const roomName = document.getElementById('setup-room').value.trim();
-  if (!userName || !roomName || !accessToken) return alert('Fill in all fields');
+  if (!userName || !roomName || !accessToken) return toast('Enter a display name, access token, and channel name.', 'error');
   const setupButton = document.getElementById('setup-button');
   setupButton.disabled = true;
   setupButton.textContent = 'Opening…';
@@ -342,14 +445,14 @@ async function setup() {
     rememberRoomId(roomId);
     document.getElementById('setup-screen').style.display = 'none';
     document.getElementById('app-header').style.display = 'flex';
-    document.getElementById('app-main').style.display = 'flex';
+    document.getElementById('app-main').style.display = 'grid';
 
     connectWS();
     await Promise.all([loadTemplates(), loadState()]);
   } catch (err) {
     accessToken = '';
     document.getElementById('setup-token').value = '';
-    alert(`Could not open workspace: ${errorMessage(err)}`);
+    toast(`Could not open workspace: ${errorMessage(err)}`, 'error');
   } finally {
     setupButton.disabled = false;
     setupButton.textContent = 'Enter Workspace';
@@ -368,7 +471,7 @@ function connectWS() {
     ['multiai.v1', `bearer.${encodedToken}`]);
   ws.onopen = () => {
     document.getElementById('ws-status').textContent = 'Connected';
-    document.getElementById('ws-status').style.color = '#22c55e';
+    document.getElementById('ws-status').classList.add('connected');
     wsReconnectDelay = 1000;
     wsReconnectAttempts = 0;
     // Rehydrate durable runs and outputs after every reconnect. Ordered events
@@ -376,8 +479,8 @@ function connectWS() {
     loadState();
   };
   ws.onclose = () => {
-    document.getElementById('ws-status').textContent = 'Disconnected - reconnecting...';
-    document.getElementById('ws-status').style.color = '#ef4444';
+    document.getElementById('ws-status').textContent = 'Reconnecting';
+    document.getElementById('ws-status').classList.remove('connected');
     wsReconnectAttempts++;
     const delay = Math.min(wsReconnectDelay * Math.pow(1.5, wsReconnectAttempts - 1), WS_MAX_DELAY);
     setTimeout(connectWS, delay);
@@ -397,6 +500,7 @@ async function loadState() {
   const state = await api('GET', `/rooms/${roomId}/state?last_sequence=0`);
   document.getElementById('room-name').textContent = state.room.name;
   document.getElementById('room-meta').textContent = state.room.description || 'No description';
+  document.getElementById('rooms-list').innerHTML = `<button class="nav-item active"><span class="nav-icon">#</span><span class="nav-name">${escHtml(state.room.name)}</span></button>`;
 
   // Messages
   const msgDiv = document.getElementById('messages');
@@ -409,16 +513,51 @@ async function loadState() {
   renderSidebarAgents(state.agents);
 
   // Durable specialist runs and authored outputs
-  roomOutputs = state.outputs || [];
+  const durableBranches = (state.branches || []).filter(branch => branch.lifecycle_managed !== false);
+  roomBranches = durableBranches;
+  roomRuns = state.runs || [];
+  if (!durableBranches.some(branch => branch.branch_id === currentBranchId)) {
+    currentBranchId = durableBranches.length
+      ? durableBranches[durableBranches.length - 1].branch_id
+      : '';
+  }
+  const currentBranch = durableBranches.find(branch => branch.branch_id === currentBranchId);
+  currentBranchMode = currentBranch ? currentBranch.mode : '';
+  roomOutputs = (state.outputs || []).filter(output =>
+    !currentBranchId || output.branch_id === currentBranchId
+  );
   outputSelections.clear();
   (state.output_selections || []).forEach(selection => {
-    outputSelections.set(selection.output_id, selection.disposition.toLowerCase());
+    if (!currentBranchId || selection.branch_id === currentBranchId) {
+      outputSelections.set(selection.output_id, selection.disposition.toLowerCase());
+    }
   });
+  renderBranches(durableBranches, state.runs || []);
   renderOutputs(roomOutputs, state.runs || []);
+  currentTurnLock = state.turn_lock || null;
+  const messageInput = document.getElementById('msg-input');
+  const messageButton = document.getElementById('send-message-button');
+  const locked = Boolean(currentTurnLock);
+  messageInput.disabled = locked;
+  messageButton.disabled = locked;
+  messageInput.placeholder = locked
+    ? 'AI is working on this turn'
+    : `Message #${state.room.name}`;
+  const lockBanner = document.getElementById('turn-lock-banner');
+  lockBanner.classList.toggle('visible', locked);
+  if (locked) {
+    const lockBranch = durableBranches.find(branch => branch.branch_id === currentTurnLock.branch_id);
+    document.getElementById('turn-lock-title').textContent = `${lockBranch ? branchTitle(lockBranch) : 'A specialist'} is working on this turn`;
+  }
 
   // Evidence graph and governance state are part of the reconnect snapshot.
   const currentMember = (state.members || []).find(member => member.user_id === userId);
   currentRoomRole = currentMember ? currentMember.role : 'viewer';
+  document.getElementById('identity-name').textContent = userName || userId;
+  document.getElementById('identity-role').textContent = currentRoomRole;
+  document.getElementById('identity-avatar').textContent = (userName || userId || '?').slice(0,1).toUpperCase();
+  document.getElementById('rail-avatar').textContent = (userName || userId || '?').slice(0,1).toUpperCase();
+  applyPermissions();
   roomOntology = state.ontology || {entities: [], relationships: [], reviews: []};
   renderOntology(roomOntology);
 
@@ -430,6 +569,7 @@ async function loadState() {
 
   // Artifacts
   renderArtifacts(state.artifacts);
+  document.getElementById('artifact-nav-count').textContent = state.artifacts.length;
 
   // Decisions
   renderDecisions(state.decisions);
@@ -563,16 +703,19 @@ function renderApprovals(approvals) {
 
 function renderArtifacts(arts) {
   const panel = document.getElementById('artifacts-panel');
-  if (!arts.length) { panel.innerHTML = '<div class="card"><div class="detail">No artifacts</div></div>'; return; }
-  panel.innerHTML = arts.map(a => `
+  const surface = document.getElementById('artifact-surface');
+  if (!arts.length) { panel.innerHTML = '<div class="card"><div class="detail">No artifacts</div></div>'; surface.innerHTML = '<div class="empty-outputs">Synthesize reviewed outputs to publish the first Decision Brief.</div>'; return; }
+  const markup = arts.map(a => `
     <div class="card">
       <div class="title">${escHtml(a.name)}</div>
-      <div class="detail">${a.type} v${a.version}</div>
-      ${a.content ? `<details><summary>Open version</summary><div class="detail">${escHtml(a.content)}</div>
-        <button onclick="loadProvenance('${a.version_id}')">Drill into evidence</button>
+      <div class="detail">${a.type} · version ${a.version}</div>
+      ${a.content ? `<details open><summary>Read artifact</summary><article class="detail">${escHtml(a.content)}</article>
+        <button class="btn-sm" onclick="loadProvenance('${a.version_id}')">Inspect claim provenance</button>
         <div id="provenance-${a.version_id}"></div></details>` : ''}
     </div>
   `).join('');
+  panel.innerHTML = `<div class="card"><div class="detail">${arts.length} published ${arts.length === 1 ? 'artifact' : 'artifacts'}. Open the Artifact tab to read them.</div></div>`;
+  surface.innerHTML = markup;
 }
 
 function renderDecisions(decs) {
@@ -786,8 +929,9 @@ async function reviewOntologyRelationship(relationshipId, action) {
 function renderMembers(members) {
   const el = document.getElementById('team-list');
   el.innerHTML = members.map(m => `
-    <div class="item"><span class="dot online"></span>${escHtml(m.user_id)}</div>
+    <button class="nav-item" onclick="openContext('members')"><span class="presence-dot"></span><span class="nav-name">${escHtml(m.user_id)}</span><span class="nav-meta">${escHtml(m.role)}</span></button>
   `).join('');
+  document.getElementById('members-panel').innerHTML = members.map(m => `<div class="card"><div class="title">${escHtml(m.user_id)}${m.user_id === userId ? ' · you' : ''}</div><div class="detail">${escHtml(m.role)} · channel member</div></div>`).join('');
 }
 
 async function loadTemplates() {
@@ -807,13 +951,32 @@ function renderTemplates() {
   grid.innerHTML = agentTemplates.map(t => `
     <label class="template-option">
       <input type="checkbox" value="${escHtml(t.template_id)}"
-             ${preferred.has(t.name) ? 'checked' : ''} onchange="updateTemplateSelection()">
+             ${preferred.has(t.name) ? 'checked' : ''} onchange="toggleTemplateSelection(this)">
       <span class="template-body">
-        <span class="template-name">${escHtml(t.name)}</span>
-        <span class="template-role">${escHtml(t.role)}</span>
+        <span class="template-check" aria-hidden="true">✓</span>
+        <span class="template-copy"><span class="template-name">${escHtml(t.name)}</span><span class="template-role">${escHtml(t.role)}</span></span>
+        <span class="template-state">${preferred.has(t.name) ? 'Selected' : 'Select'}</span>
       </span>
     </label>
   `).join('');
+  updateTemplateSelection();
+}
+
+function toggleTemplateSelection(input) {
+  const turnLocked = document.getElementById('turn-locked-mode').checked;
+  const checked = [...document.querySelectorAll('#template-grid input:checked')];
+  const limit = turnLocked ? 1 : 3;
+  if (checked.length > limit) {
+    if (turnLocked) {
+      checked.filter(item => item !== input).forEach(item => { item.checked = false; });
+    } else {
+      input.checked = false;
+      toast('Parallel branches support up to three specialists.', 'error');
+    }
+  }
+  document.querySelectorAll('.template-option').forEach(option => {
+    option.querySelector('.template-state').textContent = option.querySelector('input').checked ? 'Selected' : 'Select';
+  });
   updateTemplateSelection();
 }
 
@@ -824,20 +987,105 @@ function selectedTemplates() {
 
 function updateTemplateSelection() {
   const count = selectedTemplates().length;
+  const turnLocked = document.getElementById('turn-locked-mode').checked;
   document.getElementById('template-selection-count').textContent =
-    count ? `${count} selected` : 'Choose 2–3';
-  document.getElementById('launch-button').disabled = count < 2 || count > 3;
+    count ? `${count} selected` : (turnLocked ? 'Choose 1' : 'Choose 2 to 3');
+  document.getElementById('launch-button').disabled = turnLocked
+    ? count !== 1
+    : count < 2 || count > 3;
+  document.getElementById('launch-button').textContent = turnLocked
+    ? 'Start turn-locked run'
+    : 'Run selected in parallel';
+}
+
+function branchTitle(branch) {
+  const prompt = (branch.initiating_prompt || branch.prompt || 'AI branch').trim();
+  return prompt.length > 46 ? `${prompt.slice(0, 46)}…` : prompt;
+}
+
+function branchStatus(branch, runs) {
+  if (branch.status) return branch.status.toLowerCase();
+  const related = runs.filter(run => run.branch_id === branch.branch_id);
+  if (related.some(run => ['PENDING','RUNNING'].includes(run.status))) return 'running';
+  if (related.some(run => run.status === 'FAILED') && related.some(run => run.status === 'COMPLETED')) return 'partial';
+  if (related.length && related.every(run => run.status === 'COMPLETED')) return 'completed';
+  if (related.some(run => run.status === 'FAILED')) return 'failed';
+  return 'queued';
+}
+
+function renderBranches(branches, runs) {
+  const list = document.getElementById('branches-list');
+  if (!branches.length) {
+    list.innerHTML = '<div class="nav-item"><span class="nav-icon">⑂</span><span class="nav-name">No branches yet</span></div>';
+    document.getElementById('branch-panel-title').textContent = 'No AI branch selected';
+    document.getElementById('branch-panel-copy').textContent = 'Start AI work from the composer. Runs and outputs remain together here.';
+    document.getElementById('branch-runs').innerHTML = '';
+    return;
+  }
+  list.innerHTML = branches.slice().reverse().map(branch => {
+    const related = runs.filter(run => run.branch_id === branch.branch_id);
+    const status = branchStatus(branch, runs);
+    return `<button class="nav-item branch-nav ${branch.branch_id === currentBranchId ? 'active' : ''}" onclick="selectBranch('${branch.branch_id}')"><span class="nav-icon">⑂</span><span class="nav-name"><span>${escHtml(branchTitle(branch))}</span><span class="branch-summary">${escHtml(status)} · ${related.length} ${related.length === 1 ? 'agent' : 'agents'}</span></span></button>`;
+  }).join('');
+  const branch = branches.find(item => item.branch_id === currentBranchId) || branches[branches.length - 1];
+  const related = runs.filter(run => run.branch_id === branch.branch_id);
+  const status = branchStatus(branch, runs);
+  document.getElementById('branch-panel-title').textContent = branchTitle(branch);
+  document.getElementById('branch-panel-copy').textContent = `${branch.mode === 'TURN_LOCKED_SINGLE' ? 'Single agent' : 'Parallel'} · Started by ${branch.initiating_user_id || 'room member'} · ${status}`;
+  document.getElementById('branch-runs').innerHTML = related.map(run => {
+    const agent = roomAgents.find(item => item.agent_id === run.agent_id);
+    return `<div class="card"><div class="title"><span class="status-text ${String(run.status).toLowerCase()}">${escHtml(agent ? agent.name : 'Specialist')} · ${escHtml(run.status)}</span></div><div class="detail">${escHtml(agent ? agent.role : 'Independent analysis')}</div></div>`;
+  }).join('');
+  renderBranchActivity(branches, runs);
+}
+
+function renderBranchActivity(branches, runs) {
+  const messages = document.getElementById('messages');
+  messages.querySelectorAll('.branch-activity').forEach(item => item.remove());
+  branches.forEach(branch => {
+    const related = runs.filter(run => run.branch_id === branch.branch_id);
+    const status = branchStatus(branch, runs);
+    const reviewed = roomOutputs.filter(output => output.branch_id === branch.branch_id && outputSelections.has(output.output_id)).length;
+    messages.insertAdjacentHTML('beforeend', `<article class="branch-activity"><button onclick="selectBranch('${branch.branch_id}')"><span class="branch-symbol">⑂</span><span><span class="branch-title">${escHtml(branchTitle(branch))}</span><span class="branch-detail">Started by ${escHtml(branch.initiating_user_id || 'room member')} · ${related.length} ${related.length === 1 ? 'agent' : 'agents'}</span></span><span class="branch-progress"><span class="status-text ${status}">${escHtml(status)}</span><br>${reviewed} reviewed</span></button></article>`);
+  });
+}
+
+async function selectBranch(branchId) {
+  currentBranchId = branchId;
+  openContext('branch');
+  await loadState();
+}
+
+function applyPermissions() {
+  const canEdit = ['admin','editor','member'].includes(currentRoomRole);
+  ['ai-trigger','send-message-button','synthesize-button'].forEach(id => {
+    const element = document.getElementById(id);
+    if (element && !canEdit) { element.disabled = true; element.title = 'Your viewer role is read-only'; }
+  });
+  document.querySelectorAll('.review-actions button').forEach(button => {
+    button.disabled = !canEdit;
+    if (!canEdit) button.title = 'Your viewer role is read-only';
+  });
+}
+
+async function cancelCurrentTurn() {
+  if (!currentTurnLock || !currentBranchId) return;
+  const run = roomRuns.find(item => item.branch_id === currentBranchId && ['PENDING','RUNNING'].includes(item.status));
+  if (!run) return toast('No active run is available to cancel.');
+  try { await api('POST', `/executions/${run.execution_id}/cancel`, {}); toast('Cancellation requested.'); await loadState(); }
+  catch (err) { toast(`Could not cancel the run: ${errorMessage(err)}`, 'error'); }
 }
 
 async function launchParallelAnalyses() {
   const question = document.getElementById('analysis-question').value.trim();
   const templates = selectedTemplates();
+  const turnLocked = document.getElementById('turn-locked-mode').checked;
   if (!question) {
     setLaunchNote('Enter a technical decision first.', 'error');
     return;
   }
-  if (templates.length < 2 || templates.length > 3) {
-    setLaunchNote('Select two or three specialists.', 'error');
+  if ((turnLocked && templates.length !== 1) || (!turnLocked && (templates.length < 2 || templates.length > 3))) {
+    setLaunchNote(turnLocked ? 'Select exactly one specialist.' : 'Select two or three specialists.', 'error');
     return;
   }
 
@@ -847,21 +1095,42 @@ async function launchParallelAnalyses() {
   button.innerHTML = '<span class="spinner"></span> Launching branches';
   setLaunchNote(`Starting ${templates.length} independent runs…`);
 
-  const results = await Promise.allSettled(templates.map(async template => {
-    const agent = await api('POST', `/rooms/${roomId}/agents`, {
+  const spawned = await Promise.allSettled(templates.map(template =>
+    api('POST', `/rooms/${roomId}/agents`, {
       template_id: template.template_id,
       name: template.name
+    })
+  ));
+  const agents = spawned.filter(result => result.status === 'fulfilled').map(result => result.value);
+  if (agents.length !== templates.length) {
+    button.removeAttribute('aria-busy');
+    button.textContent = 'Run selected in parallel';
+    updateTemplateSelection();
+    setLaunchNote(`${agents.length} specialists spawned; branch start was stopped because another spawn failed.`, 'error');
+    return;
+  }
+  let branchLaunch;
+  try {
+    branchLaunch = await api('POST', `/rooms/${roomId}/branches`, {
+      mode: turnLocked ? 'TURN_LOCKED_SINGLE' : 'PARALLEL',
+      prompt: question,
+      agent_ids: agents.map(agent => agent.agent_id)
     });
-    const session = await api('POST', `/rooms/${roomId}/agents/${agent.agent_id}/sessions`);
-    const execution = await api('POST', `/sessions/${session.session_id}/execute`);
-    const prompt = `Analyze this decision independently from the ${template.role} perspective. State your recommendation, decisive evidence, risks, and unresolved questions.\n\nDecision: ${question}`;
-    return api('POST', `/executions/${execution.execution_id}/step`, {prompt});
-  }));
+    currentBranchId = branchLaunch.branch.branch_id;
+  } catch (err) {
+    button.removeAttribute('aria-busy');
+    button.textContent = 'Run selected in parallel';
+    updateTemplateSelection();
+    setLaunchNote(`Branch was not started: ${errorMessage(err)}`, 'error');
+    return;
+  }
+  const results = await Promise.allSettled(branchLaunch.runs.map(run =>
+    api('POST', `/branches/${currentBranchId}/runs/${run.execution_id}/execute`)
+  ));
 
   const succeeded = results.filter(r => r.status === 'fulfilled').length;
   const failed = results.length - succeeded;
   button.removeAttribute('aria-busy');
-  button.textContent = 'Run selected in parallel';
   updateTemplateSelection();
   await loadState();
   if (failed) {
@@ -874,7 +1143,7 @@ async function launchParallelAnalyses() {
 function renderOutputs(outputs, runs) {
   const panel = document.getElementById('outputs-panel');
   document.getElementById('outputs-count').textContent =
-    `${outputs.length} authored ${outputs.length === 1 ? 'branch' : 'branches'}`;
+    `${outputs.length} specialist ${outputs.length === 1 ? 'output' : 'outputs'}`;
   if (!outputs.length) {
     const active = runs.filter(r => r.status === 'PENDING' || r.status === 'RUNNING').length;
     panel.innerHTML = `<div class="empty-outputs">${active
@@ -902,8 +1171,8 @@ function renderOutputs(outputs, runs) {
           <details class="prompt-detail"><summary>Exact source prompt</summary><div>${escHtml(output.source_prompt || 'Unavailable')}</div></details>
         </div>
         <div class="review-actions">
-          <button class="include ${selection === 'included' ? 'active' : ''}" onclick="setOutputSelection('${output.output_id}','included')">Include</button>
-          <button class="exclude ${selection === 'excluded' ? 'active' : ''}" onclick="setOutputSelection('${output.output_id}','excluded')">Exclude</button>
+          <button class="include ${selection === 'included' ? 'active' : ''}" aria-pressed="${selection === 'included'}" onclick="setOutputSelection('${output.output_id}','included')">Include</button>
+          <button class="exclude ${selection === 'excluded' ? 'active' : ''}" aria-pressed="${selection === 'excluded'}" onclick="setOutputSelection('${output.output_id}','excluded')">Exclude</button>
         </div>
       </article>`;
   }).join('');
@@ -912,12 +1181,12 @@ function renderOutputs(outputs, runs) {
 
 async function setOutputSelection(outputId, selection) {
   try {
-    await api('PUT', `/rooms/${roomId}/output-selections/${outputId}`, {
+    await api('PUT', `/branches/${currentBranchId}/output-selections/${outputId}`, {
       disposition: selection.toUpperCase()
     });
     await loadState();
   } catch (err) {
-    alert(`Selection was not saved: ${errorMessage(err)}`);
+    toast(`Selection was not saved: ${errorMessage(err)}`, 'error');
   }
 }
 
@@ -929,22 +1198,28 @@ function updateSelectionSummary() {
   document.getElementById('selection-summary').textContent = reviewed
     ? `${included} included · ${excluded} excluded · ${roomOutputs.length - reviewed} unreviewed`
     : 'No outputs selected';
-  const valid = roomOutputs.length >= 2 && reviewed === roomOutputs.length && included >= 2;
+  const minimumIncluded = currentBranchMode === 'TURN_LOCKED_SINGLE' ? 1 : 2;
+  const valid = roomOutputs.length >= minimumIncluded
+    && reviewed === roomOutputs.length
+    && included >= minimumIncluded;
   const synthesize = document.getElementById('synthesize-button');
   synthesize.disabled = !valid;
-  synthesize.title = valid ? '' : 'Review every output and include at least two';
+  synthesize.textContent = included ? `Synthesize ${included} selected` : 'Synthesize';
+  synthesize.title = valid ? '' : `Review every output and include at least ${minimumIncluded}`;
 }
 
 async function synthesizeDecisionBrief() {
   const button = document.getElementById('synthesize-button');
   button.disabled = true;
   try {
-    await api('POST', `/rooms/${roomId}/syntheses/decision-brief`, {
+    await api('POST', `/branches/${currentBranchId}/syntheses/decision-brief`, {
       title: 'Authentication migration decision'
     });
     await loadState();
+    openContext('artifacts');
+    toast('Decision Brief published.');
   } catch (err) {
-    alert(`Decision Brief was not published: ${errorMessage(err)}`);
+    toast(`Decision Brief was not published: ${errorMessage(err)}`, 'error');
     updateSelectionSummary();
   }
 }

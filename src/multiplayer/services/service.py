@@ -26,6 +26,12 @@ from ..domain.models import (
     ArtifactType,
     ArtifactVersion,
     BootstrapContext,
+    Branch,
+    BranchMode,
+    BranchStatus,
+    BranchSynthesis,
+    BranchSynthesisInput,
+    BranchSynthesisStatus,
     ClaimSource,
     Decision,
     DomainError,
@@ -54,12 +60,16 @@ from ..domain.models import (
     Task,
     TaskPriority,
     TaskStatus,
+    TurnLock,
+    TurnLockScopeType,
+    TurnLockStatus,
     Workspace,
     WorkspaceMember,
     new_id,
     utcnow,
 )
 from ..domain.provenance import calculate_artifact_provenance_hash
+from ..model_providers import ModelProviderError
 from ..nexus_bridge.agent_bridge import NexusAgentBridge
 from ..realtime.hub import RealtimeHub
 from ..security.authorization import RoomCapability, RoomPolicy
@@ -605,6 +615,213 @@ class MultiplayerService:
             "agent",
         )
 
+    # ── Branch ───────────────────────────────────────────────────────────────
+
+    async def start_branch(
+        self,
+        room_id: str,
+        mode: BranchMode,
+        initiating_prompt: str,
+        initiated_by: str,
+        agent_ids: list[str],
+    ) -> tuple[Branch, list[Execution]]:
+        """Atomically freeze context, create AgentRuns, and optionally own the room turn."""
+        initiating_prompt = self._validate_non_empty(initiating_prompt, "branch prompt")
+        unique_agent_ids = list(dict.fromkeys(agent_ids))
+        if unique_agent_ids != agent_ids:
+            raise DomainError("branch agent ids must be unique")
+        expected = 1 if mode == BranchMode.TURN_LOCKED_SINGLE else None
+        if expected is not None and len(agent_ids) != expected:
+            raise DomainError("turn-locked single mode requires exactly one agent")
+        if mode == BranchMode.PARALLEL and not 2 <= len(agent_ids) <= 3:
+            raise DomainError("parallel mode requires two or three agents")
+        agents = [await self.get_agent(agent_id) for agent_id in agent_ids]
+        if any(agent.room_id != room_id for agent in agents):
+            raise DomainError("every branch agent must belong to the room")
+
+        persisted_events: list[RoomEvent] = []
+        executions: list[Execution] = []
+        async with self.db.transaction():
+            active_lock = await self.repos.turn_locks.get_active(TurnLockScopeType.ROOM, room_id)
+            if active_lock is not None:
+                raise DomainError(f"room turn is locked by branch {active_lock.branch_id}")
+            sequence = await self.repos.events.get_latest_sequence(room_id)
+            messages = await self.repos.messages.list_by_room(room_id, limit=50)
+            events = await self.repos.events.list_since(room_id, max(0, sequence - 100), limit=100)
+            snapshot = {
+                "schema": "multiai.branch-context.v1",
+                "limits": {"messages": 50, "events": 100},
+                "messages": [
+                    {
+                        "message_id": message.message_id,
+                        "role": message.role.value,
+                        "sender_id": message.sender_id,
+                        "content": message.content,
+                        "metadata": message.metadata,
+                        "created_at": message.created_at.isoformat(),
+                    }
+                    for message in messages
+                ],
+                "events": [
+                    {
+                        "event_id": event.event_id,
+                        "sequence": event.sequence,
+                        "event_type": event.event_type.value,
+                        "payload": event.payload,
+                        "actor_id": event.actor_id,
+                        "actor_type": event.actor_type,
+                        "timestamp": event.timestamp.isoformat(),
+                    }
+                    for event in events
+                    if event.sequence <= sequence
+                ],
+            }
+            message_ids = tuple(message.message_id for message in messages)
+            context_envelope = {
+                "initiating_prompt": initiating_prompt,
+                "context_event_sequence": sequence,
+                "context_message_ids": list(message_ids),
+                "context_snapshot": snapshot,
+            }
+            context_hash = hashlib.sha256(
+                json.dumps(
+                    context_envelope,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            branch = Branch(
+                branch_id=new_id("branch"),
+                room_id=room_id,
+                mode=mode,
+                status=BranchStatus.RUNNING,
+                initiated_by=initiated_by,
+                initiating_prompt=initiating_prompt,
+                context_event_sequence=sequence,
+                context_message_ids=message_ids,
+                context_snapshot=snapshot,
+                context_hash=context_hash,
+            )
+            await self.repos.branches.create(branch)
+            lock: TurnLock | None = None
+            if mode == BranchMode.TURN_LOCKED_SINGLE:
+                lock = TurnLock(
+                    lock_id=new_id("lock"),
+                    scope_type=TurnLockScopeType.ROOM,
+                    scope_id=room_id,
+                    branch_id=branch.branch_id,
+                    status=TurnLockStatus.ACTIVE,
+                    acquired_by=initiated_by,
+                )
+                await self.repos.turn_locks.create(lock)
+            for agent in agents:
+                session = Session(
+                    session_id=new_id("sess"),
+                    room_id=room_id,
+                    agent_id=agent.agent_id,
+                    status=SessionStatus.ACTIVE,
+                )
+                execution = Execution(
+                    execution_id=new_id("exec"),
+                    session_id=session.session_id,
+                    agent_id=agent.agent_id,
+                    branch_id=branch.branch_id,
+                    status=ExecutionStatus.PENDING,
+                    input_data={
+                        "initiating_prompt": initiating_prompt,
+                        "context_hash": context_hash,
+                    },
+                )
+                await self.repos.sessions.create(session)
+                await self.repos.executions.create(execution)
+                executions.append(execution)
+            events_to_persist = [
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.BRANCH_STARTED,
+                    payload={
+                        "branch_id": branch.branch_id,
+                        "mode": mode.value,
+                        "status": branch.status.value,
+                        "context_event_sequence": sequence,
+                        "context_message_ids": list(message_ids),
+                        "context_hash": context_hash,
+                        "execution_ids": [run.execution_id for run in executions],
+                    },
+                    actor_id=initiated_by,
+                    actor_type="user",
+                )
+            ]
+            if lock is not None:
+                events_to_persist.append(
+                    RoomEvent(
+                        room_id=room_id,
+                        sequence=0,
+                        event_type=EventType.TURN_LOCK_ACQUIRED,
+                        payload={
+                            "lock_id": lock.lock_id,
+                            "scope_type": lock.scope_type.value,
+                            "scope_id": lock.scope_id,
+                            "branch_id": branch.branch_id,
+                        },
+                        actor_id=initiated_by,
+                        actor_type="user",
+                    )
+                )
+            for run in executions:
+                events_to_persist.append(
+                    RoomEvent(
+                        room_id=room_id,
+                        sequence=0,
+                        event_type=EventType.AGENT_RUN_STARTED,
+                        payload={
+                            "branch_id": branch.branch_id,
+                            "execution_id": run.execution_id,
+                            "session_id": run.session_id,
+                            "agent_id": run.agent_id,
+                        },
+                        actor_id=initiated_by,
+                        actor_type="user",
+                    )
+                )
+            for event in events_to_persist:
+                persisted_events.append(
+                    await self.repos.events.append_with_next_sequence_in_transaction(event)
+                )
+        await self._broadcast_persisted_events(persisted_events)
+        return branch, executions
+
+    async def get_branch(self, branch_id: str) -> Branch:
+        branch = await self.repos.branches.get(branch_id)
+        if branch is None:
+            raise DomainError(f"branch not found: {branch_id}")
+        return branch
+
+    async def list_room_branches(self, room_id: str) -> list[Branch]:
+        await self.get_room(room_id)
+        return await self.repos.branches.list_by_room(room_id)
+
+    async def list_branch_runs(self, branch_id: str) -> list[Execution]:
+        await self.get_branch(branch_id)
+        return await self.repos.executions.list_by_branch(branch_id)
+
+    @staticmethod
+    def _branch_execution_prompt(branch: Branch) -> str:
+        if not branch.lifecycle_managed:
+            return branch.initiating_prompt
+        snapshot = json.dumps(
+            branch.context_snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return (
+            f"Branch prompt:\n{branch.initiating_prompt}\n\n"
+            f"Immutable bounded channel context (hash {branch.context_hash}):\n{snapshot}"
+        )
+
     # ── Session & Execution ──────────────────────────────────────────────────
 
     async def start_agent_session(
@@ -658,7 +875,8 @@ class MultiplayerService:
         )
         await self._broadcast_persisted_events([event])
         await self._set_agent_status_safe(session.agent_id, AgentStatus.WORKING)
-        return execution
+        persisted = await self.repos.executions.get(execution.execution_id)
+        return persisted or execution
 
     async def execute_agent_step(self, execution_id: str, prompt: str) -> dict[str, Any]:
         prompt = self._validate_non_empty(prompt, "agent prompt")
@@ -669,6 +887,7 @@ class MultiplayerService:
         if not session:
             raise DomainError("session not found")
         agent = await self.get_agent(execution.agent_id)
+        branch = await self.get_branch(execution.branch_id)
 
         if execution.status in {
             ExecutionStatus.COMPLETED,
@@ -679,26 +898,51 @@ class MultiplayerService:
                 f"execution {execution_id} is terminal (current: {execution.status.value})"
             )
 
+        source_prompt = prompt
+        provider_prompt = prompt
+        if branch.lifecycle_managed:
+            if prompt != branch.initiating_prompt:
+                raise DomainError("managed branch run must use its immutable initiating prompt")
+            source_prompt = branch.initiating_prompt
+            provider_prompt = self._branch_execution_prompt(branch)
+
         if not execution.run_id:
-            await self.nexus.create_execution(agent, session, prompt, execution)
+            await self.nexus.create_execution(agent, session, provider_prompt, execution)
             run_id = f"run_{execution.execution_id}"
             execution = Execution(
                 execution_id=execution.execution_id,
                 session_id=execution.session_id,
                 agent_id=execution.agent_id,
+                branch_id=execution.branch_id,
                 run_id=run_id,
                 status=ExecutionStatus.RUNNING,
                 input_data=execution.input_data,
             )
             await self.repos.executions.mark_running(execution.execution_id, run_id)
 
-        result = await self.nexus.execute_step(execution_id, prompt)
+        result = await self.nexus.execute_step(execution_id, provider_prompt)
         if result.get("status") == "error":
-            await self.repos.executions.update_status(
-                execution.execution_id,
+            error = str(result.get("error", ""))
+            persisted_events = await self.repos.executions.terminalize_without_output(
+                replace(execution, branch_id=branch.branch_id),
                 ExecutionStatus.FAILED,
-                error=result.get("error", ""),
+                error,
+                [
+                    RoomEvent(
+                        room_id=session.room_id,
+                        sequence=0,
+                        event_type=EventType.EXECUTION_FAILED,
+                        payload={
+                            "branch_id": branch.branch_id,
+                            "execution_id": execution.execution_id,
+                            "error": error,
+                        },
+                        actor_id=execution.agent_id,
+                        actor_type="agent",
+                    )
+                ],
             )
+            await self._broadcast_persisted_events(persisted_events)
             await self._set_agent_status_safe(execution.agent_id, AgentStatus.FAILED)
             return result
         if result.get("action") == "finish":
@@ -719,8 +963,9 @@ class MultiplayerService:
                 execution_id=execution.execution_id,
                 agent_id=execution.agent_id,
                 content=self._output_content(output_data),
+                branch_id=branch.branch_id,
                 output_data=output_data,
-                source_prompt=prompt,
+                source_prompt=source_prompt,
                 provider_input=str(provenance.get("provider_input", "")),
                 provider_name=str(provenance.get("provider_name", "")),
                 provider_model=str(provenance.get("provider_model", "")),
@@ -737,6 +982,7 @@ class MultiplayerService:
                         event_type=EventType.AGENT_OUTPUT_CREATED,
                         payload={
                             "output_id": output.output_id,
+                            "branch_id": branch.branch_id,
                             "execution_id": execution.execution_id,
                             "session_id": session.session_id,
                             "agent_id": execution.agent_id,
@@ -753,6 +999,7 @@ class MultiplayerService:
                             "session_id": session.session_id,
                             "agent_id": execution.agent_id,
                             "output_id": output.output_id,
+                            "branch_id": branch.branch_id,
                         },
                         actor_id=execution.agent_id,
                         actor_type="agent",
@@ -764,6 +1011,87 @@ class MultiplayerService:
             await self._set_agent_status_safe(execution.agent_id, AgentStatus.IDLE)
             result["output_id"] = output.output_id
         return result
+
+    async def execute_branch_run(self, branch_id: str, execution_id: str) -> dict[str, Any]:
+        branch = await self.get_branch(branch_id)
+        execution = await self.repos.executions.get(execution_id)
+        if execution is None or execution.branch_id != branch.branch_id:
+            raise DomainError("agent run not found in branch")
+        return await self.execute_agent_step(execution_id, branch.initiating_prompt)
+
+    async def pause_execution(self, execution_id: str) -> bool:
+        execution = await self.repos.executions.get(execution_id)
+        if execution is None:
+            raise DomainError("execution not found")
+        branch = await self.get_branch(execution.branch_id)
+        if not branch.lifecycle_managed:
+            return await self.nexus.pause_execution(execution_id)
+        _validate_transition(
+            execution.status, ExecutionStatus.PAUSED, VALID_EXECUTION_TRANSITIONS, "execution"
+        )
+        ok = await self.nexus.pause_execution(execution_id)
+        if not ok:
+            return False
+        await self.repos.executions.update_status(execution_id, ExecutionStatus.PAUSED)
+        return True
+
+    async def resume_execution(self, execution_id: str) -> bool:
+        execution = await self.repos.executions.get(execution_id)
+        if execution is None:
+            raise DomainError("execution not found")
+        branch = await self.get_branch(execution.branch_id)
+        if not branch.lifecycle_managed:
+            return await self.nexus.resume_execution(execution_id)
+        _validate_transition(
+            execution.status, ExecutionStatus.RUNNING, VALID_EXECUTION_TRANSITIONS, "execution"
+        )
+        ok = await self.nexus.resume_execution(execution_id)
+        if not ok:
+            return False
+        await self.repos.executions.update_status(execution_id, ExecutionStatus.RUNNING)
+        return True
+
+    async def cancel_execution(self, execution_id: str, cancelled_by: str) -> bool:
+        execution = await self.repos.executions.get(execution_id)
+        if execution is None:
+            raise DomainError("execution not found")
+        branch = await self.get_branch(execution.branch_id)
+        if not branch.lifecycle_managed:
+            return await self.nexus.cancel_execution(execution_id)
+        if execution.status in {
+            ExecutionStatus.COMPLETED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
+            raise DomainError("execution is already terminal")
+        ok = await self.nexus.cancel_execution(execution_id)
+        # A durable PENDING run may not yet exist in the bridge; cancellation is
+        # still authoritative at the Branch/AgentRun layer.
+        if not ok and execution.run_id:
+            return False
+        session = await self.repos.sessions.get(execution.session_id)
+        if session is None:
+            raise DomainError("session not found")
+        events = await self.repos.executions.terminalize_without_output(
+            execution,
+            ExecutionStatus.CANCELLED,
+            "cancelled by user",
+            [
+                RoomEvent(
+                    room_id=session.room_id,
+                    sequence=0,
+                    event_type=EventType.EXECUTION_CANCELLED,
+                    payload={
+                        "branch_id": execution.branch_id,
+                        "execution_id": execution.execution_id,
+                    },
+                    actor_id=cancelled_by,
+                    actor_type="user",
+                )
+            ],
+        )
+        await self._broadcast_persisted_events(events)
+        return True
 
     @staticmethod
     def _output_content(output_data: dict[str, Any]) -> str:
@@ -793,6 +1121,7 @@ class MultiplayerService:
             output_id=output_id,
             disposition=disposition,
             decided_by=decided_by,
+            branch_id=output.branch_id,
         )
         event = await self.repos.output_selections.upsert_with_event(
             selection,
@@ -800,7 +1129,11 @@ class MultiplayerService:
                 room_id=room_id,
                 sequence=0,
                 event_type=EventType.OUTPUT_SELECTION_UPDATED,
-                payload={"output_id": output_id, "disposition": disposition.value},
+                payload={
+                    "branch_id": output.branch_id,
+                    "output_id": output_id,
+                    "disposition": disposition.value,
+                },
                 actor_id=decided_by,
                 actor_type="user",
             ),
@@ -812,31 +1145,149 @@ class MultiplayerService:
         await self.get_room(room_id)
         return await self.repos.output_selections.list_by_room(room_id)
 
+    async def select_branch_output(
+        self,
+        branch_id: str,
+        output_id: str,
+        disposition: OutputDisposition,
+        decided_by: str,
+    ) -> OutputSelection:
+        branch = await self.get_branch(branch_id)
+        output = await self.repos.agent_outputs.get(output_id)
+        if output is None or output.branch_id != branch_id:
+            raise DomainError("agent output not found in branch")
+        return await self.select_output(branch.room_id, output_id, disposition, decided_by)
+
     async def synthesize_decision_brief(
         self, room_id: str, title: str, created_by: str
     ) -> tuple[Artifact, ArtifactVersion]:
-        """Publish only deliberately selected outputs with exact evidence links."""
-        title = self._validate_non_empty(title, "decision brief title")
-        outputs = await self.list_room_outputs(room_id)
+        """Compatibility route: resolve one selected Branch, then synthesize that unit."""
         selections = await self.list_output_selections(room_id)
+        selected_ids = {
+            item.output_id for item in selections if item.disposition == OutputDisposition.INCLUDED
+        }
+        outputs = [
+            output
+            for output in await self.list_room_outputs(room_id)
+            if output.output_id in selected_ids
+        ]
+        branch_ids = {output.branch_id for output in outputs}
+        if len(branch_ids) != 1:
+            raise DomainError("selected outputs must belong to exactly one branch")
+        return await self.synthesize_branch_decision_brief(branch_ids.pop(), title, created_by)
+
+    async def synthesize_branch_decision_brief(
+        self, branch_id: str, title: str, created_by: str
+    ) -> tuple[Artifact, ArtifactVersion]:
+        """Run model-backed synthesis over this Branch's explicit selected outputs."""
+        title = self._validate_non_empty(title, "decision brief title")
+        branch = await self.get_branch(branch_id)
+        outputs = await self.repos.agent_outputs.list_by_branch(branch_id)
+        selections = await self.repos.output_selections.list_by_branch(branch_id)
         decisions = {selection.output_id: selection.disposition for selection in selections}
-        if len(outputs) < 2:
-            raise DomainError("at least two specialist outputs are required")
+        minimum_included = 1 if branch.mode == BranchMode.TURN_LOCKED_SINGLE else 2
+        if len(outputs) < minimum_included:
+            raise DomainError(
+                f"at least {minimum_included} branch output(s) are required for this mode"
+            )
         unreviewed = [output.output_id for output in outputs if output.output_id not in decisions]
         if unreviewed:
-            raise DomainError("every specialist output must be included or excluded")
+            raise DomainError("every branch output must be included or excluded")
         included = [
             output
             for output in outputs
             if decisions[output.output_id] == OutputDisposition.INCLUDED
         ]
-        if len(included) < 2:
-            raise DomainError("at least two outputs must be included")
+        if len(included) < minimum_included:
+            raise DomainError(
+                f"at least {minimum_included} branch output(s) must be included for this mode"
+            )
+        runs = await self.repos.executions.list_by_branch(branch_id)
+        if any(
+            run.status
+            not in {
+                ExecutionStatus.COMPLETED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }
+            for run in runs
+        ):
+            raise DomainError("branch synthesis requires every AgentRun to be terminal")
 
+        selected_records = [
+            {"output_id": output.output_id, "agent_id": output.agent_id, "content": output.content}
+            for output in included
+        ]
+        provider_input = self.nexus.build_synthesis_provider_input(
+            title=title,
+            prompt=branch.initiating_prompt,
+            outputs=selected_records,
+        )
+        synthesis = BranchSynthesis(
+            synthesis_id=new_id("syn"),
+            branch_id=branch_id,
+            room_id=branch.room_id,
+            title=title,
+            initiated_by=created_by,
+            status=BranchSynthesisStatus.RUNNING,
+            provider_input=provider_input,
+        )
+        inputs = [
+            BranchSynthesisInput(
+                synthesis_id=synthesis.synthesis_id,
+                output_id=output.output_id,
+                ordinal=ordinal,
+            )
+            for ordinal, output in enumerate(included, start=1)
+        ]
+        async with self.db.transaction():
+            await self.repos.branch_syntheses.create_with_inputs(synthesis, inputs)
+        try:
+            model_result = await self.nexus.synthesize_selected_outputs(
+                title=title,
+                prompt=branch.initiating_prompt,
+                outputs=selected_records,
+            )
+        except ModelProviderError as exc:
+            async with self.db.transaction():
+                await self.repos.branch_syntheses.mark_failed(synthesis.synthesis_id, str(exc))
+                started_event = await self.repos.events.append_with_next_sequence_in_transaction(
+                    RoomEvent(
+                        room_id=branch.room_id,
+                        sequence=0,
+                        event_type=EventType.BRANCH_SYNTHESIS_STARTED,
+                        payload={
+                            "branch_id": branch_id,
+                            "synthesis_id": synthesis.synthesis_id,
+                            "selected_output_ids": [item.output_id for item in inputs],
+                        },
+                        actor_id=created_by,
+                        actor_type="user",
+                        timestamp=synthesis.created_at,
+                    )
+                )
+                failed_event = await self.repos.events.append_with_next_sequence_in_transaction(
+                    RoomEvent(
+                        room_id=branch.room_id,
+                        sequence=0,
+                        event_type=EventType.BRANCH_SYNTHESIS_FAILED,
+                        payload={"branch_id": branch_id, "synthesis_id": synthesis.synthesis_id},
+                        actor_id=created_by,
+                        actor_type="user",
+                    )
+                )
+            await self._broadcast_persisted_events([started_event, failed_event])
+            raise DomainError(str(exc)) from exc
+
+        document_value = model_result.get("document")
+        if not isinstance(document_value, dict):
+            raise DomainError("model provider returned invalid synthesis document")
+        document = document_value
+        content = self._render_decision_brief(title, document, bool(model_result["simulated"]))
         existing = next(
             (
                 artifact
-                for artifact in await self.list_room_artifacts(room_id)
+                for artifact in await self.list_room_artifacts(branch.room_id)
                 if artifact.name == "Decision Brief"
             ),
             None,
@@ -844,68 +1295,41 @@ class MultiplayerService:
         create_artifact = existing is None
         artifact = existing or Artifact(
             artifact_id=new_id("art"),
-            room_id=room_id,
+            room_id=branch.room_id,
             name="Decision Brief",
             artifact_type=ArtifactType.DOCUMENT,
             description="Human-selected, provenance-complete specialist synthesis",
             created_by=created_by,
         )
-        version_number = artifact.current_version + 1
-        lines = [
-            f"# {title}",
-            "",
-            "Every claim below is AI-derived and retained with its exact source evidence.",
-            "",
-        ]
-        claims_and_sources: list[tuple[ArtifactClaim, ClaimSource]] = []
         version_id = new_id("ver")
-        for ordinal, output in enumerate(included, start=1):
-            claim_id = new_id("claim")
-            claim_text = output.content.strip()
-            lines.extend(
-                [
-                    f"## Claim {ordinal} [AI-derived]",
-                    claim_text,
-                    "",
-                    f"Source AgentOutput: `{output.output_id}`",
-                    "",
-                ]
-            )
-            claims_and_sources.append(
-                (
-                    ArtifactClaim(
-                        claim_id=claim_id,
-                        version_id=version_id,
-                        ordinal=ordinal,
-                        text=claim_text,
-                        is_ai_derived=True,
-                        confidence=1.0,
-                    ),
-                    ClaimSource(
-                        claim_id=claim_id,
-                        output_id=output.output_id,
-                        evidence=output.content,
-                        agent_id=output.agent_id,
-                        execution_id=output.execution_id,
-                        source_prompt=output.source_prompt,
-                        provider_input=output.provider_input,
-                        provider_name=output.provider_name,
-                        provider_model=output.provider_model,
-                        provider_response_id=output.provider_response_id,
-                        provider_interventions=output.provider_interventions,
-                        provider_evidence=output.provider_evidence,
-                    ),
-                )
-            )
-        content = "\n".join(lines).rstrip() + "\n"
         version = ArtifactVersion(
             version_id=version_id,
             artifact_id=artifact.artifact_id,
-            version_number=version_number,
+            version_number=artifact.current_version + 1,
             content=content,
             content_hash=hashlib.sha256(content.encode()).hexdigest(),
+            branch_synthesis_id=synthesis.synthesis_id,
             created_by=created_by,
         )
+        output_by_id = {output.output_id: output for output in included}
+        claims_and_sources: list[tuple[ArtifactClaim, ClaimSource]] = []
+        raw_claims = document.get("claims")
+        if not isinstance(raw_claims, list):
+            raise DomainError("synthesis claims are invalid")
+        for ordinal, raw_claim in enumerate(raw_claims, start=1):
+            if not isinstance(raw_claim, dict):
+                raise DomainError("synthesis claim is invalid")
+            claim = ArtifactClaim(
+                claim_id=new_id("claim"),
+                version_id=version_id,
+                ordinal=ordinal,
+                text=str(raw_claim["text"]),
+                is_ai_derived=True,
+                confidence=float(raw_claim["confidence"]),
+            )
+            for output_id in raw_claim["source_output_ids"]:
+                output = output_by_id[str(output_id)]
+                claims_and_sources.append((claim, self._claim_source(claim.claim_id, output)))
         provenance_records = [
             self._claim_provenance_record(claim, source) for claim, source in claims_and_sources
         ]
@@ -913,11 +1337,23 @@ class MultiplayerService:
             version,
             provenance_hash=self._artifact_provenance_hash(version, provenance_records),
         )
-        event_types = []
+        terminal_synthesis = replace(
+            synthesis,
+            status=BranchSynthesisStatus.COMPLETED,
+            provider_name=str(model_result["provider_name"]),
+            provider_model=str(model_result["provider_model"]),
+            provider_response_id=str(model_result["provider_response_id"]),
+            provider_evidence=str(model_result["provider_evidence"]),
+            simulated=bool(model_result["simulated"]),
+            content=content,
+            artifact_version_id=version.version_id,
+            completed_at=utcnow(),
+        )
+        event_types: list[RoomEvent] = []
         if create_artifact:
             event_types.append(
                 RoomEvent(
-                    room_id=room_id,
+                    room_id=branch.room_id,
                     sequence=0,
                     event_type=EventType.ARTIFACT_CREATED,
                     payload={
@@ -929,25 +1365,56 @@ class MultiplayerService:
                     actor_type="user",
                 )
             )
-        event_types.append(
-            RoomEvent(
-                room_id=room_id,
-                sequence=0,
-                event_type=EventType.DECISION_BRIEF_SYNTHESIZED,
-                payload={
-                    "artifact_id": artifact.artifact_id,
-                    "version_id": version.version_id,
-                    "version": version.version_number,
-                    "content_hash": version.content_hash,
-                    "provenance_hash": version.provenance_hash,
-                    "selected_output_ids": [output.output_id for output in included],
-                },
-                actor_id=created_by,
-                actor_type="user",
-            )
+        event_types.extend(
+            [
+                RoomEvent(
+                    room_id=branch.room_id,
+                    sequence=0,
+                    event_type=EventType.BRANCH_SYNTHESIS_STARTED,
+                    payload={
+                        "branch_id": branch_id,
+                        "synthesis_id": synthesis.synthesis_id,
+                        "selected_output_ids": [item.output_id for item in inputs],
+                    },
+                    actor_id=created_by,
+                    actor_type="user",
+                    timestamp=synthesis.created_at,
+                ),
+                RoomEvent(
+                    room_id=branch.room_id,
+                    sequence=0,
+                    event_type=EventType.DECISION_BRIEF_SYNTHESIZED,
+                    payload={
+                        "branch_id": branch_id,
+                        "synthesis_id": synthesis.synthesis_id,
+                        "artifact_id": artifact.artifact_id,
+                        "version_id": version.version_id,
+                        "version": version.version_number,
+                        "content_hash": version.content_hash,
+                        "provenance_hash": version.provenance_hash,
+                        "selected_output_ids": [output.output_id for output in included],
+                        "simulated": terminal_synthesis.simulated,
+                    },
+                    actor_id=created_by,
+                    actor_type="user",
+                ),
+                RoomEvent(
+                    room_id=branch.room_id,
+                    sequence=0,
+                    event_type=EventType.BRANCH_SYNTHESIS_COMPLETED,
+                    payload={
+                        "branch_id": branch_id,
+                        "synthesis_id": synthesis.synthesis_id,
+                        "artifact_version_id": version.version_id,
+                        "simulated": terminal_synthesis.simulated,
+                    },
+                    actor_id=created_by,
+                    actor_type="user",
+                ),
+            ]
         )
         ontology_entities, ontology_relationships = await self._decision_brief_ontology(
-            room_id=room_id,
+            room_id=branch.room_id,
             title=title,
             created_by=created_by,
             artifact=artifact,
@@ -957,16 +1424,14 @@ class MultiplayerService:
         )
         event_types.append(
             RoomEvent(
-                room_id=room_id,
+                room_id=branch.room_id,
                 sequence=0,
                 event_type=EventType.ONTOLOGY_MATERIALIZED,
                 payload={
                     "artifact_id": artifact.artifact_id,
                     "version_id": version.version_id,
                     "entity_ids": [entity.entity_id for entity in ontology_entities],
-                    "relationship_ids": [
-                        relationship.relationship_id for relationship in ontology_relationships
-                    ],
+                    "relationship_ids": [item.relationship_id for item in ontology_relationships],
                 },
                 actor_id=created_by,
                 actor_type="user",
@@ -980,9 +1445,63 @@ class MultiplayerService:
             ontology_relationships,
             event_types,
             create_artifact=create_artifact,
+            synthesis=terminal_synthesis,
         )
         await self._broadcast_persisted_events(persisted_events)
-        return replace(artifact, current_version=version_number), version
+        return replace(artifact, current_version=version.version_number), version
+
+    @staticmethod
+    def _claim_source(claim_id: str, output: AgentOutput) -> ClaimSource:
+        return ClaimSource(
+            claim_id=claim_id,
+            output_id=output.output_id,
+            evidence=output.content,
+            agent_id=output.agent_id,
+            execution_id=output.execution_id,
+            source_prompt=output.source_prompt,
+            provider_input=output.provider_input,
+            provider_name=output.provider_name,
+            provider_model=output.provider_model,
+            provider_response_id=output.provider_response_id,
+            provider_interventions=output.provider_interventions,
+            provider_evidence=output.provider_evidence,
+        )
+
+    @staticmethod
+    def _render_decision_brief(title: str, document: dict[str, Any], simulated: bool) -> str:
+        marker = " [SIMULATED SYNTHESIS]" if simulated else ""
+        lines = [
+            f"# {title}{marker}",
+            "",
+            str(document.get("summary", "")).strip(),
+            "",
+            "## Recommendation [AI-derived]",
+            str(document.get("recommendation", "")).strip(),
+            "",
+            "## Claims",
+        ]
+        claims = document.get("claims")
+        if isinstance(claims, list):
+            for ordinal, claim in enumerate(claims, start=1):
+                if isinstance(claim, dict):
+                    source_ids = ", ".join(f"`{item}`" for item in claim["source_output_ids"])
+                    lines.extend(
+                        [
+                            f"### Claim {ordinal} [AI-derived]",
+                            str(claim["text"]),
+                            f"Sources: {source_ids}",
+                            f"Confidence: {float(claim['confidence']):.2f}",
+                            "",
+                        ]
+                    )
+        for heading, key in (("Risks", "risks"), ("Uncertainties", "uncertainties")):
+            lines.append(f"## {heading}")
+            values = document.get(key)
+            if isinstance(values, list):
+                lines.extend(f"- {value}" for value in values)
+            lines.append("")
+        lines.extend(["## Next action", str(document.get("next_action", "")).strip(), ""])
+        return "\n".join(lines).rstrip() + "\n"
 
     @staticmethod
     def _ontology_id(prefix: str, room_id: str, *source_ids: str) -> str:
@@ -1420,19 +1939,26 @@ class MultiplayerService:
             content=content,
             metadata=metadata or {},
         )
-        await self.repos.messages.create(msg)
-        await self._append_room_event(
-            room_id,
-            EventType.MESSAGE_CREATED,
-            {
-                "message_id": msg.message_id,
-                "role": role.value,
-                "sender_id": sender_id,
-                "content": content[:500],
-            },
-            sender_id,
-            role.value.lower(),
-        )
+        try:
+            event = await self.repos.messages.create_with_event_and_turn_guard(
+                msg,
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.MESSAGE_CREATED,
+                    payload={
+                        "message_id": msg.message_id,
+                        "role": role.value,
+                        "sender_id": sender_id,
+                        "content": content[:500],
+                    },
+                    actor_id=sender_id,
+                    actor_type=role.value.lower(),
+                ),
+            )
+        except ValueError as exc:
+            raise DomainError(str(exc)) from exc
+        await self._broadcast_persisted_events([event])
         return msg
 
     async def list_room_messages(self, room_id: str, limit: int = 100) -> list[Message]:
@@ -2193,8 +2719,15 @@ class MultiplayerService:
         memories = await self.list_room_memories(room_id)
         pending_approvals = await self.list_pending_approvals(room_id)
         runs = await self.repos.executions.list_by_room(room_id)
+        branches = await self.repos.branches.list_by_room(room_id)
         outputs = await self.list_room_outputs(room_id)
         output_selections = await self.list_output_selections(room_id)
+        branch_syntheses = [
+            synthesis
+            for branch in branches
+            for synthesis in await self.repos.branch_syntheses.list_by_branch(branch.branch_id)
+        ]
+        active_turn_lock = await self.repos.turn_locks.get_active(TurnLockScopeType.ROOM, room_id)
         ontology = await self.get_room_ontology(room_id)
         artifact_state: list[dict[str, Any]] = []
         for artifact in artifacts:
@@ -2210,6 +2743,7 @@ class MultiplayerService:
                     "content": latest.content if latest else "",
                     "content_hash": latest.content_hash if latest else "",
                     "provenance_hash": latest.provenance_hash if latest else "",
+                    "branch_synthesis_id": latest.branch_synthesis_id if latest else None,
                 }
             )
         presence = await self.presence.get_room_presence(room_id)
@@ -2238,6 +2772,29 @@ class MultiplayerService:
                 {"agent_id": a.agent_id, "name": a.name, "role": a.role, "status": a.status.value}
                 for a in agents
             ],
+            "branches": [
+                {
+                    "branch_id": branch.branch_id,
+                    "mode": branch.mode.value,
+                    "status": branch.status.value,
+                    "initiated_by": branch.initiated_by,
+                    "initiating_prompt": branch.initiating_prompt,
+                    "context_event_sequence": branch.context_event_sequence,
+                    "context_message_ids": list(branch.context_message_ids),
+                    "context_snapshot": branch.context_snapshot,
+                    "context_hash": branch.context_hash,
+                    "lifecycle_managed": branch.lifecycle_managed,
+                    "execution_ids": [
+                        run.execution_id for run in runs if run.branch_id == branch.branch_id
+                    ],
+                    "created_at": branch.created_at.isoformat(),
+                    "updated_at": branch.updated_at.isoformat(),
+                    "completed_at": (
+                        branch.completed_at.isoformat() if branch.completed_at else None
+                    ),
+                }
+                for branch in branches
+            ],
             "runs": [
                 {
                     "execution_id": run.execution_id,
@@ -2253,6 +2810,7 @@ class MultiplayerService:
             "outputs": [
                 {
                     "output_id": output.output_id,
+                    "branch_id": output.branch_id,
                     "execution_id": output.execution_id,
                     "session_id": output.session_id,
                     "agent_id": output.agent_id,
@@ -2272,12 +2830,44 @@ class MultiplayerService:
             "output_selections": [
                 {
                     "output_id": selection.output_id,
+                    "branch_id": selection.branch_id,
                     "disposition": selection.disposition.value,
                     "decided_by": selection.decided_by,
                     "updated_at": selection.updated_at.isoformat(),
                 }
                 for selection in output_selections
             ],
+            "branch_syntheses": [
+                {
+                    "synthesis_id": synthesis.synthesis_id,
+                    "branch_id": synthesis.branch_id,
+                    "status": synthesis.status.value,
+                    "title": synthesis.title,
+                    "provider_name": synthesis.provider_name,
+                    "provider_model": synthesis.provider_model,
+                    "provider_response_id": synthesis.provider_response_id,
+                    "simulated": synthesis.simulated,
+                    "artifact_version_id": synthesis.artifact_version_id,
+                    "created_at": synthesis.created_at.isoformat(),
+                    "completed_at": (
+                        synthesis.completed_at.isoformat() if synthesis.completed_at else None
+                    ),
+                }
+                for synthesis in branch_syntheses
+            ],
+            "turn_lock": (
+                {
+                    "lock_id": active_turn_lock.lock_id,
+                    "scope_type": active_turn_lock.scope_type.value,
+                    "scope_id": active_turn_lock.scope_id,
+                    "branch_id": active_turn_lock.branch_id,
+                    "status": active_turn_lock.status.value,
+                    "acquired_by": active_turn_lock.acquired_by,
+                    "acquired_at": active_turn_lock.acquired_at.isoformat(),
+                }
+                if active_turn_lock is not None
+                else None
+            ),
             "tasks": [
                 {
                     "task_id": t.task_id,

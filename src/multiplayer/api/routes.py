@@ -15,6 +15,9 @@ from ..domain.models import (
     Approval,
     Artifact,
     ArtifactType,
+    ArtifactVersion,
+    Branch,
+    BranchMode,
     DomainError,
     Execution,
     MemoryScope,
@@ -147,6 +150,19 @@ async def _authorized_execution(
     return execution
 
 
+async def _authorized_branch(
+    branch_id: str,
+    principal: AuthenticatedUser,
+    capability: RoomCapability,
+) -> Branch:
+    try:
+        branch = await _svc_or_404().get_branch(branch_id)
+    except DomainError as exc:
+        raise HTTPException(404, "branch not found") from exc
+    await _require_room(branch.room_id, principal, capability)
+    return branch
+
+
 async def _authorized_task(
     task_id: str, principal: AuthenticatedUser, capability: RoomCapability
 ) -> Task:
@@ -215,6 +231,12 @@ class SpawnAgentRequest(BaseModel):
 
 class SendInstructionRequest(BaseModel):
     prompt: str
+
+
+class StartBranchRequest(BaseModel):
+    mode: str
+    prompt: str
+    agent_ids: list[str]
 
 
 class CreateTaskRequest(BaseModel):
@@ -555,6 +577,97 @@ async def list_room_members(
     return [{"user_id": m.user_id, "role": m.role} for m in members]
 
 
+# ── Branches ────────────────────────────────────────────────────────────────
+
+
+def _branch_record(branch: Branch) -> dict[str, Any]:
+    return {
+        "branch_id": branch.branch_id,
+        "room_id": branch.room_id,
+        "mode": branch.mode.value,
+        "status": branch.status.value,
+        "initiated_by": branch.initiated_by,
+        "initiating_prompt": branch.initiating_prompt,
+        "context_event_sequence": branch.context_event_sequence,
+        "context_message_ids": list(branch.context_message_ids),
+        "context_snapshot": branch.context_snapshot,
+        "context_hash": branch.context_hash,
+        "lifecycle_managed": branch.lifecycle_managed,
+        "created_at": branch.created_at.isoformat(),
+        "updated_at": branch.updated_at.isoformat(),
+        "completed_at": branch.completed_at.isoformat() if branch.completed_at else None,
+    }
+
+
+def _run_record(run: Execution) -> dict[str, Any]:
+    return {
+        "execution_id": run.execution_id,
+        "branch_id": run.branch_id,
+        "session_id": run.session_id,
+        "agent_id": run.agent_id,
+        "run_id": run.run_id,
+        "status": run.status.value,
+        "started_at": run.started_at.isoformat(),
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "error": run.error,
+    }
+
+
+@router.post("/rooms/{room_id}/branches")
+async def start_branch(
+    room_id: str,
+    req: StartBranchRequest,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.MUTATE)
+    mode = _safe_enum(req.mode.upper(), BranchMode, "branch mode")
+    try:
+        branch, runs = await svc.start_branch(
+            room_id, mode, req.prompt, principal.user_id, req.agent_ids
+        )
+    except DomainError as exc:
+        status = 409 if "turn is locked" in str(exc) else 400
+        raise HTTPException(status, str(exc)) from exc
+    return {"branch": _branch_record(branch), "runs": [_run_record(run) for run in runs]}
+
+
+@router.get("/rooms/{room_id}/branches")
+async def list_room_branches(
+    room_id: str,
+    principal: CurrentUser,
+) -> list[dict[str, Any]]:
+    await _require_room(room_id, principal, RoomCapability.READ)
+    branches = await _svc_or_404().list_room_branches(room_id)
+    return [_branch_record(branch) for branch in branches]
+
+
+@router.get("/branches/{branch_id}")
+async def get_branch(
+    branch_id: str,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    branch = await _authorized_branch(branch_id, principal, RoomCapability.READ)
+    runs = await _svc_or_404().list_branch_runs(branch_id)
+    return {"branch": _branch_record(branch), "runs": [_run_record(run) for run in runs]}
+
+
+@router.post("/branches/{branch_id}/runs/{execution_id}/execute")
+async def execute_branch_run(
+    branch_id: str,
+    execution_id: str,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    await _authorized_branch(branch_id, principal, RoomCapability.MUTATE)
+    execution = await _authorized_execution(execution_id, principal, RoomCapability.MUTATE)
+    if execution.branch_id != branch_id:
+        raise HTTPException(404, "agent run not found in branch")
+    try:
+        return await _svc_or_404().execute_branch_run(branch_id, execution_id)
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.get("/rooms/{room_id}/events")
 async def list_room_events(
     room_id: str,
@@ -655,6 +768,7 @@ async def list_room_outputs(
     return [
         {
             "output_id": output.output_id,
+            "branch_id": output.branch_id,
             "execution_id": output.execution_id,
             "session_id": output.session_id,
             "agent_id": output.agent_id,
@@ -689,6 +803,7 @@ async def select_room_output(
         raise HTTPException(400, str(exc)) from exc
     return {
         "output_id": selection.output_id,
+        "branch_id": selection.branch_id,
         "disposition": selection.disposition.value,
         "decided_by": selection.decided_by,
         "updated_at": selection.updated_at.isoformat(),
@@ -706,12 +821,76 @@ async def list_room_output_selections(
     return [
         {
             "output_id": selection.output_id,
+            "branch_id": selection.branch_id,
             "disposition": selection.disposition.value,
             "decided_by": selection.decided_by,
             "updated_at": selection.updated_at.isoformat(),
         }
         for selection in selections
     ]
+
+
+@router.put("/branches/{branch_id}/output-selections/{output_id}")
+async def select_branch_output(
+    branch_id: str,
+    output_id: str,
+    req: SelectOutputRequest,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    await _authorized_branch(branch_id, principal, RoomCapability.MUTATE)
+    disposition = _safe_enum(req.disposition.upper(), OutputDisposition, "disposition")
+    try:
+        selection = await _svc_or_404().select_branch_output(
+            branch_id, output_id, disposition, principal.user_id
+        )
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "branch_id": selection.branch_id,
+        "output_id": selection.output_id,
+        "disposition": selection.disposition.value,
+        "decided_by": selection.decided_by,
+        "updated_at": selection.updated_at.isoformat(),
+    }
+
+
+def _synthesis_response(
+    svc: MultiplayerService,
+    artifact: Artifact,
+    version: ArtifactVersion,
+    provenance: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "artifact_id": artifact.artifact_id,
+        "version_id": version.version_id,
+        "branch_synthesis_id": version.branch_synthesis_id,
+        "version_number": version.version_number,
+        "content": version.content,
+        "content_hash": version.content_hash,
+        "provenance_hash": version.provenance_hash,
+        "created_by": normalize_provenance_author(version.created_by),
+        "created_at": normalize_provenance_timestamp(version.created_at),
+        "provenance_hash_verified": svc.verify_artifact_provenance_hash(version, provenance),
+        "claims": provenance,
+    }
+
+
+@router.post("/branches/{branch_id}/syntheses/decision-brief")
+async def synthesize_branch_decision_brief(
+    branch_id: str,
+    req: SynthesizeDecisionBriefRequest,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _authorized_branch(branch_id, principal, RoomCapability.MUTATE)
+    try:
+        artifact, version = await svc.synthesize_branch_decision_brief(
+            branch_id, req.title, principal.user_id
+        )
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    provenance = await svc.repos.artifacts.get_version_provenance(version.version_id)
+    return _synthesis_response(svc, artifact, version, provenance)
 
 
 @router.post("/rooms/{room_id}/syntheses/decision-brief")
@@ -729,18 +908,7 @@ async def synthesize_decision_brief(
     except DomainError as exc:
         raise HTTPException(400, str(exc)) from exc
     provenance = await svc.repos.artifacts.get_version_provenance(version.version_id)
-    return {
-        "artifact_id": artifact.artifact_id,
-        "version_id": version.version_id,
-        "version_number": version.version_number,
-        "content": version.content,
-        "content_hash": version.content_hash,
-        "provenance_hash": version.provenance_hash,
-        "created_by": normalize_provenance_author(version.created_by),
-        "created_at": normalize_provenance_timestamp(version.created_at),
-        "provenance_hash_verified": svc.verify_artifact_provenance_hash(version, provenance),
-        "claims": provenance,
-    }
+    return _synthesis_response(svc, artifact, version, provenance)
 
 
 @router.get("/rooms/{room_id}/ontology")
@@ -922,7 +1090,10 @@ async def pause_execution(
 ) -> dict[str, str]:
     svc = _svc_or_404()
     await _authorized_execution(execution_id, principal, RoomCapability.MUTATE)
-    ok = await svc.nexus.pause_execution(execution_id)
+    try:
+        ok = await svc.pause_execution(execution_id)
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"status": "paused" if ok else "failed"}
 
 
@@ -933,7 +1104,10 @@ async def resume_execution(
 ) -> dict[str, str]:
     svc = _svc_or_404()
     await _authorized_execution(execution_id, principal, RoomCapability.MUTATE)
-    ok = await svc.nexus.resume_execution(execution_id)
+    try:
+        ok = await svc.resume_execution(execution_id)
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"status": "resumed" if ok else "failed"}
 
 
@@ -944,7 +1118,10 @@ async def cancel_execution(
 ) -> dict[str, str]:
     svc = _svc_or_404()
     await _authorized_execution(execution_id, principal, RoomCapability.MUTATE)
-    ok = await svc.nexus.cancel_execution(execution_id)
+    try:
+        ok = await svc.cancel_execution(execution_id, principal.user_id)
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"status": "cancelled" if ok else "failed"}
 
 
@@ -1086,13 +1263,16 @@ async def send_message(
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.MUTATE)
     role = _safe_enum(req.role, MessageRole, "role")
+    if role != MessageRole.HUMAN:
+        raise HTTPException(403, "authenticated users may only author HUMAN messages")
     if req.sender_id and req.sender_id != principal.user_id:
         raise HTTPException(403, "sender identity cannot be overridden")
     sender = principal.user_id
     try:
         msg = await svc.send_message(room_id, role, sender, req.content)
     except DomainError as e:
-        raise HTTPException(400, str(e)) from e
+        status = 409 if "turn is locked" in str(e) else 400
+        raise HTTPException(status, str(e)) from e
     return {"message_id": msg.message_id, "role": msg.role.value, "content": msg.content}
 
 
@@ -1185,6 +1365,7 @@ async def list_artifact_versions(
             "content": v.content,
             "content_hash": v.content_hash,
             "provenance_hash": v.provenance_hash,
+            "branch_synthesis_id": v.branch_synthesis_id,
             "created_by": normalize_provenance_author(v.created_by),
             "created_at": normalize_provenance_timestamp(v.created_at),
         }
@@ -1203,8 +1384,34 @@ async def get_artifact_version_provenance(
         raise HTTPException(404, "artifact version not found")
     await _authorized_artifact(version.artifact_id, principal, RoomCapability.READ)
     claims = await svc.repos.artifacts.get_version_provenance(version_id)
+    synthesis = (
+        await svc.repos.branch_syntheses.get(version.branch_synthesis_id)
+        if version.branch_synthesis_id
+        else None
+    )
+    inputs = (
+        await svc.repos.branch_syntheses.list_inputs(synthesis.synthesis_id)
+        if synthesis is not None
+        else []
+    )
     return {
         "version_id": version_id,
+        "branch_synthesis": (
+            {
+                "synthesis_id": synthesis.synthesis_id,
+                "branch_id": synthesis.branch_id,
+                "status": synthesis.status.value,
+                "provider_input": synthesis.provider_input,
+                "provider_name": synthesis.provider_name,
+                "provider_model": synthesis.provider_model,
+                "provider_response_id": synthesis.provider_response_id,
+                "provider_evidence": synthesis.provider_evidence,
+                "simulated": synthesis.simulated,
+                "selected_output_ids": [item.output_id for item in inputs],
+            }
+            if synthesis is not None
+            else None
+        ),
         "content_hash": version.content_hash,
         "provenance_hash": version.provenance_hash,
         "created_by": normalize_provenance_author(version.created_by),

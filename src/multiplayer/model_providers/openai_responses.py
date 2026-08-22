@@ -75,12 +75,24 @@ class OpenAIResponsesProvider:
         self._async_transport = async_transport
         self._sync_transport = sync_transport
 
-    def _request_payload(self, prompt: str) -> dict[str, Any]:
+    def _request_payload(self, prompt: str, response_schema: dict[str, Any]) -> dict[str, Any]:
+        text: dict[str, Any] = {"verbosity": "medium"}
+        properties = response_schema.get("properties")
+        # Specialist execution still uses the optional NEXUS action schema,
+        # which is not a strict Structured Outputs contract. Synthesis owns a
+        # complete closed schema and is the only call that opts into JSON mode.
+        if isinstance(properties, Mapping) and "claims" in properties:
+            text["format"] = {
+                "type": "json_schema",
+                "name": "multiai_response",
+                "strict": True,
+                "schema": response_schema,
+            }
         return {
             "model": self.model,
             "input": prompt,
             "store": False,
-            "text": {"verbosity": "medium"},
+            "text": text,
         }
 
     def _headers(self) -> dict[str, str]:
@@ -90,7 +102,6 @@ class OpenAIResponsesProvider:
         }
 
     async def acomplete(self, prompt: str, response_schema: dict[str, Any]) -> dict[str, Any]:
-        del response_schema
         try:
             async with httpx.AsyncClient(
                 timeout=self.timeout_seconds,
@@ -99,7 +110,7 @@ class OpenAIResponsesProvider:
                 response = await client.post(
                     _RESPONSES_URL,
                     headers=self._headers(),
-                    json=self._request_payload(prompt),
+                    json=self._request_payload(prompt, response_schema),
                 )
             return self._decode_response(response)
         except httpx.TimeoutException as exc:
@@ -111,7 +122,6 @@ class OpenAIResponsesProvider:
 
     def complete(self, prompt: str, response_schema: dict[str, Any]) -> dict[str, Any]:
         """Synchronous adapter used only when the optional NEXUS runtime owns execution."""
-        del response_schema
         try:
             with httpx.Client(
                 timeout=self.timeout_seconds,
@@ -120,7 +130,7 @@ class OpenAIResponsesProvider:
                 response = client.post(
                     _RESPONSES_URL,
                     headers=self._headers(),
-                    json=self._request_payload(prompt),
+                    json=self._request_payload(prompt, response_schema),
                 )
             return self._decode_response(response)
         except httpx.TimeoutException as exc:

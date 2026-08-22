@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 from dataclasses import dataclass
@@ -351,6 +352,196 @@ class NexusAgentBridge:
             "interventions": list(interventions),
             "provider_evidence": evidence,
         }
+
+    async def synthesize_selected_outputs(
+        self,
+        *,
+        title: str,
+        prompt: str,
+        outputs: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        """Synthesize only the explicitly selected immutable outputs."""
+        provider_input = self.build_synthesis_provider_input(
+            title=title, prompt=prompt, outputs=outputs
+        )
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "recommendation": {"type": "string"},
+                "claims": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "source_output_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 1,
+                            },
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        },
+                        "required": ["text", "source_output_ids", "confidence"],
+                        "additionalProperties": False,
+                    },
+                    "minItems": 1,
+                },
+                "risks": {"type": "array", "items": {"type": "string"}},
+                "uncertainties": {"type": "array", "items": {"type": "string"}},
+                "next_action": {"type": "string"},
+            },
+            "required": [
+                "summary",
+                "recommendation",
+                "claims",
+                "risks",
+                "uncertainties",
+                "next_action",
+            ],
+            "additionalProperties": False,
+        }
+        try:
+            async_complete = getattr(self._model, "acomplete", None)
+            response = (
+                await async_complete(provider_input, schema)
+                if callable(async_complete)
+                else await asyncio.to_thread(self._model.complete, provider_input, schema)
+            )
+        except ModelProviderError:
+            raise
+        except Exception as exc:
+            log.error("Unexpected synthesis provider failure (%s)", type(exc).__name__)
+            raise ModelProviderError("internal model provider error") from exc
+        if not isinstance(response, dict):
+            raise ModelProviderError("model provider returned invalid synthesis data")
+        output = response.get("output")
+        output_data = dict(output) if isinstance(output, dict) else {}
+        simulated = bool(output_data.get("simulated")) or response.get("provider_name") == (
+            "workflow-only"
+        )
+        if simulated:
+            claims = [
+                {
+                    "text": item["content"],
+                    "source_output_ids": [item["output_id"]],
+                    "confidence": 0.0,
+                }
+                for item in outputs
+            ]
+            parsed: dict[str, Any] = {
+                "summary": (
+                    "SIMULATED SYNTHESIS — no model provider is configured. "
+                    "This deterministic artifact verifies branch selection and provenance only."
+                ),
+                "recommendation": "No decision recommendation was generated.",
+                "claims": claims,
+                "risks": ["This is not model-generated analysis."],
+                "uncertainties": ["All substantive decision analysis remains unperformed."],
+                "next_action": "Configure a model provider and request a new synthesis.",
+            }
+        else:
+            raw_content = output_data.get("content")
+            if not isinstance(raw_content, str):
+                raise ModelProviderError("model provider returned no synthesis content")
+            try:
+                parsed = self._decode_synthesis_json(raw_content)
+            except ModelProviderError:
+                # Injected legacy transports may ignore the requested JSON schema.
+                # The provider response still supplies the synthesis narrative;
+                # deterministic source claims keep provenance complete.
+                parsed = {
+                    "summary": raw_content,
+                    "recommendation": raw_content,
+                    "claims": [
+                        {
+                            "text": item["content"],
+                            "source_output_ids": [item["output_id"]],
+                            "confidence": 0.5,
+                        }
+                        for item in outputs
+                    ],
+                    "risks": ["The provider did not honor the structured-output contract."],
+                    "uncertainties": ["Claim synthesis used deterministic source mapping."],
+                    "next_action": "Review the provider narrative and exact source outputs.",
+                }
+        allowed = {item["output_id"] for item in outputs}
+        claims_value = parsed.get("claims")
+        if not isinstance(claims_value, list) or not claims_value:
+            raise ModelProviderError("synthesis must contain at least one sourced claim")
+        normalized_claims: list[dict[str, Any]] = []
+        for claim in claims_value:
+            if not isinstance(claim, dict):
+                raise ModelProviderError("synthesis claim is invalid")
+            text = str(claim.get("text", "")).strip()
+            source_ids = claim.get("source_output_ids")
+            confidence = claim.get("confidence")
+            if (
+                not text
+                or not isinstance(source_ids, list)
+                or not source_ids
+                or any(not isinstance(item, str) or item not in allowed for item in source_ids)
+                or not isinstance(confidence, (int, float))
+                or not 0 <= float(confidence) <= 1
+            ):
+                raise ModelProviderError("synthesis claim provenance is invalid")
+            normalized_claims.append(
+                {
+                    "text": text,
+                    "source_output_ids": list(dict.fromkeys(source_ids)),
+                    "confidence": float(confidence),
+                }
+            )
+        parsed["claims"] = normalized_claims
+        evidence = response.get("provider_evidence")
+        return {
+            "document": parsed,
+            "provider_input": provider_input,
+            "provider_name": str(
+                response.get("provider_name") or output_data.get("provider") or ""
+            ),
+            "provider_model": str(response.get("provider_model") or output_data.get("model") or ""),
+            "provider_response_id": str(response.get("provider_response_id") or ""),
+            "provider_evidence": (
+                evidence if isinstance(evidence, str) else str(output_data.get("content", ""))
+            ),
+            "simulated": simulated,
+        }
+
+    @staticmethod
+    def build_synthesis_provider_input(
+        *, title: str, prompt: str, outputs: list[dict[str, str]]
+    ) -> str:
+        source_blocks = "\n\n".join(
+            f"AgentOutput {item['output_id']} (agent {item['agent_id']}):\n{item['content']}"
+            for item in outputs
+        )
+        return (
+            "You are the synthesis stage of a governed technical decision workflow.\n"
+            "Use only the selected AgentOutputs below. Preserve disagreement and uncertainty.\n"
+            "Return a concise decision brief as JSON. Every claim must cite one or more exact "
+            "source_output_ids from the supplied identifiers; never invent an identifier.\n\n"
+            f"Decision brief title: {title}\n"
+            f"Branch prompt: {prompt}\n\n"
+            f"Selected AgentOutputs:\n{source_blocks}"
+        )
+
+    @staticmethod
+    def _decode_synthesis_json(content: str) -> dict[str, Any]:
+        stripped = content.strip()
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            if len(lines) >= 3 and lines[-1].strip() == "```":
+                stripped = "\n".join(lines[1:-1])
+                if stripped.lstrip().startswith("json"):
+                    stripped = stripped.lstrip()[4:].lstrip()
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ModelProviderError("model provider returned invalid synthesis JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ModelProviderError("model provider returned invalid synthesis JSON")
+        return parsed
 
     async def request_cancellation(self, run_id: str) -> None:
         async with self._lock:
