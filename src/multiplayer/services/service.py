@@ -72,6 +72,14 @@ from ..domain.models import (
     utcnow,
 )
 from ..domain.provenance import calculate_artifact_provenance_hash
+from ..domain.synthesis import (
+    SynthesisSpec,
+    SynthesisType,
+    spec_for,
+)
+from ..domain.synthesis import (
+    render as render_synthesis,
+)
 from ..model_providers import ModelProviderError
 from ..nexus_bridge.agent_bridge import NexusAgentBridge
 from ..realtime.hub import RealtimeHub
@@ -1671,11 +1679,29 @@ class MultiplayerService:
         created_by: str,
         idempotency_key: str | None = None,
     ) -> tuple[Artifact, ArtifactVersion]:
+        """Compatibility route: the Decision Brief is one of three synthesis types."""
+        return await self.synthesize_branch(
+            branch_id,
+            title,
+            created_by,
+            synthesis_type=SynthesisType.DECISION_BRIEF,
+            idempotency_key=idempotency_key,
+        )
+
+    async def synthesize_branch(
+        self,
+        branch_id: str,
+        title: str,
+        created_by: str,
+        synthesis_type: str = SynthesisType.DECISION_BRIEF,
+        idempotency_key: str | None = None,
+    ) -> tuple[Artifact, ArtifactVersion]:
         """Run model-backed synthesis over this Branch's explicit selected outputs."""
-        title = self._validate_non_empty(title, "decision brief title")
+        spec = spec_for(synthesis_type)
+        title = self._validate_non_empty(title, f"{spec.artifact_name.lower()} title")
         if idempotency_key is not None:
             idempotency_key = self._validate_idempotency_key(idempotency_key)
-        operation = "branch.synthesis.decision_brief"
+        operation = f"branch.synthesis.{spec.type.lower()}"
         request = {"title": title}
         branch = await self.get_branch(branch_id)
         outputs = await self.repos.agent_outputs.list_by_branch(branch_id)
@@ -1718,6 +1744,7 @@ class MultiplayerService:
             title=title,
             prompt=branch.initiating_prompt,
             outputs=selected_records,
+            synthesis_type=spec.type.value,
         )
         synthesis = BranchSynthesis(
             synthesis_id=new_id("syn"),
@@ -1726,6 +1753,7 @@ class MultiplayerService:
             title=title,
             initiated_by=created_by,
             status=BranchSynthesisStatus.RUNNING,
+            synthesis_type=spec.type.value,
             provider_input=provider_input,
         )
         inputs = [
@@ -1759,9 +1787,10 @@ class MultiplayerService:
                 title=title,
                 prompt=branch.initiating_prompt,
                 outputs=selected_records,
+                synthesis_type=spec.type.value,
             )
             return await self._complete_branch_synthesis(
-                branch, synthesis, inputs, included, title, created_by, model_result
+                branch, synthesis, inputs, included, title, created_by, model_result, spec
             )
         except Exception as exc:
             # The key was claimed before the model call. Any failure after that
@@ -1829,18 +1858,19 @@ class MultiplayerService:
         title: str,
         created_by: str,
         model_result: dict[str, Any],
+        spec: SynthesisSpec,
     ) -> tuple[Artifact, ArtifactVersion]:
         branch_id = branch.branch_id
         document_value = model_result.get("document")
         if not isinstance(document_value, dict):
             raise DomainError("model provider returned invalid synthesis document")
         document = document_value
-        content = self._render_decision_brief(title, document, bool(model_result["simulated"]))
+        content = render_synthesis(spec, title, document, bool(model_result["simulated"]))
         existing = next(
             (
                 artifact
                 for artifact in await self.list_room_artifacts(branch.room_id)
-                if artifact.name == "Decision Brief"
+                if artifact.name == spec.artifact_name
             ),
             None,
         )
@@ -1848,7 +1878,7 @@ class MultiplayerService:
         artifact = existing or Artifact(
             artifact_id=new_id("art"),
             room_id=branch.room_id,
-            name="Decision Brief",
+            name=spec.artifact_name,
             artifact_type=ArtifactType.DOCUMENT,
             description="Human-selected, provenance-complete specialist synthesis",
             created_by=created_by,
@@ -1935,9 +1965,14 @@ class MultiplayerService:
                 RoomEvent(
                     room_id=branch.room_id,
                     sequence=0,
-                    event_type=EventType.DECISION_BRIEF_SYNTHESIZED,
+                    event_type=(
+                        EventType.DECISION_BRIEF_SYNTHESIZED
+                        if spec.type is SynthesisType.DECISION_BRIEF
+                        else EventType.SYNTHESIS_PUBLISHED
+                    ),
                     payload={
                         "branch_id": branch_id,
+                        "synthesis_type": spec.type.value,
                         "synthesis_id": synthesis.synthesis_id,
                         "artifact_id": artifact.artifact_id,
                         "version_id": version.version_id,
@@ -1965,30 +2000,37 @@ class MultiplayerService:
                 ),
             ]
         )
-        ontology_entities, ontology_relationships = await self._decision_brief_ontology(
-            room_id=branch.room_id,
-            title=title,
-            created_by=created_by,
-            artifact=artifact,
-            version=version,
-            claims_and_sources=claims_and_sources,
-            included=included,
-        )
-        event_types.append(
-            RoomEvent(
+        ontology_entities: list[OntologyEntity] = []
+        ontology_relationships: list[OntologyRelationship] = []
+        if spec.type is SynthesisType.DECISION_BRIEF:
+            # Only a Decision Brief asserts a decision; a synthesis or a progress report
+            # would materialize a DECISION entity that nobody made.
+            ontology_entities, ontology_relationships = await self._decision_brief_ontology(
                 room_id=branch.room_id,
-                sequence=0,
-                event_type=EventType.ONTOLOGY_MATERIALIZED,
-                payload={
-                    "artifact_id": artifact.artifact_id,
-                    "version_id": version.version_id,
-                    "entity_ids": [entity.entity_id for entity in ontology_entities],
-                    "relationship_ids": [item.relationship_id for item in ontology_relationships],
-                },
-                actor_id=created_by,
-                actor_type="user",
+                title=title,
+                created_by=created_by,
+                artifact=artifact,
+                version=version,
+                claims_and_sources=claims_and_sources,
+                included=included,
             )
-        )
+            event_types.append(
+                RoomEvent(
+                    room_id=branch.room_id,
+                    sequence=0,
+                    event_type=EventType.ONTOLOGY_MATERIALIZED,
+                    payload={
+                        "artifact_id": artifact.artifact_id,
+                        "version_id": version.version_id,
+                        "entity_ids": [entity.entity_id for entity in ontology_entities],
+                        "relationship_ids": [
+                            item.relationship_id for item in ontology_relationships
+                        ],
+                    },
+                    actor_id=created_by,
+                    actor_type="user",
+                )
+            )
         aborted = False
         persisted_events: list[RoomEvent] = []
         async with self.db.transaction():
@@ -2032,42 +2074,6 @@ class MultiplayerService:
             provider_interventions=output.provider_interventions,
             provider_evidence=output.provider_evidence,
         )
-
-    @staticmethod
-    def _render_decision_brief(title: str, document: dict[str, Any], simulated: bool) -> str:
-        marker = " [SIMULATED SYNTHESIS]" if simulated else ""
-        lines = [
-            f"# {title}{marker}",
-            "",
-            str(document.get("summary", "")).strip(),
-            "",
-            "## Recommendation [AI-derived]",
-            str(document.get("recommendation", "")).strip(),
-            "",
-            "## Claims",
-        ]
-        claims = document.get("claims")
-        if isinstance(claims, list):
-            for ordinal, claim in enumerate(claims, start=1):
-                if isinstance(claim, dict):
-                    source_ids = ", ".join(f"`{item}`" for item in claim["source_output_ids"])
-                    lines.extend(
-                        [
-                            f"### Claim {ordinal} [AI-derived]",
-                            str(claim["text"]),
-                            f"Sources: {source_ids}",
-                            f"Confidence: {float(claim['confidence']):.2f}",
-                            "",
-                        ]
-                    )
-        for heading, key in (("Risks", "risks"), ("Uncertainties", "uncertainties")):
-            lines.append(f"## {heading}")
-            values = document.get(key)
-            if isinstance(values, list):
-                lines.extend(f"- {value}" for value in values)
-            lines.append("")
-        lines.extend(["## Next action", str(document.get("next_action", "")).strip(), ""])
-        return "\n".join(lines).rstrip() + "\n"
 
     @staticmethod
     def _ontology_id(prefix: str, room_id: str, *source_ids: str) -> str:

@@ -77,6 +77,7 @@ class EventType(StrEnum):
     ARTIFACT_UPDATED = "artifact.updated"
     ARTIFACT_VERSION_CREATED = "artifact.version_created"
     DECISION_BRIEF_SYNTHESIZED = "artifact.decision_brief_synthesized"
+    SYNTHESIS_PUBLISHED = "artifact.synthesis_published"
 
     # Evidence-backed ontology projection and human governance.
     ONTOLOGY_MATERIALIZED = "ontology.materialized"

@@ -18,6 +18,7 @@ from ..domain.models import (
     Session,
     new_id,
 )
+from ..domain.synthesis import document_schema, spec_for, unavailable_sections
 from ..model_providers import ModelProviderError, model_provider_from_environment
 
 log = logging.getLogger(__name__)
@@ -362,48 +363,14 @@ class NexusAgentBridge:
         title: str,
         prompt: str,
         outputs: list[dict[str, str]],
+        synthesis_type: str = "DECISION_BRIEF",
     ) -> dict[str, Any]:
         """Synthesize only the explicitly selected immutable outputs."""
+        spec = spec_for(synthesis_type)
         provider_input = self.build_synthesis_provider_input(
-            title=title, prompt=prompt, outputs=outputs
+            title=title, prompt=prompt, outputs=outputs, synthesis_type=synthesis_type
         )
-        schema: dict[str, Any] = {
-            "type": "object",
-            "properties": {
-                "summary": {"type": "string"},
-                "recommendation": {"type": "string"},
-                "claims": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "text": {"type": "string"},
-                            "source_output_ids": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "minItems": 1,
-                            },
-                            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                        },
-                        "required": ["text", "source_output_ids", "confidence"],
-                        "additionalProperties": False,
-                    },
-                    "minItems": 1,
-                },
-                "risks": {"type": "array", "items": {"type": "string"}},
-                "uncertainties": {"type": "array", "items": {"type": "string"}},
-                "next_action": {"type": "string"},
-            },
-            "required": [
-                "summary",
-                "recommendation",
-                "claims",
-                "risks",
-                "uncertainties",
-                "next_action",
-            ],
-            "additionalProperties": False,
-        }
+        schema = document_schema(spec)
         try:
             async_complete = getattr(self._model, "acomplete", None)
             response = (
@@ -437,11 +404,8 @@ class NexusAgentBridge:
                     "SIMULATED SYNTHESIS — no model provider is configured. "
                     "This deterministic artifact verifies branch selection and provenance only."
                 ),
-                "recommendation": "No decision recommendation was generated.",
                 "claims": claims,
-                "risks": ["This is not model-generated analysis."],
-                "uncertainties": ["All substantive decision analysis remains unperformed."],
-                "next_action": "Configure a model provider and request a new synthesis.",
+                **unavailable_sections(spec),
             }
         else:
             raw_content = output_data.get("content")
@@ -455,7 +419,6 @@ class NexusAgentBridge:
                 # deterministic source claims keep provenance complete.
                 parsed = {
                     "summary": raw_content,
-                    "recommendation": raw_content,
                     "claims": [
                         {
                             "text": item["content"],
@@ -464,9 +427,7 @@ class NexusAgentBridge:
                         }
                         for item in outputs
                     ],
-                    "risks": ["The provider did not honor the structured-output contract."],
-                    "uncertainties": ["Claim synthesis used deterministic source mapping."],
-                    "next_action": "Review the provider narrative and exact source outputs.",
+                    **unavailable_sections(spec),
                 }
         allowed = {item["output_id"] for item in outputs}
         claims_value = parsed.get("claims")
@@ -513,8 +474,13 @@ class NexusAgentBridge:
 
     @staticmethod
     def build_synthesis_provider_input(
-        *, title: str, prompt: str, outputs: list[dict[str, str]]
+        *,
+        title: str,
+        prompt: str,
+        outputs: list[dict[str, str]],
+        synthesis_type: str = "DECISION_BRIEF",
     ) -> str:
+        spec = spec_for(synthesis_type)
         source_blocks = "\n\n".join(
             f"AgentOutput {item['output_id']} (agent {item['agent_id']}):\n{item['content']}"
             for item in outputs
@@ -522,9 +488,8 @@ class NexusAgentBridge:
         return (
             "You are the synthesis stage of a governed technical decision workflow.\n"
             "Use only the selected AgentOutputs below. Preserve disagreement and uncertainty.\n"
-            "Return a concise decision brief as JSON. Every claim must cite one or more exact "
-            "source_output_ids from the supplied identifiers; never invent an identifier.\n\n"
-            f"Decision brief title: {title}\n"
+            f"{spec.instruction}\n\n"
+            f"{spec.artifact_name} title: {title}\n"
             f"Branch prompt: {prompt}\n\n"
             f"Selected AgentOutputs:\n{source_blocks}"
         )

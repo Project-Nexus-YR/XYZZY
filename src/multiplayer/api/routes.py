@@ -33,6 +33,7 @@ from ..domain.provenance import (
     normalize_provenance_author,
     normalize_provenance_timestamp,
 )
+from ..domain.synthesis import SynthesisType
 from ..security import (
     AuthenticatedUser,
     AuthenticationError,
@@ -315,6 +316,11 @@ class SelectOutputRequest(BaseModel):
 
 class SynthesizeDecisionBriefRequest(BaseModel):
     title: str = "Authentication migration decision"
+
+
+class SynthesizeBranchRequest(BaseModel):
+    title: str = "Authentication migration decision"
+    synthesis_type: str = SynthesisType.DECISION_BRIEF.value
 
 
 class ReviewOntologyEntityRequest(BaseModel):
@@ -986,8 +992,11 @@ def _synthesis_response(
     artifact: Artifact,
     version: ArtifactVersion,
     provenance: list[dict[str, Any]],
+    synthesis_type: str = SynthesisType.DECISION_BRIEF.value,
 ) -> dict[str, Any]:
     return {
+        "synthesis_type": synthesis_type,
+        "artifact_name": artifact.name,
         "artifact_id": artifact.artifact_id,
         "version_id": version.version_id,
         "branch_synthesis_id": version.branch_synthesis_id,
@@ -1000,6 +1009,40 @@ def _synthesis_response(
         "provenance_hash_verified": svc.verify_artifact_provenance_hash(version, provenance),
         "claims": provenance,
     }
+
+
+@router.post("/branches/{branch_id}/syntheses")
+async def synthesize_branch(
+    branch_id: str,
+    req: SynthesizeBranchRequest,
+    principal: CurrentUser,
+    idempotency_key: IdempotencyKey = None,
+) -> dict[str, Any]:
+    """Publish one of the three PRD synthesis types over this Branch's selected outputs."""
+    svc = _svc_or_404()
+    try:
+        synthesis_type = SynthesisType(req.synthesis_type)
+    except ValueError as exc:
+        raise HTTPException(400, f"unknown synthesis type: {req.synthesis_type}") from exc
+    await _authorized_branch(branch_id, principal, RoomCapability.MUTATE)
+    try:
+        artifact, version = await svc.synthesize_branch(
+            branch_id,
+            req.title,
+            principal.user_id,
+            synthesis_type=synthesis_type,
+            idempotency_key=idempotency_key,
+        )
+    except IdempotencyConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    provenance = await svc.repos.artifacts.get_version_provenance(version.version_id)
+    # Report the type the row actually carries, so the response is a reading of the record
+    # rather than an echo of the request.
+    stored = await svc.repos.branch_syntheses.get(str(version.branch_synthesis_id))
+    published = stored.synthesis_type if stored else synthesis_type.value
+    return _synthesis_response(svc, artifact, version, provenance, published)
 
 
 @router.post("/branches/{branch_id}/syntheses/decision-brief")
