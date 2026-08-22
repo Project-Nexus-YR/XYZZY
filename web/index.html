@@ -377,14 +377,24 @@ document.addEventListener('keydown', event => {
   }
 });
 
-async function api(method, path, body) {
+async function api(method, path, body, options = {}) {
   const url = `${API}${path}`;
-  const opts = { method, headers: {
+  const headers = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${accessToken}`
-  } };
+  };
+  if (options.idempotencyKey) headers['Idempotency-Key'] = options.idempotencyKey;
+  const opts = { method, headers };
   if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(url, opts);
+  let r;
+  try {
+    r = await fetch(url, opts);
+  } catch (networkError) {
+    // A keyed write is safe to retry once: the server replays the original
+    // result instead of appending a second ordered event.
+    if (!options.idempotencyKey) throw networkError;
+    r = await fetch(url, opts);
+  }
   if (!r.ok) {
     const e = await r.text();
     const error = new Error(e);
@@ -392,6 +402,10 @@ async function api(method, path, body) {
     throw error;
   }
   return r.json();
+}
+
+function idempotencyKey() {
+  return crypto.randomUUID();
 }
 
 function storedRoomId() {
@@ -1115,7 +1129,7 @@ async function launchParallelAnalyses() {
       mode: turnLocked ? 'TURN_LOCKED_SINGLE' : 'PARALLEL',
       prompt: question,
       agent_ids: agents.map(agent => agent.agent_id)
-    });
+    }, { idempotencyKey: idempotencyKey() });
     currentBranchId = branchLaunch.branch.branch_id;
   } catch (err) {
     button.removeAttribute('aria-busy');
@@ -1214,7 +1228,7 @@ async function synthesizeDecisionBrief() {
   try {
     await api('POST', `/branches/${currentBranchId}/syntheses/decision-brief`, {
       title: 'Authentication migration decision'
-    });
+    }, { idempotencyKey: idempotencyKey() });
     await loadState();
     openContext('artifacts');
     toast('Decision Brief published.');
@@ -1336,7 +1350,7 @@ async function sendMessage() {
   try {
     await api('POST', `/rooms/${roomId}/messages`, {
       content: text, role: 'HUMAN'
-    });
+    }, { idempotencyKey: idempotencyKey() });
   } catch(err) {
     console.error('Failed to send message:', err);
     input.value = text;
