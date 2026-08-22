@@ -74,7 +74,12 @@ from ..domain.provenance import calculate_artifact_provenance_hash
 from ..model_providers import ModelProviderError
 from ..nexus_bridge.agent_bridge import NexusAgentBridge
 from ..realtime.hub import RealtimeHub
-from ..security.authorization import RoomCapability, RoomPolicy
+from ..security.authorization import (
+    AuthorizationError,
+    RoomCapability,
+    RoomPolicy,
+    capabilities_for_role,
+)
 from ..services.presence import PresenceService
 
 log = logging.getLogger(__name__)
@@ -162,13 +167,18 @@ def _validate_transition(
 
 
 class MultiplayerService:
-    def __init__(self, db: Database, hub: RealtimeHub) -> None:
+    def __init__(
+        self, db: Database, hub: RealtimeHub, known_users: frozenset[str] | None = None
+    ) -> None:
         self.db = db
         self.repos = Repos(db)
         self.hub = hub
         self.presence = PresenceService()
         self.nexus = NexusAgentBridge(db_path=":memory:")
         self.authorization = RoomPolicy(self.repos)
+        # Principals the server authenticates; an invitation must name one of them
+        # or a user row that bootstrapping already created.
+        self.known_users = known_users or frozenset()
         self._running_executions: dict[str, asyncio.Task[None]] = {}
 
     async def initialize(self) -> None:
@@ -514,6 +524,30 @@ class MultiplayerService:
     async def list_rooms(self, workspace_id: str) -> list[Room]:
         return await self.repos.rooms.list_by_workspace(workspace_id)
 
+    async def _is_known_user(self, user_id: str) -> bool:
+        """Invitations name accounts: a configured principal or a bootstrapped user row."""
+        if user_id in self.known_users:
+            return True
+        return await self.repos.users.get(user_id) is not None
+
+    async def _require_capability_in_transaction(
+        self, room_id: str, user_id: str, capability: RoomCapability
+    ) -> None:
+        """Re-check durable membership inside the write's own transaction.
+
+        The route authorized the request before the transaction began. A role change
+        or removal committing in between is serialized by BEGIN IMMEDIATE, so checking
+        again here means the ordered log never records a write by someone who had
+        already lost the capability.
+        """
+        member = await self.repos.room_members.get(room_id, user_id)
+        if capability not in capabilities_for_role(member.role if member else None):
+            raise AuthorizationError("room access forbidden")
+
+    async def _require_mutate_in_transaction(self, room_id: str, user_id: str) -> None:
+        """The common case: the actor must still hold MUTATE when the write commits."""
+        await self._require_capability_in_transaction(room_id, user_id, RoomCapability.MUTATE)
+
     async def join_room(self, room_id: str, user_id: str) -> None:
         """Mark an already invited member present; never create membership."""
         await self.authorization.require(room_id, user_id, RoomCapability.READ)
@@ -531,29 +565,131 @@ class MultiplayerService:
     ) -> RoomMember:
         if role not in {"viewer", "editor"}:
             raise DomainError("invitation role must be viewer or editor")
+        invited_user_id = self._validate_id(invited_user_id, "user id")
         member = RoomMember(room_id=room_id, user_id=invited_user_id, role=role)
-        event = await self.repos.room_members.add_with_event(
-            member,
-            RoomEvent(
-                room_id=room_id,
-                sequence=0,
-                event_type=EventType.USER_INVITED_ROOM,
-                payload={"user_id": invited_user_id, "role": role},
-                actor_id=invited_by,
-                actor_type="user",
-            ),
-        )
+        async with self.db.transaction():
+            # Serializing the read and the insert turns a concurrent duplicate invite
+            # into a clean rejection rather than a UNIQUE-constraint failure, and the
+            # recheck fences out an inviter demoted after the route authorized them.
+            await self._require_mutate_in_transaction(room_id, invited_by)
+            if not await self._is_known_user(invited_user_id):
+                raise DomainError("no account with that user id")
+            if await self.repos.room_members.get(room_id, invited_user_id) is not None:
+                raise DomainError("user is already a channel member")
+            await self.repos.room_members.add(member)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.USER_INVITED_ROOM,
+                    payload={"user_id": invited_user_id, "role": role},
+                    actor_id=invited_by,
+                    actor_type="user",
+                )
+            )
         await self._broadcast_persisted_events([event])
+        # The invitee is not subscribed to this room yet; tell their open sockets
+        # directly so the channel appears in their sidebar without a reload.
+        room = await self.repos.rooms.get(room_id)
+        await self.hub.send_to_user(
+            invited_user_id,
+            {
+                "type": "room_invited",
+                "room_id": room_id,
+                "room_name": room.name if room else room_id,
+                "role": role,
+            },
+        )
         return member
 
     async def leave_room(self, room_id: str, user_id: str) -> None:
+        """Give up membership durably: the row and the event commit together."""
+        async with self.db.transaction():
+            member = await self.repos.room_members.get(room_id, user_id)
+            if member is None:
+                raise DomainError("user is not a channel member")
+            if member.role == "admin":
+                others = [
+                    other
+                    for other in await self.repos.room_members.list(room_id)
+                    if other.user_id != user_id
+                ]
+                if others and not any(other.role == "admin" for other in others):
+                    raise DomainError("the last admin cannot leave while others remain")
+            await self.repos.room_members.remove(room_id, user_id)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.USER_LEFT_ROOM,
+                    payload={"user_id": user_id, "role": member.role},
+                    actor_id=user_id,
+                    actor_type="user",
+                )
+            )
+        await self.hub.revoke_room_access(user_id, room_id)
         await self.presence.user_left(user_id, room_id)
-        await self._append_room_event(
-            room_id, EventType.USER_LEFT_ROOM, {"user_id": user_id}, user_id, "user"
-        )
+        await self._broadcast_persisted_events([event])
 
     async def get_room_members(self, room_id: str) -> list[RoomMember]:
         return await self.repos.room_members.list(room_id)
+
+    async def update_room_member_role(
+        self, room_id: str, user_id: str, role: str, changed_by: str
+    ) -> RoomMember:
+        """Change a non-admin member's access; admins are immutable here and use leave_room."""
+        if role not in {"viewer", "editor"}:
+            raise DomainError("member role must be viewer or editor")
+        if user_id == changed_by:
+            raise DomainError("use leave to change your own membership")
+        async with self.db.transaction():
+            member = await self.repos.room_members.get(room_id, user_id)
+            if member is None:
+                raise DomainError("user is not a channel member")
+            if member.role == "admin":
+                raise DomainError("admin membership cannot be changed here")
+            if member.role == role:
+                return member
+            await self.repos.room_members.update_role(room_id, user_id, role)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.USER_ROLE_CHANGED,
+                    payload={"user_id": user_id, "role": role, "previous_role": member.role},
+                    actor_id=changed_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
+        return replace(member, role=role)
+
+    async def remove_room_member(self, room_id: str, user_id: str, removed_by: str) -> None:
+        """Revoke a non-admin member's access, including any live realtime subscription."""
+        if user_id == removed_by:
+            raise DomainError("use leave to remove yourself")
+        async with self.db.transaction():
+            member = await self.repos.room_members.get(room_id, user_id)
+            if member is None:
+                raise DomainError("user is not a channel member")
+            if member.role == "admin":
+                raise DomainError("admin membership cannot be removed here")
+            await self.repos.room_members.remove(room_id, user_id)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.USER_REMOVED_ROOM,
+                    payload={"user_id": user_id, "role": member.role},
+                    actor_id=removed_by,
+                    actor_type="user",
+                )
+            )
+        await self.hub.revoke_room_access(user_id, room_id)
+        # Their subscriptions to this room are gone; reach their other open sockets.
+        await self.hub.send_to_user(user_id, {"type": "room_removed", "room_id": room_id})
+        await self.presence.user_left(user_id, room_id)
+        await self._broadcast_persisted_events([event])
 
     # ── Agents ───────────────────────────────────────────────────────────────
 
@@ -568,6 +704,9 @@ class MultiplayerService:
         system_prompt: str | None = None,
         model_provider: str = "",
         model_name: str = "",
+        *,
+        requested_by: str = "",
+        require_member: bool = False,
     ) -> AgentInstance:
         template = await self.repos.agents.get_template(template_id)
         if not template:
@@ -583,17 +722,24 @@ class MultiplayerService:
             model_provider=model_provider,
             model_name=model_name,
         )
-        await self.repos.agents.create_instance(agent)
-        await self.repos.agents.add_room_membership(
-            AgentRoomMembership(agent_id=agent.agent_id, room_id=room_id)
-        )
-        await self._append_room_event(
-            room_id,
-            EventType.AGENT_JOINED_ROOM,
-            {"agent_id": agent.agent_id, "name": agent.name, "role": agent.role},
-            agent.agent_id,
-            "agent",
-        )
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(room_id, requested_by)
+            await self.repos.agents.create_instance(agent)
+            await self.repos.agents.add_room_membership(
+                AgentRoomMembership(agent_id=agent.agent_id, room_id=room_id)
+            )
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.AGENT_JOINED_ROOM,
+                    payload={"agent_id": agent.agent_id, "name": agent.name, "role": agent.role},
+                    actor_id=agent.agent_id,
+                    actor_type="agent",
+                )
+            )
+        await self._broadcast_persisted_events([event])
         return agent
 
     async def get_agent(self, agent_id: str) -> AgentInstance:
@@ -648,6 +794,7 @@ class MultiplayerService:
         persisted_events: list[RoomEvent] = []
         executions: list[Execution] = []
         async with self.db.transaction():
+            await self._require_mutate_in_transaction(room_id, initiated_by)
             if idempotency_key is not None:
                 prior = await self._claim_idempotency(
                     room_id, initiated_by, idempotency_key, "branch.start", request
@@ -1075,7 +1222,9 @@ class MultiplayerService:
         await self.repos.executions.update_status(execution_id, ExecutionStatus.RUNNING)
         return True
 
-    async def cancel_execution(self, execution_id: str, cancelled_by: str) -> bool:
+    async def cancel_execution(
+        self, execution_id: str, cancelled_by: str, *, require_member: bool = False
+    ) -> bool:
         execution = await self.repos.executions.get(execution_id)
         if execution is None:
             raise DomainError("execution not found")
@@ -1096,26 +1245,55 @@ class MultiplayerService:
         session = await self.repos.sessions.get(execution.session_id)
         if session is None:
             raise DomainError("session not found")
-        events = await self.repos.executions.terminalize_without_output(
-            execution,
-            ExecutionStatus.CANCELLED,
-            "cancelled by user",
-            [
-                RoomEvent(
-                    room_id=session.room_id,
-                    sequence=0,
-                    event_type=EventType.EXECUTION_CANCELLED,
-                    payload={
-                        "branch_id": execution.branch_id,
-                        "execution_id": execution.execution_id,
-                    },
-                    actor_id=cancelled_by,
-                    actor_type="user",
-                )
-            ],
-        )
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(session.room_id, cancelled_by)
+            events = await self.repos.executions.terminalize_without_output_in_transaction(
+                execution,
+                ExecutionStatus.CANCELLED,
+                "cancelled by user",
+                [
+                    RoomEvent(
+                        room_id=session.room_id,
+                        sequence=0,
+                        event_type=EventType.EXECUTION_CANCELLED,
+                        payload={
+                            "branch_id": execution.branch_id,
+                            "execution_id": execution.execution_id,
+                        },
+                        actor_id=cancelled_by,
+                        actor_type="user",
+                    )
+                ],
+            )
         await self._broadcast_persisted_events(events)
         return True
+
+    async def intervene_execution(
+        self, execution_id: str, user_id: str, instruction: str, *, require_member: bool = False
+    ) -> None:
+        """Record a human redirect against a running execution. The ordered event is
+        appended inside the transaction that re-checks membership, so a member demoted
+        while the runtime intervention is dispatched cannot author it."""
+        execution = await self.repos.executions.get(execution_id)
+        if execution is None:
+            raise DomainError("execution not found")
+        agent = await self.get_agent(execution.agent_id)
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(agent.room_id, user_id)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=agent.room_id,
+                    sequence=0,
+                    event_type=EventType.HUMAN_REDIRECTED_AGENT,
+                    payload={"agent_id": execution.agent_id, "instruction": instruction},
+                    actor_id=user_id,
+                    actor_type="user",
+                )
+            )
+        await self.nexus.add_execution_intervention(execution_id, instruction)
+        await self._broadcast_persisted_events([event])
 
     @staticmethod
     def _output_content(output_data: dict[str, Any]) -> str:
@@ -1147,21 +1325,23 @@ class MultiplayerService:
             decided_by=decided_by,
             branch_id=output.branch_id,
         )
-        event = await self.repos.output_selections.upsert_with_event(
-            selection,
-            RoomEvent(
-                room_id=room_id,
-                sequence=0,
-                event_type=EventType.OUTPUT_SELECTION_UPDATED,
-                payload={
-                    "branch_id": output.branch_id,
-                    "output_id": output_id,
-                    "disposition": disposition.value,
-                },
-                actor_id=decided_by,
-                actor_type="user",
-            ),
-        )
+        async with self.db.transaction():
+            await self._require_mutate_in_transaction(room_id, decided_by)
+            event = await self.repos.output_selections.upsert_with_event_in_transaction(
+                selection,
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.OUTPUT_SELECTION_UPDATED,
+                    payload={
+                        "branch_id": output.branch_id,
+                        "output_id": output_id,
+                        "disposition": disposition.value,
+                    },
+                    actor_id=decided_by,
+                    actor_type="user",
+                ),
+            )
         await self._broadcast_persisted_events([event])
         return selection
 
@@ -1273,6 +1453,7 @@ class MultiplayerService:
             for ordinal, output in enumerate(included, start=1)
         ]
         async with self.db.transaction():
+            await self._require_mutate_in_transaction(branch.room_id, created_by)
             if idempotency_key is not None:
                 prior = await self._claim_idempotency(
                     branch_id, created_by, idempotency_key, operation, request
@@ -1320,6 +1501,11 @@ class MultiplayerService:
             if current is None or current.status is not BranchSynthesisStatus.RUNNING:
                 return
             await self.repos.branch_syntheses.mark_failed(synthesis.synthesis_id, error)
+            member = await self.repos.room_members.get(branch.room_id, created_by)
+            if RoomCapability.MUTATE not in capabilities_for_role(member.role if member else None):
+                # Initiator lost write access during the model call: the RUNNING row
+                # is now terminal, but attribute no ordered event to a non-member.
+                return
             started_event = await self.repos.events.append_with_next_sequence_in_transaction(
                 RoomEvent(
                     room_id=branch.room_id,
@@ -1519,16 +1705,30 @@ class MultiplayerService:
                 actor_type="user",
             )
         )
-        persisted_events = await self.repos.artifacts.create_synthesis(
-            artifact,
-            version,
-            claims_and_sources,
-            ontology_entities,
-            ontology_relationships,
-            event_types,
-            create_artifact=create_artifact,
-            synthesis=terminal_synthesis,
-        )
+        aborted = False
+        persisted_events: list[RoomEvent] = []
+        async with self.db.transaction():
+            member = await self.repos.room_members.get(branch.room_id, created_by)
+            if RoomCapability.MUTATE not in capabilities_for_role(member.role if member else None):
+                # Demoted during the model call: terminate the RUNNING row without
+                # attributing any ordered event to a member who lost write access.
+                await self.repos.branch_syntheses.mark_failed(
+                    synthesis.synthesis_id, "initiator lost write access during synthesis"
+                )
+                aborted = True
+            else:
+                persisted_events = await self.repos.artifacts.create_synthesis_in_transaction(
+                    artifact,
+                    version,
+                    claims_and_sources,
+                    ontology_entities,
+                    ontology_relationships,
+                    event_types,
+                    create_artifact=create_artifact,
+                    synthesis=terminal_synthesis,
+                )
+        if aborted:
+            raise AuthorizationError("room access forbidden")
         await self._broadcast_persisted_events(persisted_events)
         return replace(artifact, current_version=version.version_number), version
 
@@ -1867,6 +2067,8 @@ class MultiplayerService:
         priority: TaskPriority = TaskPriority.NORMAL,
         created_by: str = "",
         parent_task_id: str | None = None,
+        *,
+        require_member: bool = False,
     ) -> Task:
         title = self._validate_non_empty(title, "task title")
         task = Task(
@@ -1878,125 +2080,177 @@ class MultiplayerService:
             created_by=created_by,
             parent_task_id=parent_task_id,
         )
-        await self.repos.tasks.create(task)
-        await self._append_room_event(
-            room_id,
-            EventType.TASK_CREATED,
-            {"task_id": task.task_id, "title": title},
-            created_by,
-            "user",
-        )
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(room_id, created_by)
+            await self.repos.tasks.create(task)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.TASK_CREATED,
+                    payload={"task_id": task.task_id, "title": title},
+                    actor_id=created_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
         return task
 
-    async def assign_task(self, task_id: str, agent_id: str) -> Task:
-        task = await self.repos.tasks.get(task_id)
-        if not task:
-            raise DomainError(f"task not found: {task_id}")
-        _validate_transition(task.status, TaskStatus.ASSIGNED, VALID_TASK_TRANSITIONS, "task")
-        task = Task(
-            task_id=task.task_id,
-            room_id=task.room_id,
-            title=task.title,
-            description=task.description,
-            status=TaskStatus.ASSIGNED,
-            priority=task.priority,
-            assigned_agent_id=agent_id,
-            created_by=task.created_by,
-            parent_task_id=task.parent_task_id,
-            delegation_id=task.delegation_id,
-        )
-        await self.repos.tasks.update(task)
-        await self._append_room_event(
-            task.room_id,
-            EventType.TASK_ASSIGNED,
-            {"task_id": task_id, "agent_id": agent_id},
-            agent_id,
-            "agent",
-        )
+    async def assign_task(
+        self, task_id: str, agent_id: str, *, requested_by: str = "", require_member: bool = False
+    ) -> Task:
+        async with self.db.transaction():
+            task = await self.repos.tasks.get(task_id)
+            if not task:
+                raise DomainError(f"task not found: {task_id}")
+            if require_member:
+                await self._require_mutate_in_transaction(task.room_id, requested_by)
+            _validate_transition(task.status, TaskStatus.ASSIGNED, VALID_TASK_TRANSITIONS, "task")
+            task = Task(
+                task_id=task.task_id,
+                room_id=task.room_id,
+                title=task.title,
+                description=task.description,
+                status=TaskStatus.ASSIGNED,
+                priority=task.priority,
+                assigned_agent_id=agent_id,
+                created_by=task.created_by,
+                parent_task_id=task.parent_task_id,
+                delegation_id=task.delegation_id,
+            )
+            await self.repos.tasks.update(task)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=task.room_id,
+                    sequence=0,
+                    event_type=EventType.TASK_ASSIGNED,
+                    payload={"task_id": task_id, "agent_id": agent_id},
+                    actor_id=agent_id,
+                    actor_type="agent",
+                )
+            )
+        await self._broadcast_persisted_events([event])
         return task
 
     async def delegate_task(
-        self, task_id: str, from_agent_id: str, to_agent_id: str, description: str = ""
+        self,
+        task_id: str,
+        from_agent_id: str,
+        to_agent_id: str,
+        description: str = "",
+        *,
+        requested_by: str = "",
+        require_member: bool = False,
     ) -> Task:
-        task = await self.repos.tasks.get(task_id)
-        if not task:
-            raise DomainError(f"task not found: {task_id}")
-        delegation_id = new_id("deleg")
-        child = Task(
-            task_id=new_id("task"),
-            room_id=task.room_id,
-            title=f"Delegated: {task.title}",
-            description=description or task.description,
-            status=TaskStatus.ASSIGNED,
-            priority=task.priority,
-            assigned_agent_id=to_agent_id,
-            created_by=from_agent_id,
-            parent_task_id=task_id,
-            delegation_id=delegation_id,
-        )
-        await self.repos.tasks.create(child)
-        await self._append_room_event(
-            task.room_id,
-            EventType.TASK_DELEGATED,
-            {
-                "parent_task_id": task_id,
-                "child_task_id": child.task_id,
-                "from_agent": from_agent_id,
-                "to_agent": to_agent_id,
-            },
-            from_agent_id,
-            "agent",
-        )
+        async with self.db.transaction():
+            task = await self.repos.tasks.get(task_id)
+            if not task:
+                raise DomainError(f"task not found: {task_id}")
+            if require_member:
+                await self._require_mutate_in_transaction(task.room_id, requested_by)
+            delegation_id = new_id("deleg")
+            child = Task(
+                task_id=new_id("task"),
+                room_id=task.room_id,
+                title=f"Delegated: {task.title}",
+                description=description or task.description,
+                status=TaskStatus.ASSIGNED,
+                priority=task.priority,
+                assigned_agent_id=to_agent_id,
+                created_by=from_agent_id,
+                parent_task_id=task_id,
+                delegation_id=delegation_id,
+            )
+            await self.repos.tasks.create(child)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=task.room_id,
+                    sequence=0,
+                    event_type=EventType.TASK_DELEGATED,
+                    payload={
+                        "parent_task_id": task_id,
+                        "child_task_id": child.task_id,
+                        "from_agent": from_agent_id,
+                        "to_agent": to_agent_id,
+                    },
+                    actor_id=from_agent_id,
+                    actor_type="agent",
+                )
+            )
+        await self._broadcast_persisted_events([event])
         return child
 
-    async def complete_task(self, task_id: str) -> Task:
-        task = await self.repos.tasks.get(task_id)
-        if not task:
-            raise DomainError(f"task not found: {task_id}")
-        _validate_transition(task.status, TaskStatus.COMPLETED, VALID_TASK_TRANSITIONS, "task")
-        task = Task(
-            task_id=task.task_id,
-            room_id=task.room_id,
-            title=task.title,
-            description=task.description,
-            status=TaskStatus.COMPLETED,
-            priority=task.priority,
-            assigned_agent_id=task.assigned_agent_id,
-            created_by=task.created_by,
-            parent_task_id=task.parent_task_id,
-            delegation_id=task.delegation_id,
-        )
-        await self.repos.tasks.update(task)
-        await self._append_room_event(
-            task.room_id,
-            EventType.TASK_COMPLETED,
-            {"task_id": task_id},
-            task.assigned_agent_id or "system",
-            "agent",
-        )
+    async def complete_task(
+        self, task_id: str, *, requested_by: str = "", require_member: bool = False
+    ) -> Task:
+        async with self.db.transaction():
+            task = await self.repos.tasks.get(task_id)
+            if not task:
+                raise DomainError(f"task not found: {task_id}")
+            if require_member:
+                await self._require_mutate_in_transaction(task.room_id, requested_by)
+            _validate_transition(task.status, TaskStatus.COMPLETED, VALID_TASK_TRANSITIONS, "task")
+            task = Task(
+                task_id=task.task_id,
+                room_id=task.room_id,
+                title=task.title,
+                description=task.description,
+                status=TaskStatus.COMPLETED,
+                priority=task.priority,
+                assigned_agent_id=task.assigned_agent_id,
+                created_by=task.created_by,
+                parent_task_id=task.parent_task_id,
+                delegation_id=task.delegation_id,
+            )
+            await self.repos.tasks.update(task)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=task.room_id,
+                    sequence=0,
+                    event_type=EventType.TASK_COMPLETED,
+                    payload={"task_id": task_id},
+                    actor_id=task.assigned_agent_id or "system",
+                    actor_type="agent",
+                )
+            )
+        await self._broadcast_persisted_events([event])
         return task
 
-    async def cancel_task(self, task_id: str) -> Task:
-        task = await self.repos.tasks.get(task_id)
-        if not task:
-            raise DomainError(f"task not found: {task_id}")
-        _validate_transition(task.status, TaskStatus.CANCELLED, VALID_TASK_TRANSITIONS, "task")
-        task = Task(
-            task_id=task.task_id,
-            room_id=task.room_id,
-            title=task.title,
-            description=task.description,
-            status=TaskStatus.CANCELLED,
-            priority=task.priority,
-            assigned_agent_id=task.assigned_agent_id,
-            created_by=task.created_by,
-            parent_task_id=task.parent_task_id,
-            delegation_id=task.delegation_id,
-        )
-        await self.repos.tasks.update(task)
-        await self._append_room_event(
-            task.room_id, EventType.TASK_CANCELLED, {"task_id": task_id}, task.created_by, "user"
-        )
+    async def cancel_task(
+        self, task_id: str, *, requested_by: str = "", require_member: bool = False
+    ) -> Task:
+        async with self.db.transaction():
+            task = await self.repos.tasks.get(task_id)
+            if not task:
+                raise DomainError(f"task not found: {task_id}")
+            if require_member:
+                await self._require_mutate_in_transaction(task.room_id, requested_by)
+            _validate_transition(task.status, TaskStatus.CANCELLED, VALID_TASK_TRANSITIONS, "task")
+            task = Task(
+                task_id=task.task_id,
+                room_id=task.room_id,
+                title=task.title,
+                description=task.description,
+                status=TaskStatus.CANCELLED,
+                priority=task.priority,
+                assigned_agent_id=task.assigned_agent_id,
+                created_by=task.created_by,
+                parent_task_id=task.parent_task_id,
+                delegation_id=task.delegation_id,
+            )
+            await self.repos.tasks.update(task)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=task.room_id,
+                    sequence=0,
+                    event_type=EventType.TASK_CANCELLED,
+                    payload={"task_id": task_id},
+                    actor_id=task.created_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
         return task
 
     async def list_room_tasks(self, room_id: str) -> list[Task]:
@@ -2104,6 +2358,8 @@ class MultiplayerService:
         )
         try:
             async with self.db.transaction():
+                if role is MessageRole.HUMAN:
+                    await self._require_mutate_in_transaction(room_id, sender_id)
                 if idempotency_key is not None:
                     prior = await self._claim_idempotency(
                         room_id, sender_id, idempotency_key, "message.create", request
@@ -2158,6 +2414,8 @@ class MultiplayerService:
         description: str = "",
         created_by: str = "",
         content: str = "",
+        *,
+        require_member: bool = False,
     ) -> Artifact:
         name = self._validate_non_empty(name, "artifact name")
         artifact = Artifact(
@@ -2169,7 +2427,7 @@ class MultiplayerService:
             current_version=1 if content else 0,
             created_by=created_by,
         )
-        await self.repos.artifacts.create(artifact)
+        version: ArtifactVersion | None = None
         if content:
             version = ArtifactVersion(
                 version_id=new_id("ver"),
@@ -2183,18 +2441,31 @@ class MultiplayerService:
                 version,
                 provenance_hash=self._artifact_provenance_hash(version, []),
             )
-            await self.repos.artifacts.create_version(version)
-        await self._append_room_event(
-            room_id,
-            EventType.ARTIFACT_CREATED,
-            {"artifact_id": artifact.artifact_id, "name": name, "type": artifact_type.value},
-            created_by,
-            "user",
-        )
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(room_id, created_by)
+            await self.repos.artifacts.create(artifact)
+            if version is not None:
+                await self.repos.artifacts.create_version_in_transaction(version)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.ARTIFACT_CREATED,
+                    payload={
+                        "artifact_id": artifact.artifact_id,
+                        "name": name,
+                        "type": artifact_type.value,
+                    },
+                    actor_id=created_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
         return artifact
 
     async def update_artifact(
-        self, artifact_id: str, content: str, updated_by: str = ""
+        self, artifact_id: str, content: str, updated_by: str = "", *, require_member: bool = False
     ) -> ArtifactVersion:
         artifact = await self.repos.artifacts.get(artifact_id)
         if not artifact:
@@ -2212,14 +2483,21 @@ class MultiplayerService:
             version,
             provenance_hash=self._artifact_provenance_hash(version, []),
         )
-        await self.repos.artifacts.create_version(version)
-        await self._append_room_event(
-            artifact.room_id,
-            EventType.ARTIFACT_VERSION_CREATED,
-            {"artifact_id": artifact_id, "version": new_ver},
-            updated_by,
-            "user",
-        )
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(artifact.room_id, updated_by)
+            await self.repos.artifacts.create_version_in_transaction(version)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=artifact.room_id,
+                    sequence=0,
+                    event_type=EventType.ARTIFACT_VERSION_CREATED,
+                    payload={"artifact_id": artifact_id, "version": new_ver},
+                    actor_id=updated_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
         return version
 
     async def list_room_artifacts(self, room_id: str) -> list[Artifact]:
@@ -2228,7 +2506,14 @@ class MultiplayerService:
     # ── Decisions ────────────────────────────────────────────────────────────
 
     async def create_decision(
-        self, room_id: str, title: str, content: str, reason: str = "", created_by: str = ""
+        self,
+        room_id: str,
+        title: str,
+        content: str,
+        reason: str = "",
+        created_by: str = "",
+        *,
+        require_member: bool = False,
     ) -> Decision:
         title = self._validate_non_empty(title, "decision title")
         decision = Decision(
@@ -2239,14 +2524,21 @@ class MultiplayerService:
             reason=reason,
             created_by=created_by,
         )
-        await self.repos.decisions.create(decision)
-        await self._append_room_event(
-            room_id,
-            EventType.DECISION_CREATED,
-            {"decision_id": decision.decision_id, "title": title},
-            created_by,
-            "user",
-        )
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(room_id, created_by)
+            await self.repos.decisions.create(decision)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.DECISION_CREATED,
+                    payload={"decision_id": decision.decision_id, "title": title},
+                    actor_id=created_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
         return decision
 
     async def list_room_decisions(self, room_id: str) -> list[Decision]:
@@ -2263,6 +2555,8 @@ class MultiplayerService:
         content: str,
         memory_type: str = "fact",
         created_by: str = "",
+        *,
+        require_member: bool = False,
     ) -> Memory:
         content = self._validate_non_empty(content, "memory content")
         memory = Memory(
@@ -2275,15 +2569,24 @@ class MultiplayerService:
             memory_type=memory_type,
             created_by=created_by,
         )
-        await self.repos.memories.create(memory)
-        if room_id:
-            await self._append_room_event(
-                room_id,
-                EventType.MEMORY_CREATED,
-                {"memory_id": memory.memory_id, "type": memory_type},
-                created_by,
-                "user",
+        if room_id is None:
+            await self.repos.memories.create(memory)
+            return memory
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(room_id, created_by)
+            await self.repos.memories.create(memory)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.MEMORY_CREATED,
+                    payload={"memory_id": memory.memory_id, "type": memory_type},
+                    actor_id=created_by,
+                    actor_type="user",
+                )
             )
+        await self._broadcast_persisted_events([event])
         return memory
 
     async def list_room_memories(self, room_id: str) -> list[Memory]:
@@ -2292,7 +2595,14 @@ class MultiplayerService:
     # ── Approvals ────────────────────────────────────────────────────────────
 
     async def request_approval(
-        self, room_id: str, execution_id: str, agent_id: str, action_description: str
+        self,
+        room_id: str,
+        execution_id: str,
+        agent_id: str,
+        action_description: str,
+        *,
+        requested_by: str = "",
+        require_member: bool = False,
     ) -> Approval:
         approval = Approval(
             approval_id=new_id("appr"),
@@ -2301,84 +2611,109 @@ class MultiplayerService:
             agent_id=agent_id,
             action_description=action_description,
         )
-        await self.repos.approvals.create(approval)
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(room_id, requested_by)
+            await self.repos.approvals.create(approval)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.APPROVAL_REQUESTED,
+                    payload={
+                        "approval_id": approval.approval_id,
+                        "agent_id": agent_id,
+                        "action": action_description,
+                    },
+                    actor_id=agent_id,
+                    actor_type="agent",
+                )
+            )
         await self._set_agent_status_safe(agent_id, AgentStatus.WAITING_APPROVAL)
-        await self._append_room_event(
-            room_id,
-            EventType.APPROVAL_REQUESTED,
-            {
-                "approval_id": approval.approval_id,
-                "agent_id": agent_id,
-                "action": action_description,
-            },
-            agent_id,
-            "agent",
-        )
+        await self._broadcast_persisted_events([event])
         return approval
 
     async def approve_action(
-        self, approval_id: str, reviewer_id: str, comment: str = ""
+        self, approval_id: str, reviewer_id: str, comment: str = "", *, require_member: bool = False
     ) -> Approval:
-        approval = await self.repos.approvals.get(approval_id)
-        if not approval:
-            raise DomainError(f"approval not found: {approval_id}")
-        if approval.status != ApprovalStatus.PENDING:
-            raise DomainError(
-                f"approval {approval_id} is not pending (current: {approval.status.value})"
+        async with self.db.transaction():
+            approval = await self.repos.approvals.get(approval_id)
+            if not approval:
+                raise DomainError(f"approval not found: {approval_id}")
+            if approval.status != ApprovalStatus.PENDING:
+                raise DomainError(
+                    f"approval {approval_id} is not pending (current: {approval.status.value})"
+                )
+            if require_member:
+                await self._require_capability_in_transaction(
+                    approval.room_id, reviewer_id, RoomCapability.ADMINISTER
+                )
+            approval = Approval(
+                approval_id=approval.approval_id,
+                room_id=approval.room_id,
+                execution_id=approval.execution_id,
+                agent_id=approval.agent_id,
+                action_description=approval.action_description,
+                status=ApprovalStatus.APPROVED,
+                reviewer_id=reviewer_id,
+                review_comment=comment,
+                requested_at=approval.requested_at,
+                reviewed_at=utcnow(),
             )
-        approval = Approval(
-            approval_id=approval.approval_id,
-            room_id=approval.room_id,
-            execution_id=approval.execution_id,
-            agent_id=approval.agent_id,
-            action_description=approval.action_description,
-            status=ApprovalStatus.APPROVED,
-            reviewer_id=reviewer_id,
-            review_comment=comment,
-            requested_at=approval.requested_at,
-            reviewed_at=utcnow(),
-        )
-        await self.repos.approvals.update(approval)
+            await self.repos.approvals.update(approval)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=approval.room_id,
+                    sequence=0,
+                    event_type=EventType.APPROVAL_GRANTED,
+                    payload={"approval_id": approval_id, "reviewer_id": reviewer_id},
+                    actor_id=reviewer_id,
+                    actor_type="user",
+                )
+            )
         await self._set_agent_status_safe(approval.agent_id, AgentStatus.WORKING)
-        await self._append_room_event(
-            approval.room_id,
-            EventType.APPROVAL_GRANTED,
-            {"approval_id": approval_id, "reviewer_id": reviewer_id},
-            reviewer_id,
-            "user",
-        )
+        await self._broadcast_persisted_events([event])
         return approval
 
     async def reject_action(
-        self, approval_id: str, reviewer_id: str, comment: str = ""
+        self, approval_id: str, reviewer_id: str, comment: str = "", *, require_member: bool = False
     ) -> Approval:
-        approval = await self.repos.approvals.get(approval_id)
-        if not approval:
-            raise DomainError(f"approval not found: {approval_id}")
-        if approval.status != ApprovalStatus.PENDING:
-            raise DomainError(
-                f"approval {approval_id} is not pending (current: {approval.status.value})"
+        async with self.db.transaction():
+            approval = await self.repos.approvals.get(approval_id)
+            if not approval:
+                raise DomainError(f"approval not found: {approval_id}")
+            if approval.status != ApprovalStatus.PENDING:
+                raise DomainError(
+                    f"approval {approval_id} is not pending (current: {approval.status.value})"
+                )
+            if require_member:
+                await self._require_capability_in_transaction(
+                    approval.room_id, reviewer_id, RoomCapability.ADMINISTER
+                )
+            approval = Approval(
+                approval_id=approval.approval_id,
+                room_id=approval.room_id,
+                execution_id=approval.execution_id,
+                agent_id=approval.agent_id,
+                action_description=approval.action_description,
+                status=ApprovalStatus.REJECTED,
+                reviewer_id=reviewer_id,
+                review_comment=comment,
+                requested_at=approval.requested_at,
+                reviewed_at=utcnow(),
             )
-        approval = Approval(
-            approval_id=approval.approval_id,
-            room_id=approval.room_id,
-            execution_id=approval.execution_id,
-            agent_id=approval.agent_id,
-            action_description=approval.action_description,
-            status=ApprovalStatus.REJECTED,
-            reviewer_id=reviewer_id,
-            review_comment=comment,
-            requested_at=approval.requested_at,
-            reviewed_at=utcnow(),
-        )
-        await self.repos.approvals.update(approval)
-        await self._append_room_event(
-            approval.room_id,
-            EventType.APPROVAL_REJECTED,
-            {"approval_id": approval_id, "reviewer_id": reviewer_id},
-            reviewer_id,
-            "user",
-        )
+            await self.repos.approvals.update(approval)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=approval.room_id,
+                    sequence=0,
+                    event_type=EventType.APPROVAL_REJECTED,
+                    payload={"approval_id": approval_id, "reviewer_id": reviewer_id},
+                    actor_id=reviewer_id,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
         return approval
 
     async def list_pending_approvals(self, room_id: str) -> list[Approval]:
@@ -2386,32 +2721,50 @@ class MultiplayerService:
 
     # ── Human Intervention ───────────────────────────────────────────────────
 
-    async def interrupt_agent(self, agent_id: str, user_id: str, reason: str = "") -> None:
+    async def interrupt_agent(
+        self, agent_id: str, user_id: str, reason: str = "", *, require_member: bool = False
+    ) -> None:
         agent = await self.get_agent(agent_id)
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(agent.room_id, user_id)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=agent.room_id,
+                    sequence=0,
+                    event_type=EventType.HUMAN_INTERRUPTED_AGENT,
+                    payload={"agent_id": agent_id, "reason": reason},
+                    actor_id=user_id,
+                    actor_type="user",
+                )
+            )
         execution_id = await self.nexus.get_execution_for_agent(agent_id)
         if execution_id:
             await self.nexus.pause_execution(execution_id)
         await self._set_agent_status_safe(agent_id, AgentStatus.PAUSED)
-        await self._append_room_event(
-            agent.room_id,
-            EventType.HUMAN_INTERRUPTED_AGENT,
-            {"agent_id": agent_id, "reason": reason},
-            user_id,
-            "user",
-        )
+        await self._broadcast_persisted_events([event])
 
-    async def redirect_agent(self, agent_id: str, user_id: str, instruction: str) -> None:
+    async def redirect_agent(
+        self, agent_id: str, user_id: str, instruction: str, *, require_member: bool = False
+    ) -> None:
         agent = await self.get_agent(agent_id)
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(agent.room_id, user_id)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=agent.room_id,
+                    sequence=0,
+                    event_type=EventType.HUMAN_REDIRECTED_AGENT,
+                    payload={"agent_id": agent_id, "instruction": instruction},
+                    actor_id=user_id,
+                    actor_type="user",
+                )
+            )
         execution_id = await self.nexus.get_execution_for_agent(agent_id)
         if execution_id:
             await self.nexus.add_execution_intervention(execution_id, instruction)
-        await self._append_room_event(
-            agent.room_id,
-            EventType.HUMAN_REDIRECTED_AGENT,
-            {"agent_id": agent_id, "instruction": instruction},
-            user_id,
-            "user",
-        )
+        await self._broadcast_persisted_events([event])
 
     # ── Notifications ────────────────────────────────────────────────────────
 
@@ -2678,6 +3031,7 @@ class MultiplayerService:
         reviewed_by: str,
         reason: str,
         *,
+        require_member: bool = False,
         corrected_label: str | None = None,
         corrected_properties: dict[str, Any] | None = None,
         corrected_confidence: float | None = None,
@@ -2703,6 +3057,8 @@ class MultiplayerService:
 
         reviewed_at = utcnow()
         async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(room_id, reviewed_by)
             entity = await self.repos.ontology.get_entity(entity_id)
             if entity is None or entity.room_id != room_id:
                 raise DomainError("ontology entity not found in room")
@@ -2759,6 +3115,7 @@ class MultiplayerService:
         reviewed_by: str,
         reason: str,
         *,
+        require_member: bool = False,
         corrected_kind: OntologyRelationshipKind | None = None,
         corrected_confidence: float | None = None,
     ) -> tuple[OntologyRelationship, OntologyReview]:
@@ -2781,6 +3138,8 @@ class MultiplayerService:
 
         reviewed_at = utcnow()
         async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(room_id, reviewed_by)
             relationship = await self.repos.ontology.get_relationship(relationship_id)
             if relationship is None or relationship.room_id != room_id:
                 raise DomainError("ontology relationship not found in room")

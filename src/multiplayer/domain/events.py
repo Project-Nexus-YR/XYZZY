@@ -20,6 +20,8 @@ class EventType(StrEnum):
     USER_JOINED_ROOM = "user.joined_room"
     USER_INVITED_ROOM = "user.invited_room"
     USER_LEFT_ROOM = "user.left_room"
+    USER_ROLE_CHANGED = "user.role_changed"
+    USER_REMOVED_ROOM = "user.removed_room"
     AGENT_JOINED_ROOM = "agent.joined_room"
     AGENT_LEFT_ROOM = "agent.left_room"
 

@@ -9,7 +9,6 @@ from typing import Annotated, Any, TypeVar
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 
-from ..domain.events import EventType
 from ..domain.models import (
     AgentInstance,
     Approval,
@@ -223,6 +222,10 @@ class BootstrapWorkspaceRequest(BaseModel):
 class InviteRoomMemberRequest(BaseModel):
     user_id: str
     role: str = "viewer"
+
+
+class UpdateRoomMemberRequest(BaseModel):
+    role: str
 
 
 class SpawnAgentRequest(BaseModel):
@@ -550,8 +553,11 @@ async def leave_room(
     principal: CurrentUser,
 ) -> dict[str, str]:
     svc = _svc_or_404()
-    await _require_room(room_id, principal, RoomCapability.MUTATE)
-    await svc.leave_room(room_id, principal.user_id)
+    await _require_room(room_id, principal, RoomCapability.READ)
+    try:
+        await svc.leave_room(room_id, principal.user_id)
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"status": "left"}
 
 
@@ -562,7 +568,7 @@ async def invite_room_member(
     principal: CurrentUser,
 ) -> dict[str, str]:
     svc = _svc_or_404()
-    await _require_room(room_id, principal, RoomCapability.ADMINISTER)
+    await _require_room(room_id, principal, RoomCapability.MUTATE)
     try:
         member = await svc.invite_room_member(room_id, req.user_id, req.role, principal.user_id)
     except DomainError as exc:
@@ -579,6 +585,37 @@ async def list_room_members(
     await _require_room(room_id, principal, RoomCapability.READ)
     members = await svc.get_room_members(room_id)
     return [{"user_id": m.user_id, "role": m.role} for m in members]
+
+
+@router.patch("/rooms/{room_id}/members/{user_id}")
+async def update_room_member(
+    room_id: str,
+    user_id: str,
+    req: UpdateRoomMemberRequest,
+    principal: CurrentUser,
+) -> dict[str, str]:
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.ADMINISTER)
+    try:
+        member = await svc.update_room_member_role(room_id, user_id, req.role, principal.user_id)
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"user_id": member.user_id, "role": member.role}
+
+
+@router.delete("/rooms/{room_id}/members/{user_id}")
+async def remove_room_member(
+    room_id: str,
+    user_id: str,
+    principal: CurrentUser,
+) -> dict[str, str]:
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.ADMINISTER)
+    try:
+        await svc.remove_room_member(room_id, user_id, principal.user_id)
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"status": "removed"}
 
 
 # ── Branches ────────────────────────────────────────────────────────────────
@@ -740,6 +777,8 @@ async def spawn_agent(
             req.system_prompt,
             req.model_provider,
             req.model_name,
+            requested_by=principal.user_id,
+            require_member=True,
         )
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
@@ -981,6 +1020,7 @@ async def review_ontology_entity(
             action,
             principal.user_id,
             req.reason,
+            require_member=True,
             corrected_label=req.corrected_label,
             corrected_properties=req.corrected_properties,
             corrected_confidence=req.corrected_confidence,
@@ -1019,6 +1059,7 @@ async def review_ontology_relationship(
             action,
             principal.user_id,
             req.reason,
+            require_member=True,
             corrected_kind=corrected_kind,
             corrected_confidence=req.corrected_confidence,
         )
@@ -1134,7 +1175,7 @@ async def cancel_execution(
     svc = _svc_or_404()
     await _authorized_execution(execution_id, principal, RoomCapability.MUTATE)
     try:
-        ok = await svc.cancel_execution(execution_id, principal.user_id)
+        ok = await svc.cancel_execution(execution_id, principal.user_id, require_member=True)
     except DomainError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"status": "cancelled" if ok else "failed"}
@@ -1147,19 +1188,13 @@ async def intervene_execution(
     principal: CurrentUser,
 ) -> dict[str, str]:
     svc = _svc_or_404()
-    execution = await _authorized_execution(execution_id, principal, RoomCapability.MUTATE)
+    await _authorized_execution(execution_id, principal, RoomCapability.MUTATE)
     try:
-        agent = await svc.get_agent(execution.agent_id)
-    except DomainError:
-        raise HTTPException(404, "agent not found") from None
-    await svc.nexus.add_execution_intervention(execution_id, req.instruction)
-    await svc._append_room_event(
-        agent.room_id,
-        EventType.HUMAN_REDIRECTED_AGENT,
-        {"agent_id": execution.agent_id, "instruction": req.instruction},
-        principal.user_id,
-        "user",
-    )
+        await svc.intervene_execution(
+            execution_id, principal.user_id, req.instruction, require_member=True
+        )
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"status": "intervention_recorded"}
 
 
@@ -1175,7 +1210,7 @@ async def create_task(
     priority = _safe_enum(req.priority, TaskPriority, "priority")
     try:
         task = await svc.create_task(
-            room_id, req.title, req.description, priority, principal.user_id
+            room_id, req.title, req.description, priority, principal.user_id, require_member=True
         )
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
@@ -1214,7 +1249,9 @@ async def assign_task(
     if agent.room_id != task.room_id:
         raise HTTPException(400, "agent is not in task room")
     try:
-        await svc.assign_task(task_id, req.agent_id)
+        await svc.assign_task(
+            task_id, req.agent_id, requested_by=principal.user_id, require_member=True
+        )
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"status": "assigned"}
@@ -1233,7 +1270,12 @@ async def delegate_task(
         raise HTTPException(400, "agent is not in task room")
     try:
         child = await svc.delegate_task(
-            task_id, principal.user_id, req.to_agent_id, req.description
+            task_id,
+            principal.user_id,
+            req.to_agent_id,
+            req.description,
+            requested_by=principal.user_id,
+            require_member=True,
         )
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
@@ -1248,7 +1290,7 @@ async def complete_task(
     svc = _svc_or_404()
     await _authorized_task(task_id, principal, RoomCapability.MUTATE)
     try:
-        await svc.complete_task(task_id)
+        await svc.complete_task(task_id, requested_by=principal.user_id, require_member=True)
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"status": "completed"}
@@ -1262,7 +1304,7 @@ async def cancel_task(
     svc = _svc_or_404()
     await _authorized_task(task_id, principal, RoomCapability.MUTATE)
     try:
-        await svc.cancel_task(task_id)
+        await svc.cancel_task(task_id, requested_by=principal.user_id, require_member=True)
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"status": "cancelled"}
@@ -1331,7 +1373,13 @@ async def create_artifact(
     artifact_type = _safe_enum(req.artifact_type, ArtifactType, "artifact_type")
     try:
         art = await svc.create_artifact(
-            room_id, req.name, artifact_type, req.description, principal.user_id, req.content
+            room_id,
+            req.name,
+            artifact_type,
+            req.description,
+            principal.user_id,
+            req.content,
+            require_member=True,
         )
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
@@ -1366,7 +1414,9 @@ async def update_artifact(
     svc = _svc_or_404()
     await _authorized_artifact(artifact_id, principal, RoomCapability.MUTATE)
     try:
-        ver = await svc.update_artifact(artifact_id, req.content, principal.user_id)
+        ver = await svc.update_artifact(
+            artifact_id, req.content, principal.user_id, require_member=True
+        )
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"version_id": ver.version_id, "version_number": ver.version_number}
@@ -1454,7 +1504,7 @@ async def create_decision(
     await _require_room(room_id, principal, RoomCapability.MUTATE)
     try:
         dec = await svc.create_decision(
-            room_id, req.title, req.content, req.reason, principal.user_id
+            room_id, req.title, req.content, req.reason, principal.user_id, require_member=True
         )
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
@@ -1493,7 +1543,14 @@ async def create_memory(
     scope = _safe_enum(req.scope, MemoryScope, "scope")
     try:
         mem = await svc.create_memory(
-            room_id, None, None, scope, req.content, req.memory_type, principal.user_id
+            room_id,
+            None,
+            None,
+            scope,
+            req.content,
+            req.memory_type,
+            principal.user_id,
+            require_member=True,
         )
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
@@ -1545,7 +1602,14 @@ async def request_approval(
     ):
         raise HTTPException(400, "execution and agent must belong to the approval room")
     try:
-        approval = await svc.request_approval(room_id, execution_id, agent_id, action)
+        approval = await svc.request_approval(
+            room_id,
+            execution_id,
+            agent_id,
+            action,
+            requested_by=principal.user_id,
+            require_member=True,
+        )
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"approval_id": approval.approval_id, "status": approval.status.value}
@@ -1579,7 +1643,7 @@ async def approve_action(
     svc = _svc_or_404()
     await _authorized_approval(approval_id, principal, RoomCapability.ADMINISTER)
     try:
-        await svc.approve_action(approval_id, principal.user_id, req.comment)
+        await svc.approve_action(approval_id, principal.user_id, req.comment, require_member=True)
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"status": "approved"}
@@ -1594,7 +1658,7 @@ async def reject_action(
     svc = _svc_or_404()
     await _authorized_approval(approval_id, principal, RoomCapability.ADMINISTER)
     try:
-        await svc.reject_action(approval_id, principal.user_id, req.comment)
+        await svc.reject_action(approval_id, principal.user_id, req.comment, require_member=True)
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"status": "rejected"}
@@ -1610,7 +1674,7 @@ async def interrupt_agent(
     svc = _svc_or_404()
     await _authorized_agent(agent_id, principal, RoomCapability.MUTATE)
     try:
-        await svc.interrupt_agent(agent_id, principal.user_id, req.reason)
+        await svc.interrupt_agent(agent_id, principal.user_id, req.reason, require_member=True)
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"status": "interrupted"}
@@ -1623,7 +1687,7 @@ async def redirect_agent(
     svc = _svc_or_404()
     await _authorized_agent(agent_id, principal, RoomCapability.MUTATE)
     try:
-        await svc.redirect_agent(agent_id, principal.user_id, req.instruction)
+        await svc.redirect_agent(agent_id, principal.user_id, req.instruction, require_member=True)
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"status": "redirected"}

@@ -25,6 +25,11 @@ _ROLE_CAPABILITIES: dict[str, frozenset[RoomCapability]] = {
 }
 
 
+def capabilities_for_role(role: str | None) -> frozenset[RoomCapability]:
+    """What a durable room role grants; a missing membership grants nothing."""
+    return _ROLE_CAPABILITIES.get(role or "", frozenset())
+
+
 class RoomPolicy:
     """Authorize effective room capabilities from durable membership only."""
 

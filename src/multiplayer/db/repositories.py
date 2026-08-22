@@ -525,44 +525,6 @@ class RoomMemberRepo:
         )
         await self.db.commit()
 
-    async def add_with_event(self, member: RoomMember, event: RoomEvent) -> RoomEvent:
-        """Atomically add a member and append the canonical invitation event."""
-        async with self.db.transaction():
-            await self.db.execute(
-                "INSERT INTO room_members(room_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)",
-                (
-                    member.room_id,
-                    member.user_id,
-                    member.role,
-                    serialize_datetime(member.joined_at),
-                ),
-            )
-            cursor = await self.db.execute(
-                "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
-                "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
-                (event.room_id,),
-            )
-            row = await cursor.fetchone()
-            await cursor.close()
-            persisted = replace(event, sequence=int(row["seq"]) if row else 1)
-            await self.db.execute(
-                "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
-                "actor_id, actor_type, timestamp, schema_version) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    persisted.event_id,
-                    persisted.room_id,
-                    persisted.sequence,
-                    persisted.event_type.value,
-                    json.dumps(persisted.payload, default=str),
-                    persisted.actor_id,
-                    persisted.actor_type,
-                    serialize_datetime(persisted.timestamp),
-                    persisted.schema_version,
-                ),
-            )
-        return persisted
-
     async def get(self, room_id: str, user_id: str) -> RoomMember | None:
         row = await self.db.fetch_one(
             "SELECT * FROM room_members WHERE room_id = ? AND user_id = ?",
@@ -578,6 +540,13 @@ class RoomMemberRepo:
                 joined_at=datetime.fromisoformat(row["joined_at"]),
             )
         )
+
+    async def update_role(self, room_id: str, user_id: str, role: str) -> None:
+        await self.db.execute(
+            "UPDATE room_members SET role = ? WHERE room_id = ? AND user_id = ?",
+            (role, room_id, user_id),
+        )
+        await self.db.commit()
 
     async def remove(self, room_id: str, user_id: str) -> None:
         await self.db.execute(
@@ -1042,30 +1011,44 @@ class ExecutionRepo:
         error: str,
         events: list[RoomEvent],
     ) -> list[RoomEvent]:
+        async with self.db.transaction():
+            return await self.terminalize_without_output_in_transaction(
+                execution, status, error, events
+            )
+
+    async def terminalize_without_output_in_transaction(
+        self,
+        execution: Execution,
+        status: ExecutionStatus,
+        error: str,
+        events: list[RoomEvent],
+    ) -> list[RoomEvent]:
+        """Body of :meth:`terminalize_without_output` for a caller that already owns the
+        write transaction, so a membership re-check can share that same transaction."""
         if status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             raise ValueError("terminal execution status must be FAILED or CANCELLED")
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("terminalize_without_output_in_transaction requires ownership")
         persisted_events: list[RoomEvent] = []
-        async with self.db.transaction():
-            completed_at = serialize_datetime(utcnow())
-            await self.db.execute(
-                "UPDATE executions SET status = ?, error = ?, completed_at = ? "
-                "WHERE execution_id = ?",
-                (status.value, error, completed_at, execution.execution_id),
+        completed_at = serialize_datetime(utcnow())
+        await self.db.execute(
+            "UPDATE executions SET status = ?, error = ?, completed_at = ? WHERE execution_id = ?",
+            (status.value, error, completed_at, execution.execution_id),
+        )
+        await self.db.execute(
+            "UPDATE sessions SET status = ?, ended_at = ? WHERE session_id = ?",
+            (SessionStatus.FAILED.value, completed_at, execution.session_id),
+        )
+        session = await SessionRepo(self.db).get(execution.session_id)
+        if session is None:
+            raise ValueError("execution session not found")
+        branch_events = await _finish_managed_branch_if_terminal(
+            self.db, execution.branch_id, session.room_id, execution.agent_id
+        )
+        for event in [*events, *branch_events]:
+            persisted_events.append(
+                await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
             )
-            await self.db.execute(
-                "UPDATE sessions SET status = ?, ended_at = ? WHERE session_id = ?",
-                (SessionStatus.FAILED.value, completed_at, execution.session_id),
-            )
-            session = await SessionRepo(self.db).get(execution.session_id)
-            if session is None:
-                raise ValueError("execution session not found")
-            branch_events = await _finish_managed_branch_if_terminal(
-                self.db, execution.branch_id, session.room_id, execution.agent_id
-            )
-            for event in [*events, *branch_events]:
-                persisted_events.append(
-                    await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
-                )
         return persisted_events
 
     async def list_by_session(self, session_id: str) -> list[Execution]:
@@ -1277,45 +1260,52 @@ class OutputSelectionRepo:
 
     async def upsert_with_event(self, selection: OutputSelection, event: RoomEvent) -> RoomEvent:
         async with self.db.transaction():
-            await self.db.execute(
-                "INSERT INTO output_selections(room_id, output_id, disposition, decided_by, "
-                "updated_at, branch_id) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(room_id, output_id) DO UPDATE SET "
-                "disposition = excluded.disposition, decided_by = excluded.decided_by, "
-                "updated_at = excluded.updated_at",
-                (
-                    selection.room_id,
-                    selection.output_id,
-                    selection.disposition.value,
-                    selection.decided_by,
-                    serialize_datetime(selection.updated_at),
-                    selection.branch_id,
-                ),
-            )
-            cursor = await self.db.execute(
-                "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
-                "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
-                (event.room_id,),
-            )
-            row = await cursor.fetchone()
-            await cursor.close()
-            persisted = replace(event, sequence=int(row["seq"]) if row else 1)
-            await self.db.execute(
-                "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
-                "actor_id, actor_type, timestamp, schema_version) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    persisted.event_id,
-                    persisted.room_id,
-                    persisted.sequence,
-                    persisted.event_type.value,
-                    json.dumps(persisted.payload, default=str),
-                    persisted.actor_id,
-                    persisted.actor_type,
-                    serialize_datetime(persisted.timestamp),
-                    persisted.schema_version,
-                ),
-            )
+            return await self.upsert_with_event_in_transaction(selection, event)
+
+    async def upsert_with_event_in_transaction(
+        self, selection: OutputSelection, event: RoomEvent
+    ) -> RoomEvent:
+        """The body of upsert_with_event for a caller that owns the transaction."""
+        await self.db.execute(
+            "INSERT INTO output_selections(room_id, output_id, disposition, decided_by, "
+            "updated_at, branch_id) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(room_id, output_id) DO UPDATE SET "
+            "disposition = excluded.disposition, decided_by = excluded.decided_by, "
+            "updated_at = excluded.updated_at",
+            (
+                selection.room_id,
+                selection.output_id,
+                selection.disposition.value,
+                selection.decided_by,
+                serialize_datetime(selection.updated_at),
+                selection.branch_id,
+            ),
+        )
+        cursor = await self.db.execute(
+            "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
+            "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
+            (event.room_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        persisted = replace(event, sequence=int(row["seq"]) if row else 1)
+        await self.db.execute(
+            "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
+            "actor_id, actor_type, timestamp, schema_version) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                persisted.event_id,
+                persisted.room_id,
+                persisted.sequence,
+                persisted.event_type.value,
+                json.dumps(persisted.payload, default=str),
+                persisted.actor_id,
+                persisted.actor_type,
+                serialize_datetime(persisted.timestamp),
+                persisted.schema_version,
+            ),
+        )
+
         return persisted
 
     async def list_by_room(self, room_id: str) -> list[OutputSelection]:
@@ -1863,26 +1853,30 @@ class ArtifactRepo:
     async def create_version(self, version: ArtifactVersion) -> ArtifactVersion:
         """Insert version and atomically update artifact's current_version in one transaction."""
         async with self.db.transaction():
-            await self.db.execute(
-                "INSERT INTO artifact_versions(version_id, artifact_id, version_number, content, "
-                "content_hash, provenance_hash, branch_synthesis_id, created_by, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    version.version_id,
-                    version.artifact_id,
-                    version.version_number,
-                    version.content,
-                    version.content_hash,
-                    version.provenance_hash,
-                    version.branch_synthesis_id,
-                    version.created_by,
-                    serialize_datetime(version.created_at),
-                ),
-            )
-            await self.db.execute(
-                "UPDATE artifacts SET current_version = ?, updated_at = ? WHERE artifact_id = ?",
-                (version.version_number, utcnow().isoformat(), version.artifact_id),
-            )
+            return await self.create_version_in_transaction(version)
+
+    async def create_version_in_transaction(self, version: ArtifactVersion) -> ArtifactVersion:
+        """The body of create_version for a caller that already owns the transaction."""
+        await self.db.execute(
+            "INSERT INTO artifact_versions(version_id, artifact_id, version_number, content, "
+            "content_hash, provenance_hash, branch_synthesis_id, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                version.version_id,
+                version.artifact_id,
+                version.version_number,
+                version.content,
+                version.content_hash,
+                version.provenance_hash,
+                version.branch_synthesis_id,
+                version.created_by,
+                serialize_datetime(version.created_at),
+            ),
+        )
+        await self.db.execute(
+            "UPDATE artifacts SET current_version = ?, updated_at = ? WHERE artifact_id = ?",
+            (version.version_number, utcnow().isoformat(), version.artifact_id),
+        )
         return version
 
     async def list_versions(self, artifact_id: str) -> list[ArtifactVersion]:
@@ -1976,129 +1970,156 @@ class ArtifactRepo:
         synthesis: BranchSynthesis | None = None,
     ) -> list[RoomEvent]:
         """Atomically publish a version, complete provenance graph, and events."""
-        persisted_events: list[RoomEvent] = []
         async with self.db.transaction():
-            if create_artifact:
-                await self.db.execute(
-                    "INSERT INTO artifacts(artifact_id, room_id, name, artifact_type, description, "
-                    "current_version, created_by, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
-                    (
-                        artifact.artifact_id,
-                        artifact.room_id,
-                        artifact.name,
-                        artifact.artifact_type.value,
-                        artifact.description,
-                        artifact.created_by,
-                        serialize_datetime(artifact.created_at),
-                        serialize_datetime(artifact.updated_at),
-                    ),
-                )
+            return await self.create_synthesis_in_transaction(
+                artifact,
+                version,
+                claims_and_sources,
+                ontology_entities,
+                ontology_relationships,
+                events,
+                create_artifact=create_artifact,
+                synthesis=synthesis,
+            )
+
+    async def create_synthesis_in_transaction(
+        self,
+        artifact: Artifact,
+        version: ArtifactVersion,
+        claims_and_sources: list[tuple[ArtifactClaim, ClaimSource]],
+        ontology_entities: list[OntologyEntity],
+        ontology_relationships: list[OntologyRelationship],
+        events: list[RoomEvent],
+        *,
+        create_artifact: bool,
+        synthesis: BranchSynthesis | None = None,
+    ) -> list[RoomEvent]:
+        """Body of :meth:`create_synthesis` for a caller that already owns the write
+        transaction, so a membership re-check can share that same transaction."""
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("create_synthesis_in_transaction requires transaction ownership")
+        persisted_events: list[RoomEvent] = []
+        if create_artifact:
             await self.db.execute(
-                "INSERT INTO artifact_versions(version_id, artifact_id, version_number, content, "
-                "content_hash, provenance_hash, branch_synthesis_id, created_by, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO artifacts(artifact_id, room_id, name, artifact_type, description, "
+                "current_version, created_by, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)",
                 (
-                    version.version_id,
-                    version.artifact_id,
-                    version.version_number,
-                    version.content,
-                    version.content_hash,
-                    version.provenance_hash,
-                    version.branch_synthesis_id,
-                    version.created_by,
-                    serialize_datetime(version.created_at),
+                    artifact.artifact_id,
+                    artifact.room_id,
+                    artifact.name,
+                    artifact.artifact_type.value,
+                    artifact.description,
+                    artifact.created_by,
+                    serialize_datetime(artifact.created_at),
+                    serialize_datetime(artifact.updated_at),
                 ),
             )
-            inserted_claim_ids: set[str] = set()
-            for claim, source in claims_and_sources:
-                if claim.claim_id not in inserted_claim_ids:
-                    await self.db.execute(
-                        "INSERT INTO artifact_claims(claim_id, version_id, ordinal, text, "
-                        "is_ai_derived, confidence) VALUES (?, ?, ?, ?, ?, ?)",
-                        (
-                            claim.claim_id,
-                            claim.version_id,
-                            claim.ordinal,
-                            claim.text,
-                            int(claim.is_ai_derived),
-                            claim.confidence,
-                        ),
-                    )
-                    inserted_claim_ids.add(claim.claim_id)
+        await self.db.execute(
+            "INSERT INTO artifact_versions(version_id, artifact_id, version_number, content, "
+            "content_hash, provenance_hash, branch_synthesis_id, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                version.version_id,
+                version.artifact_id,
+                version.version_number,
+                version.content,
+                version.content_hash,
+                version.provenance_hash,
+                version.branch_synthesis_id,
+                version.created_by,
+                serialize_datetime(version.created_at),
+            ),
+        )
+        inserted_claim_ids: set[str] = set()
+        for claim, source in claims_and_sources:
+            if claim.claim_id not in inserted_claim_ids:
                 await self.db.execute(
-                    "INSERT INTO artifact_claim_sources(claim_id, output_id, evidence, agent_id, "
-                    "execution_id, source_prompt, provider_input, provider_name, provider_model, "
-                    "provider_response_id, provider_interventions, provider_evidence) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO artifact_claims(claim_id, version_id, ordinal, text, "
+                    "is_ai_derived, confidence) VALUES (?, ?, ?, ?, ?, ?)",
                     (
-                        source.claim_id,
-                        source.output_id,
-                        source.evidence,
-                        source.agent_id,
-                        source.execution_id,
-                        source.source_prompt,
-                        source.provider_input,
-                        source.provider_name,
-                        source.provider_model,
-                        source.provider_response_id,
-                        json.dumps(source.provider_interventions),
-                        source.provider_evidence,
+                        claim.claim_id,
+                        claim.version_id,
+                        claim.ordinal,
+                        claim.text,
+                        int(claim.is_ai_derived),
+                        claim.confidence,
                     ),
                 )
+                inserted_claim_ids.add(claim.claim_id)
             await self.db.execute(
-                "UPDATE artifacts SET current_version = ?, updated_at = ? WHERE artifact_id = ?",
-                (version.version_number, serialize_datetime(utcnow()), artifact.artifact_id),
+                "INSERT INTO artifact_claim_sources(claim_id, output_id, evidence, agent_id, "
+                "execution_id, source_prompt, provider_input, provider_name, provider_model, "
+                "provider_response_id, provider_interventions, provider_evidence) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    source.claim_id,
+                    source.output_id,
+                    source.evidence,
+                    source.agent_id,
+                    source.execution_id,
+                    source.source_prompt,
+                    source.provider_input,
+                    source.provider_name,
+                    source.provider_model,
+                    source.provider_response_id,
+                    json.dumps(source.provider_interventions),
+                    source.provider_evidence,
+                ),
             )
-            if synthesis is not None:
-                await self.db.execute(
-                    "UPDATE branch_syntheses SET status = ?, provider_input = ?, "
-                    "provider_name = ?, provider_model = ?, provider_response_id = ?, "
-                    "provider_evidence = ?, simulated = ?, content = ?, "
-                    "artifact_version_id = ?, completed_at = ? WHERE synthesis_id = ?",
-                    (
-                        BranchSynthesisStatus.COMPLETED.value,
-                        synthesis.provider_input,
-                        synthesis.provider_name,
-                        synthesis.provider_model,
-                        synthesis.provider_response_id,
-                        synthesis.provider_evidence,
-                        int(synthesis.simulated),
-                        synthesis.content,
-                        version.version_id,
-                        serialize_datetime(synthesis.completed_at or utcnow()),
-                        synthesis.synthesis_id,
-                    ),
-                )
-            await OntologyRepo(self.db).materialize_in_transaction(
-                ontology_entities, ontology_relationships
+        await self.db.execute(
+            "UPDATE artifacts SET current_version = ?, updated_at = ? WHERE artifact_id = ?",
+            (version.version_number, serialize_datetime(utcnow()), artifact.artifact_id),
+        )
+        if synthesis is not None:
+            await self.db.execute(
+                "UPDATE branch_syntheses SET status = ?, provider_input = ?, "
+                "provider_name = ?, provider_model = ?, provider_response_id = ?, "
+                "provider_evidence = ?, simulated = ?, content = ?, "
+                "artifact_version_id = ?, completed_at = ? WHERE synthesis_id = ?",
+                (
+                    BranchSynthesisStatus.COMPLETED.value,
+                    synthesis.provider_input,
+                    synthesis.provider_name,
+                    synthesis.provider_model,
+                    synthesis.provider_response_id,
+                    synthesis.provider_evidence,
+                    int(synthesis.simulated),
+                    synthesis.content,
+                    version.version_id,
+                    serialize_datetime(synthesis.completed_at or utcnow()),
+                    synthesis.synthesis_id,
+                ),
             )
-            for event in events:
-                cursor = await self.db.execute(
-                    "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
-                    "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
-                    (event.room_id,),
-                )
-                row = await cursor.fetchone()
-                await cursor.close()
-                persisted = replace(event, sequence=int(row["seq"]) if row else 1)
-                await self.db.execute(
-                    "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
-                    "actor_id, actor_type, timestamp, schema_version) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        persisted.event_id,
-                        persisted.room_id,
-                        persisted.sequence,
-                        persisted.event_type.value,
-                        json.dumps(persisted.payload, default=str),
-                        persisted.actor_id,
-                        persisted.actor_type,
-                        serialize_datetime(persisted.timestamp),
-                        persisted.schema_version,
-                    ),
-                )
-                persisted_events.append(persisted)
+        await OntologyRepo(self.db).materialize_in_transaction(
+            ontology_entities, ontology_relationships
+        )
+        for event in events:
+            cursor = await self.db.execute(
+                "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
+                "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
+                (event.room_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            persisted = replace(event, sequence=int(row["seq"]) if row else 1)
+            await self.db.execute(
+                "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
+                "actor_id, actor_type, timestamp, schema_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    persisted.event_id,
+                    persisted.room_id,
+                    persisted.sequence,
+                    persisted.event_type.value,
+                    json.dumps(persisted.payload, default=str),
+                    persisted.actor_id,
+                    persisted.actor_type,
+                    serialize_datetime(persisted.timestamp),
+                    persisted.schema_version,
+                ),
+            )
+            persisted_events.append(persisted)
         return persisted_events
 
     async def get_version_provenance(self, version_id: str) -> list[dict[str, Any]]:

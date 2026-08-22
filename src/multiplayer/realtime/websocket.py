@@ -101,6 +101,10 @@ async def websocket_endpoint(
         while True:
             try:
                 event = await asyncio.wait_for(sub.queue.get(), timeout=30.0)
+                if event.get("type") == "access_revoked":
+                    # Membership was removed; the hub already dropped the subscription.
+                    await websocket.close(code=4403, reason="room access revoked")
+                    return
                 await websocket.send_json(event)
             except TimeoutError:
                 try:

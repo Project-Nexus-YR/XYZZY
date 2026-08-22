@@ -10,16 +10,16 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.routes import router, set_authenticator, set_service
 from .db.connection import Database
 from .realtime.hub import RealtimeHub
 from .realtime.websocket import websocket_endpoint
-from .security import TokenAuthenticator
+from .security import AuthorizationError, TokenAuthenticator
 from .services.service import MultiplayerService
 
 log = logging.getLogger(__name__)
@@ -32,7 +32,6 @@ def create_app(
 ) -> FastAPI:
     db = Database(db_path)
     hub = RealtimeHub()
-    svc = MultiplayerService(db, hub)
     if auth_tokens is None:
         raw_tokens = os.environ.get("MULTIAI_AUTH_TOKENS", "{}")
         try:
@@ -43,6 +42,7 @@ def create_app(
             raise RuntimeError("MULTIAI_AUTH_TOKENS must be a JSON object")
         auth_tokens = {str(token): str(user_id) for token, user_id in configured_tokens.items()}
     authenticator = TokenAuthenticator(auth_tokens)
+    svc = MultiplayerService(db, hub, known_users=frozenset(auth_tokens.values()))
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -71,6 +71,11 @@ def create_app(
     )
 
     app.include_router(router)
+
+    @app.exception_handler(AuthorizationError)
+    async def forbidden(_request: Request, exc: AuthorizationError) -> JSONResponse:
+        # Raised inside a write transaction when membership changed under the request.
+        return JSONResponse(status_code=403, content={"detail": str(exc)})
 
     @app.websocket("/ws")
     async def ws_route(websocket: WebSocket) -> None:

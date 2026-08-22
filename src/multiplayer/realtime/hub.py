@@ -51,6 +51,24 @@ class RealtimeHub:
             if sub:
                 self._room_subscriptions[sub.room_id].discard(subscription_id)
 
+    async def revoke_room_access(self, user_id: str, room_id: str) -> int:
+        """Drop a user's live subscriptions to a room and tell each socket to close."""
+        async with self._lock:
+            revoked = [
+                sub
+                for sub in self._subscriptions.values()
+                if sub.user_id == user_id and sub.room_id == room_id
+            ]
+            for sub in revoked:
+                self._subscriptions.pop(sub.subscription_id, None)
+                self._room_subscriptions[room_id].discard(sub.subscription_id)
+        for sub in revoked:
+            try:
+                sub.queue.put_nowait({"type": "access_revoked", "room_id": room_id})
+            except asyncio.QueueFull:
+                log.debug("Queue full for revoked subscription %s", sub.subscription_id)
+        return len(revoked)
+
     async def broadcast_to_room(self, room_id: str, event: dict[str, Any]) -> list[str]:
         """Send event to all subscribers of a room. Returns list of delivered subscription IDs."""
         delivered: list[str] = []
