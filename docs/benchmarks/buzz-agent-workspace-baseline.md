@@ -30,7 +30,10 @@ is documented only in platform announcements and press).
 
 ## What Buzz does that MultiAI does not
 
-Every item below is a capability MultiAI lacks entirely as of commit `c7836ab`.
+Every item below is a capability MultiAI lacked entirely as of commit `c7836ab`, which is
+when this bar was set. The table is deliberately not updated as work lands: it records the
+starting position the gauntlet was run against, not today's status. For what has since been
+built, read the log from `c382c2a` onward.
 
 | Buzz | Where |
 |---|---|
