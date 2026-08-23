@@ -6,6 +6,7 @@ the durable read cursor, the sequence cursor on the room listing, and search.
 
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.parse import quote
 
 from fastapi.testclient import TestClient
@@ -238,6 +239,92 @@ def test_a_mention_records_the_target_and_only_invokes_when_asked() -> None:
             json={"content": "I am the agent", "role": "AGENT"},
         )
         assert spoofed.status_code == 403
+
+
+def _channel_pane(client: TestClient, room_id: str) -> list[dict[str, object]]:
+    """What the channel pane draws: the room snapshot's own message rows."""
+    state = client.get(f"/api/v1/rooms/{room_id}/state", headers=OWNER_HEADERS).json()
+    return list(state["messages"])
+
+
+def test_an_answer_is_attributed_in_the_thread_and_broadcast_where_it_was_asked() -> None:
+    """The thread rows are the only place a thread-scoped answer is read.
+
+    An answer inherits the mention's broadcast, which is the rule that puts it where
+    the question was: a mention typed in the channel broadcasts, so its answer is in
+    the channel log too; a mention typed inside a thread does not, so its answer
+    stays in the thread. Either way the row carries who spoke, on what trigger, at
+    whose asking, and which output it is the surface of.
+    """
+    with _app() as client:
+        seeded = _seed(client)
+        room_id, agent_id = seeded["room_id"], seeded["agent_id"]
+
+        asked_aloud = client.post(
+            f"/api/v1/rooms/{room_id}/messages",
+            headers=OWNER_HEADERS,
+            json={"content": "@Architect assess it now", "invoke_mentioned_agents": True},
+        ).json()
+        thread = client.get(
+            f"/api/v1/messages/{asked_aloud['message_id']}/thread", headers=OWNER_HEADERS
+        ).json()
+        answer = next(e for e in thread if e["parent_message_id"] == asked_aloud["message_id"])
+
+        assert answer["role"] == "AGENT"
+        assert answer["sender_id"] == agent_id
+        assert answer["metadata"]["triggered_by"] == "MENTION"
+        assert answer["metadata"]["requested_by"] == "user-a"
+        assert answer["metadata"]["output_id"]
+
+        # Asked in the channel, so answered in the channel as well as in the thread.
+        assert answer["broadcast_to_room"] is True
+        channel = _channel_pane(client, room_id)
+        assert answer["message_id"] in [m["message_id"] for m in channel]
+
+        asked_quietly = client.post(
+            f"/api/v1/messages/{asked_aloud['message_id']}/replies",
+            headers=OWNER_HEADERS,
+            json={"content": "@Architect once more please", "invoke_mentioned_agents": True},
+        ).json()
+        assert asked_quietly["broadcast_to_room"] is False
+        thread = client.get(
+            f"/api/v1/messages/{asked_quietly['message_id']}/thread", headers=OWNER_HEADERS
+        ).json()
+        quiet = next(e for e in thread if e["parent_message_id"] == asked_quietly["message_id"])
+
+        # Asked in the thread, so answered only there — with the same attribution.
+        assert quiet["role"] == "AGENT"
+        assert quiet["sender_id"] == agent_id
+        assert quiet["metadata"]["triggered_by"] == "MENTION"
+        assert quiet["broadcast_to_room"] is False
+        channel = _channel_pane(client, room_id)
+        assert quiet["message_id"] not in [m["message_id"] for m in channel]
+        # The channel still says the thread moved, so nobody has to be watching it.
+        root = next(m for m in channel if m["message_id"] == asked_aloud["message_id"])
+        assert root["reply_count"] >= 3
+        assert root["last_reply_at"]
+
+
+def test_both_panes_attribute_an_agent_answer_through_one_renderer() -> None:
+    """A pane with a template of its own is a pane that drifts, and the thread one had.
+
+    It rendered an agent answer as the bare sender id with no trigger, no invoker
+    and no way through to the output, while the channel pane beside it showed all
+    four from the same fields.
+    """
+    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
+
+    assert ui.count("function attribution(") == 1
+    assert "msg.innerHTML = `${attribution(m)}" in ui
+    assert "${attribution(entry," in ui
+    # Both panes reach the roster name and the provenance line only through it, so
+    # neither can lose a field the other keeps.
+    assert ui.count("displayNameFor(") == 2
+    assert ui.count("agentProvenance(") == 2
+    assert "entry.sender_id === userId ? userName : entry.sender_id" not in ui
+    # And the output record opens beside whichever row was clicked, thread included.
+    assert "openAgentOutput(this.dataset.outputId, this)" in ui
+    assert "trigger.closest('.msg, .thread-item')" in ui
 
 
 def test_a_search_query_of_only_punctuation_is_rejected() -> None:

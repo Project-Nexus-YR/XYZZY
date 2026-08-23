@@ -15,7 +15,7 @@ import pytest
 
 import multiplayer.nexus_bridge.agent_bridge as bridge_module
 from multiplayer.db.connection import Database
-from multiplayer.domain.models import BranchMode, DomainError, MessageRole
+from multiplayer.domain.models import BranchMode, DomainError, MessageRole, ParticipantType
 from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
 from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.security.capabilities import (
@@ -228,6 +228,77 @@ async def test_a_per_member_grant_narrows_what_the_initiator_can_lend(
 
     assert result["tool_request"]["status"] == "REJECTED"
     assert result["tool_request"]["effective"] == ["analysis"]
+
+
+# ── Agent reactions ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_an_agent_reacts_through_the_gateway_under_its_own_name(
+    service: MultiplayerService,
+) -> None:
+    """The whole of the agent-reaction path: a run asks, the gateway decides, it runs."""
+    svc = service
+    room_id, _ = await _room(svc)
+    message = await svc.send_message(room_id, MessageRole.HUMAN, "owner", "Ship it")
+    provider = _ToolRequestingProvider(
+        "message.react", {"message_id": message.message_id, "emoji": "\U0001f440"}
+    )
+    result = await _run_tool_step(svc, room_id, "Synthesizer", provider)
+
+    assert "message.react" in provider.offered_schemas[0]["properties"]["tool"]["enum"]
+    request = result["tool_request"]
+    assert request["status"] == "EXECUTED", request
+    assert request["required_capability"] == "writing"
+    assert request["approval_id"] is None
+    assert request["result"] == {"message_id": message.message_id, "emoji": "\U0001f440"}
+
+    agent_id = (await svc.list_room_agents(room_id))[0].agent_id
+    live = await svc.list_reactions(message.message_id)
+    assert [(r.actor_id, r.actor_type) for r in live] == [(agent_id, ParticipantType.AGENT)]
+
+    types = [e.event_type.value for e in await svc.get_room_events(room_id)]
+    assert "tool.call_completed" in types
+    assert "message.reaction_added" in types
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_may_not_write_is_never_offered_the_reaction(
+    service: MultiplayerService,
+) -> None:
+    """A reaction is a durable write, so a read-only run does not get one for free."""
+    svc = service
+    room_id, _ = await _room(svc)
+    message = await svc.send_message(room_id, MessageRole.HUMAN, "owner", "Ship it")
+    provider = _ToolRequestingProvider(
+        "message.react", {"message_id": message.message_id, "emoji": "\U0001f440"}
+    )
+    result = await _run_tool_step(svc, room_id, "Researcher", provider)
+
+    offered = provider.offered_schemas[0]["properties"]["tool"]["enum"]
+    assert "message.react" not in offered, offered
+    assert result["tool_request"]["status"] == "REJECTED"
+    assert result["tool_request"]["required_capability"] == "writing"
+    assert await svc.list_reactions(message.message_id) == []
+
+
+@pytest.mark.asyncio
+async def test_a_reaction_aimed_at_another_channel_fails_inside_the_gateway(
+    service: MultiplayerService,
+) -> None:
+    """Channel isolation, and it settles as a FAILED request rather than an exception."""
+    svc = service
+    room_id, workspace_id = await _room(svc)
+    elsewhere = await svc.create_room(workspace_id, "Elsewhere", "owner")
+    foreign = await svc.send_message(elsewhere.room_id, MessageRole.HUMAN, "owner", "Not yours")
+    provider = _ToolRequestingProvider(
+        "message.react", {"message_id": foreign.message_id, "emoji": "\U0001f440"}
+    )
+    result = await _run_tool_step(svc, room_id, "Synthesizer", provider)
+
+    assert result["tool_request"]["status"] == "FAILED"
+    assert result["tool_request"]["reason"] == "message is not in this channel"
+    assert await svc.list_reactions(foreign.message_id) == []
 
 
 # ── The approval gate ────────────────────────────────────────────────────────

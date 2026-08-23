@@ -1466,6 +1466,18 @@ class MultiplayerService:
                     for m in messages
                 ]
             }
+        if request.tool == "message.react":
+            # The channel the run belongs to is the boundary, checked here rather
+            # than left to the agent-membership check inside the reaction: that one
+            # raises AuthorizationError, which this layer does not catch, so a
+            # cross-channel message id would escape the "never raises" contract.
+            message = await self.get_message(str(tool_input.get("message_id", "")))
+            if message.room_id != request.room_id:
+                raise DomainError("message is not in this channel")
+            reaction = await self.add_agent_reaction(
+                message.message_id, request.agent_id, str(tool_input.get("emoji", ""))
+            )
+            return {"message_id": message.message_id, "emoji": reaction.emoji}
         if request.tool == "task.create":
             task = await self.create_task(
                 request.room_id,
@@ -3350,9 +3362,10 @@ class MultiplayerService:
     ) -> MessageReaction:
         """An agent reacts as itself, on its own membership of the room.
 
-        Deliberately not reachable from a route: an agent reaction is attributed to
-        the agent, so letting a human ask for one would let a human sign an agent's
-        name.
+        Reached only through the message.react tool, so the agent asks for it during
+        its own run and the gateway audits the request. Deliberately not reachable
+        from a route: an agent reaction is attributed to the agent, so letting a
+        human ask for one would let a human sign an agent's name.
         """
         return await self._set_reaction(
             message_id, agent_id, emoji, removed=False, actor_type=ParticipantType.AGENT

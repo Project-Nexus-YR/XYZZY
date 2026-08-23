@@ -83,6 +83,11 @@ TOOLS: dict[str, ToolSpec] = {
     spec.name: spec
     for spec in (
         ToolSpec("channel.read_context", "retrieval", False, "Read the channel's recent messages"),
+        # A reaction is a durable, agent-attributed write into the channel, so it is
+        # gated on writing — the one capability a viewer may never lend — but it
+        # needs no approval, because unlike a task or an artifact it is one glyph
+        # the agent can take back.
+        ToolSpec("message.react", "writing", False, "React to a message as this agent"),
         ToolSpec("task.create", "writing", True, "Create a task in the channel"),
         ToolSpec("artifact.write", "writing", True, "Create an artifact in the channel"),
     )

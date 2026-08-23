@@ -184,7 +184,8 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
 .unread-rule{max-width:74ch;display:flex;align-items:center;gap:8px;margin:8px 0;color:var(--red);font-size:10px;font-weight:650}
 .unread-rule::after{content:"";flex:1;height:1px;background:oklch(80% .09 25)}
 .thread-item{border-bottom:1px solid var(--border);padding:9px 4px}
-.thread-item .thread-meta{font-size:10px;color:var(--text2);display:flex;gap:8px;margin-bottom:3px}
+.thread-item .sender{font-size:10px;font-weight:650;color:var(--accent2);margin-bottom:3px}
+.thread-item .thread-counts{color:var(--text2);font-weight:400;margin-left:8px}
 .thread-item .thread-body{font-size:12px;line-height:1.5}
 .thread-reply{display:flex;gap:6px;padding:10px 14px;border-top:1px solid var(--border)}
 .thread-reply input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 9px;font-size:12px;color:var(--text)}
@@ -874,9 +875,18 @@ function appendMessage(m) {
   if (m.message_id) msg.dataset.messageId = m.message_id;
   if (m.sequence && m.sequence > readCursor) msg.classList.add('unread');
   const time = m.created_at ? new Date(m.created_at).toLocaleTimeString() : '';
-  msg.innerHTML = `<div class="sender">${escHtml(displayNameFor(m))}</div>${agentProvenance(m)}<div class="bubble">${renderMentions(m.content)}</div><div class="time">${time}</div>${messageActions(m)}`;
+  msg.innerHTML = `${attribution(m)}<div class="bubble">${renderMentions(m.content)}</div><div class="time">${time}</div>${messageActions(m)}`;
   div.appendChild(msg);
   div.scrollTop = div.scrollHeight;
+}
+
+// Both panes attribute a message through this one function, because a pane with a
+// template of its own is a pane that drifts: the thread pane had one, and an agent
+// answer read there was a bare id with no trigger, no invoker and no output. It is
+// also the pane a mention-invoked answer is read in, since such an answer inherits
+// the mention's broadcast and a mention inside a thread does not broadcast.
+function attribution(m, trailing = '') {
+  return `<div class="sender">${escHtml(displayNameFor(m))}${trailing}</div>${agentProvenance(m)}`;
 }
 
 // An agent's id is not a name. The roster knows what it is called, and falls back
@@ -899,30 +909,34 @@ function agentProvenance(m) {
     ? ` · asked by ${escHtml(meta.requested_by === userId ? userName : meta.requested_by)}`
     : '';
   const record = meta.output_id
-    ? ` · <button class="output-link" data-output-id="${escHtml(meta.output_id)}" onclick="openAgentOutput(this.dataset.outputId)">Full output ${escHtml(shortId(meta.output_id))}</button>`
+    ? ` · <button class="output-link" data-output-id="${escHtml(meta.output_id)}" onclick="openAgentOutput(this.dataset.outputId, this)">Full output ${escHtml(shortId(meta.output_id))}</button>`
     : '';
   const excerpted = meta.output_excerpted ? ' · excerpt' : '';
   return `<div class="agent-provenance">Answered on ${escHtml(trigger)}${invoker}${excerpted}${record}</div>`;
 }
 
 // The message is the excerpt; this is the record it points at. Nothing is fetched
-// again — the room snapshot already carries every output the reader may see.
-function openAgentOutput(outputId) {
-  const holder = document.querySelector(`.msg[data-output-open="${CSS.escape(outputId)}"]`);
-  if (holder) { holder.querySelector('.output-record').remove(); holder.removeAttribute('data-output-open'); return; }
+// again — the room snapshot already carries every output the reader may see. The
+// clicked button carries its own row, so the record opens beside whichever pane
+// was read from and one output shown twice does not open in the wrong one.
+function openAgentOutput(outputId, trigger) {
+  const holder = trigger && trigger.closest('.msg, .thread-item');
+  if (!holder) return;
+  if (holder.dataset.outputOpen === outputId) {
+    holder.querySelector('.output-record').remove();
+    delete holder.dataset.outputOpen;
+    return;
+  }
   const output = allRoomOutputs.find(o => o.output_id === outputId);
   if (!output) { toast('That output is not in this room snapshot.', 'error'); return; }
-  const button = document.querySelector(`.output-link[data-output-id="${CSS.escape(outputId)}"]`);
-  const msg = button && button.closest('.msg');
-  if (!msg) return;
   const agent = roomAgents.find(a => a.agent_id === output.agent_id);
   const record = document.createElement('div');
   record.className = 'output-record';
   record.innerHTML = `<div class="output-record-head">${escHtml(agent ? agent.name : output.agent_id)} · output <code>${escHtml(shortId(output.output_id))}</code> · run <code>${escHtml(shortId(output.execution_id))}</code></div>
     <div class="output-record-body">${escHtml(output.content || 'No readable content returned.')}</div>
     <details class="prompt-detail"><summary>Exact source prompt</summary><div>${escHtml(output.source_prompt || 'Unavailable')}</div></details>`;
-  msg.appendChild(record);
-  msg.dataset.outputOpen = outputId;
+  holder.appendChild(record);
+  holder.dataset.outputOpen = outputId;
 }
 
 function appendSystemMessage(text) {
@@ -1013,7 +1027,7 @@ async function refreshThread() {
   document.getElementById('thread-copy').textContent = 'Every count here is counted from the replies themselves on this read.';
   list.innerHTML = thread.map(entry => `
     <div class="thread-item" style="margin-left:${Math.min(entry.thread_depth, 4) * 12}px">
-      <div class="thread-meta"><span>${escHtml(entry.sender_id === userId ? userName : entry.sender_id)}</span><span>#${entry.sequence}</span><span>${entry.reply_count} ${entry.reply_count === 1 ? 'reply' : 'replies'}</span></div>
+      ${attribution(entry, `<span class="thread-counts">#${entry.sequence} · ${entry.reply_count} ${entry.reply_count === 1 ? 'reply' : 'replies'}</span>`)}
       <div class="thread-body">${renderMentions(entry.content)}</div>
       <div class="msg-actions"><button data-message-id="${escHtml(entry.message_id)}" onclick="setThreadTarget(this.dataset.messageId)">Reply to this</button></div>
     </div>`).join('');
