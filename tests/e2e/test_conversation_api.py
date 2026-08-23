@@ -133,7 +133,9 @@ def test_threads_reactions_read_state_and_search_end_to_end() -> None:
         # The read cursor is durable server-side state.
         before = client.get(f"/api/v1/rooms/{room_id}/read-cursor", headers=PEER_HEADERS).json()
         assert before["last_read_sequence"] == 0
-        assert before["unread_messages"] == 3
+        # One, not three: the listing directly above is the channel this reader is
+        # shown, and neither reply was broadcast into it.
+        assert before["unread_messages"] == 1
         client.put(
             f"/api/v1/rooms/{room_id}/read-cursor",
             headers=PEER_HEADERS,
@@ -243,3 +245,73 @@ def test_a_search_query_of_only_punctuation_is_rejected() -> None:
         _seed(client)
         rejected = client.get("/api/v1/search", headers=OWNER_HEADERS, params={"q": "***"})
         assert rejected.status_code == 400
+
+
+def test_an_unrecognized_handle_comes_back_named() -> None:
+    """A misspelled handle used to return 200 with an empty mention list and no hint."""
+    with _app() as client:
+        seeded = _seed(client)
+
+        sent = client.post(
+            f"/api/v1/rooms/{seeded['room_id']}/messages",
+            headers=OWNER_HEADERS,
+            json={"content": "@architect and @architekt, plus @nobody"},
+        )
+        assert sent.status_code == 200, sent.text
+        body = sent.json()
+
+        assert [m["target_id"] for m in body["mentions"]] == [seeded["agent_id"]]
+        assert body["unrecognized_mentions"] == ["architekt", "nobody"]
+
+
+def test_the_roster_publishes_the_handle_people_have_to_type() -> None:
+    with _app() as client:
+        seeded = _seed(client)
+        templates = client.get("/api/v1/agent-templates", headers=OWNER_HEADERS).json()
+        reviewer = next(t for t in templates if t["name"] == "Security Reviewer")
+        client.post(
+            f"/api/v1/rooms/{seeded['room_id']}/agents",
+            headers=OWNER_HEADERS,
+            json={"template_id": reviewer["template_id"]},
+        )
+
+        state = client.get(f"/api/v1/rooms/{seeded['room_id']}/state", headers=OWNER_HEADERS)
+        assert state.status_code == 200, state.text
+        body = state.json()
+
+        assert {a["name"]: a["handle"] for a in body["agents"]} == {
+            "Architect": "architect",
+            "Security Reviewer": "security-reviewer",
+        }
+        assert {m["user_id"]: m["handle"] for m in body["members"]} == {
+            "user-a": "user-a",
+            "user-b": "user-b",
+        }
+
+
+def test_an_http_principal_cannot_react_as_an_agent() -> None:
+    """The route has no actor to override: a reaction is signed by the caller alone."""
+    with _app() as client:
+        seeded = _seed(client)
+        room_id = seeded["room_id"]
+        message = client.post(
+            f"/api/v1/rooms/{room_id}/messages",
+            headers=OWNER_HEADERS,
+            json={"content": "Do we adopt a managed identity provider?"},
+        ).json()
+
+        reacted = client.post(
+            f"/api/v1/messages/{message['message_id']}/reactions",
+            headers=OWNER_HEADERS,
+            json={
+                "emoji": "\U0001f440",
+                "actor_id": seeded["agent_id"],
+                "actor_type": "AGENT",
+            },
+        )
+        assert reacted.status_code == 200, reacted.text
+
+        listed = client.get(
+            f"/api/v1/messages/{message['message_id']}/reactions", headers=OWNER_HEADERS
+        ).json()
+        assert [(r["actor_id"], r["actor_type"]) for r in listed] == [("user-a", "USER")]

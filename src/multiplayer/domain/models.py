@@ -473,6 +473,52 @@ class Message:
     created_at: datetime = field(default_factory=utcnow)
 
 
+class ParticipantType(StrEnum):
+    """The two kinds of principal a room can address or attribute an action to."""
+
+    USER = "USER"
+    AGENT = "AGENT"
+
+
+# A handle is drawn from this alphabet, and _MENTION_PATTERN in the service reads
+# exactly the same one, so every handle the system issues is a handle a mention can
+# spell. Anything else in a display name becomes a separator.
+_HANDLE_ALLOWED = "abcdefghijklmnopqrstuvwxyz0123456789_."
+
+
+def handle_from_display_name(name: str) -> str:
+    """The address derived from a display name, before the room makes it unique.
+
+    Lowercased so that a mention is not a spelling test, and every run of
+    characters outside the handle alphabet becomes a single hyphen, which is what
+    turns "Security Reviewer" into a name a mention can actually carry. A name with
+    nothing usable in it still has to be addressable, so it falls back rather than
+    returning an empty handle nobody could type.
+    """
+    out: list[str] = []
+    for char in name.strip().lower():
+        if char in _HANDLE_ALLOWED:
+            out.append(char)
+        elif out and out[-1] != "-":
+            out.append("-")
+    handle = "".join(out).strip("-.")
+    # The mention pattern requires an alphanumeric first character.
+    while handle and not handle[0].isalnum():
+        handle = handle[1:]
+    return handle or "participant"
+
+
+@dataclass(frozen=True, slots=True)
+class RoomParticipantHandle:
+    """One participant's durable address inside one room."""
+
+    room_id: str
+    participant_type: ParticipantType
+    participant_id: str
+    handle: str
+    created_at: datetime = field(default_factory=utcnow)
+
+
 class MentionTargetType(StrEnum):
     USER = "USER"
     AGENT = "AGENT"
@@ -497,6 +543,9 @@ class MessageReaction:
     room_id: str
     actor_id: str
     emoji: str
+    # Which kind of principal reacted, so the reader is told whether the eyes on
+    # their message are a teammate's or an agent's.
+    actor_type: ParticipantType = ParticipantType.USER
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
     removed_at: datetime | None = None

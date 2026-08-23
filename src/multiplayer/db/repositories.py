@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sqlite3
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -58,10 +59,12 @@ from ..domain.models import (
     OrgMember,
     OutputDisposition,
     OutputSelection,
+    ParticipantType,
     Presence,
     ReadCursor,
     Room,
     RoomMember,
+    RoomParticipantHandle,
     RoomStatus,
     SearchHit,
     SearchObjectKind,
@@ -113,6 +116,7 @@ class Repos:
         self.tasks = TaskRepo(db)
         self.messages = MessageRepo(db)
         self.mentions = MessageMentionRepo(db)
+        self.handles = RoomParticipantHandleRepo(db)
         self.reactions = MessageReactionRepo(db)
         self.read_cursors = ReadCursorRepo(db)
         self.search = SearchRepo(db)
@@ -798,6 +802,22 @@ class AgentRepo:
             "SELECT * FROM agent_instances WHERE room_id = ? ORDER BY created_at", (room_id,)
         )
         return [self._instance_from_row(r) for r in rows]
+
+    async def has_room_membership(self, agent_id: str, room_id: str) -> bool:
+        """The agent's own durable membership, joined to the room it was spawned in.
+
+        Both halves are required. The membership row says the agent belongs to this
+        room; agent_instances.room_id says the room still owns the agent, so a stale
+        membership left behind by a move cannot carry an agent across the isolation
+        boundary.
+        """
+        row = await self.db.fetch_one(
+            "SELECT 1 AS present FROM agent_room_memberships m "
+            "JOIN agent_instances a ON a.agent_id = m.agent_id AND a.room_id = m.room_id "
+            "WHERE m.agent_id = ? AND m.room_id = ?",
+            (agent_id, room_id),
+        )
+        return row is not None
 
     async def update_status(self, agent_id: str, status: AgentStatus) -> None:
         await self.db.execute(
@@ -1927,10 +1947,18 @@ class MessageRepo:
         )
         return [self._from_row(r) for r in reversed(rows)]
 
-    async def count_since_sequence(self, room_id: str, sequence: int) -> int:
+    async def count_since_sequence(self, room_id: str, sequence: int, viewer_id: str) -> int:
+        """How many messages this reader has not seen, in the channel they are shown.
+
+        The broadcast rule is the same one list_by_room applies, because an unread
+        pill that counts thread replies the channel never displays sends the reader
+        hunting for messages that are not there. Their own messages are excluded for
+        the same reason: nobody arrives at their own sentence unread.
+        """
         row = await self.db.fetch_one(
-            "SELECT COUNT(*) AS unread FROM messages WHERE room_id = ? AND event_sequence > ?",
-            (room_id, sequence),
+            "SELECT COUNT(*) AS unread FROM messages WHERE room_id = ? AND event_sequence > ? "
+            "AND (parent_message_id IS NULL OR broadcast_to_room = 1) AND sender_id <> ?",
+            (room_id, sequence, viewer_id),
         )
         return int(row["unread"]) if row else 0
 
@@ -2045,18 +2073,103 @@ class MessageMentionRepo:
         )
 
 
+class RoomParticipantHandleRepo:
+    """The room's address book: one handle per participant, unique in the room."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def claim(self, handle: RoomParticipantHandle) -> bool:
+        """Take the handle if the room still has it free.
+
+        The unique index decides, not a prior SELECT: two participants joining at
+        once would both read the same handle as free. False means somebody else
+        holds it and the caller should try the next suffix.
+        """
+        try:
+            await self.db.execute(
+                "INSERT INTO room_participant_handles(room_id, participant_type, "
+                "participant_id, handle, created_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    handle.room_id,
+                    handle.participant_type.value,
+                    handle.participant_id,
+                    handle.handle,
+                    serialize_datetime(handle.created_at),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+    async def get_for_participant(
+        self, room_id: str, participant_type: ParticipantType, participant_id: str
+    ) -> RoomParticipantHandle | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM room_participant_handles WHERE room_id = ? AND participant_type = ? "
+            "AND participant_id = ?",
+            (room_id, participant_type.value, participant_id),
+        )
+        return self._from_row(row) if row else None
+
+    async def list_participants_without_handles(self) -> list[dict[str, Any]]:
+        """Members and agents that predate handles, in a fixed order.
+
+        The order is what makes the upgrade reproducible: when two participants in a
+        room normalise to the same handle, it decides which one keeps the bare form.
+        """
+        return await self.db.fetch_all(
+            "SELECT rm.room_id AS room_id, 'USER' AS participant_type, "
+            "rm.user_id AS participant_id, rm.user_id AS display_name "
+            "FROM room_members rm LEFT JOIN room_participant_handles h "
+            "  ON h.room_id = rm.room_id AND h.participant_type = 'USER' "
+            "  AND h.participant_id = rm.user_id "
+            "WHERE h.handle IS NULL "
+            "UNION ALL "
+            "SELECT a.room_id, 'AGENT', a.agent_id, a.name "
+            "FROM agent_instances a LEFT JOIN room_participant_handles h "
+            "  ON h.room_id = a.room_id AND h.participant_type = 'AGENT' "
+            "  AND h.participant_id = a.agent_id "
+            "WHERE h.handle IS NULL "
+            "ORDER BY room_id, participant_type, participant_id"
+        )
+
+    async def list_by_room(self, room_id: str) -> list[RoomParticipantHandle]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM room_participant_handles WHERE room_id = ? ORDER BY handle",
+            (room_id,),
+        )
+        return [self._from_row(r) for r in rows]
+
+    @staticmethod
+    def _from_row(r: dict[str, Any]) -> RoomParticipantHandle:
+        return RoomParticipantHandle(
+            room_id=r["room_id"],
+            participant_type=ParticipantType(r["participant_type"]),
+            participant_id=r["participant_id"],
+            handle=r["handle"],
+            created_at=datetime.fromisoformat(r["created_at"]),
+        )
+
+
 class MessageReactionRepo:
     def __init__(self, db: Database) -> None:
         self.db = db
 
     async def set_removed_at(
-        self, message_id: str, room_id: str, actor_id: str, emoji: str, removed_at: datetime | None
+        self,
+        message_id: str,
+        room_id: str,
+        actor_id: str,
+        emoji: str,
+        removed_at: datetime | None,
+        actor_type: ParticipantType = ParticipantType.USER,
     ) -> MessageReaction:
         """Add or restore when removed_at is None, soft-remove when it is a time."""
         now = utcnow()
         await self.db.execute(
-            "INSERT INTO message_reactions(message_id, room_id, actor_id, emoji, created_at, "
-            "updated_at, removed_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "INSERT INTO message_reactions(message_id, room_id, actor_id, emoji, actor_type, "
+            "created_at, updated_at, removed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(message_id, actor_id, emoji) DO UPDATE SET "
             "updated_at = excluded.updated_at, removed_at = excluded.removed_at",
             (
@@ -2064,6 +2177,7 @@ class MessageReactionRepo:
                 room_id,
                 actor_id,
                 emoji,
+                actor_type.value,
                 serialize_datetime(now),
                 serialize_datetime(now),
                 serialize_datetime(removed_at),
@@ -2104,6 +2218,7 @@ class MessageReactionRepo:
             room_id=r["room_id"],
             actor_id=r["actor_id"],
             emoji=r["emoji"],
+            actor_type=ParticipantType(r["actor_type"]),
             created_at=datetime.fromisoformat(r["created_at"]),
             updated_at=datetime.fromisoformat(r["updated_at"]),
             removed_at=(datetime.fromisoformat(r["removed_at"]) if r.get("removed_at") else None),

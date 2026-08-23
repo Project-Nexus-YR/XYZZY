@@ -1523,7 +1523,13 @@ def _message_summary(message: Message) -> dict[str, Any]:
 
 
 async def _message_response(message: Message) -> dict[str, Any]:
-    """A written message plus the mentions the server derived from its text."""
+    """A written message, the mentions the server derived, and the ones it could not.
+
+    unrecognized_mentions is the difference between a mention that reached somebody
+    and one that reached nobody. Without it an author who misspells a handle gets
+    the same 200 and the same empty mention list as an author who wrote no mention
+    at all, and waits for an answer that was never going to arrive.
+    """
     svc = _svc_or_404()
     mentions = await svc.list_message_mentions(message.message_id)
     return {
@@ -1537,6 +1543,9 @@ async def _message_response(message: Message) -> dict[str, Any]:
             }
             for mention in mentions
         ],
+        "unrecognized_mentions": await svc.unrecognized_mention_handles(
+            message.room_id, message.content
+        ),
     }
 
 
@@ -1624,7 +1633,12 @@ async def list_reactions(message_id: str, principal: CurrentUser) -> list[dict[s
     svc = _svc_or_404()
     await _authorized_message(message_id, principal, RoomCapability.READ)
     return [
-        {"emoji": r.emoji, "actor_id": r.actor_id, "created_at": r.created_at.isoformat()}
+        {
+            "emoji": r.emoji,
+            "actor_id": r.actor_id,
+            "actor_type": r.actor_type.value,
+            "created_at": r.created_at.isoformat(),
+        }
         for r in await svc.list_reactions(message_id)
     ]
 

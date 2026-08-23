@@ -61,9 +61,11 @@ from ..domain.models import (
     OrgMember,
     OutputDisposition,
     OutputSelection,
+    ParticipantType,
     ReadCursor,
     Room,
     RoomMember,
+    RoomParticipantHandle,
     SearchHit,
     Session,
     SessionStatus,
@@ -78,6 +80,7 @@ from ..domain.models import (
     TurnLockStatus,
     Workspace,
     WorkspaceMember,
+    handle_from_display_name,
     new_id,
     utcnow,
 )
@@ -112,8 +115,17 @@ from ..services.presence import PresenceService
 
 log = logging.getLogger(__name__)
 
-# A mention is whatever the text says, resolved against the room's own roster.
+# A mention addresses a handle: one whitespace-free token, drawn from the same
+# alphabet handle_from_display_name issues into, so every handle in the room is a
+# handle this pattern can read back.
 _MENTION_PATTERN = re.compile(r"(?<![\w@])@([A-Za-z0-9][A-Za-z0-9_.\-]*)")
+# Two people called "Sam" is ordinary; a hundred is not. The bound keeps handle
+# issuance from becoming an unbounded scan on a write path.
+_MAX_HANDLE_ATTEMPTS = 100
+# How much of an output the conversation shows before it defers to the record.
+# Long enough that scrolling the thread is still reading, short enough that the
+# message is plainly a pointer and not a second copy of the output.
+_AGENT_MESSAGE_EXCERPT_CHARS = 280
 # FTS5 reads its own query syntax, so user input becomes quoted phrases instead.
 _SEARCH_TERM_PATTERN = re.compile(r"\w+")
 
@@ -253,6 +265,7 @@ class MultiplayerService:
                 (migration_file.name, utcnow().isoformat()),
             )
         await self._backfill_legacy_artifact_provenance_hashes()
+        await self._backfill_participant_handles()
         await self._seed_default_templates()
         await self._settle_orphaned_mention_runs()
 
@@ -285,6 +298,59 @@ class MultiplayerService:
             provenance_hash = self._artifact_provenance_hash(version, claims)
             await self.repos.artifacts.set_provenance_hash_if_empty(
                 version.version_id, provenance_hash
+            )
+
+    async def _issue_handle(
+        self,
+        room_id: str,
+        participant_type: ParticipantType,
+        participant_id: str,
+        display_name: str,
+    ) -> str:
+        """Give a participant the room's spelling of their name, once and durably.
+
+        The display name only seeds the handle. After that the two are independent:
+        renaming an agent leaves every mention that already addressed it pointing at
+        the same participant, which is the whole reason the handle is stored rather
+        than recomputed on each read.
+
+        Suffixes come from the database refusing the insert, never from counting the
+        room first. Two participants joining at the same moment would both read the
+        same handle as free, and only the unique index can break that tie.
+        """
+        existing = await self.repos.handles.get_for_participant(
+            room_id, participant_type, participant_id
+        )
+        if existing is not None:
+            return existing.handle
+        base = handle_from_display_name(display_name)
+        for attempt in range(1, _MAX_HANDLE_ATTEMPTS + 1):
+            candidate = base if attempt == 1 else f"{base}-{attempt}"
+            claimed = await self.repos.handles.claim(
+                RoomParticipantHandle(
+                    room_id=room_id,
+                    participant_type=participant_type,
+                    participant_id=participant_id,
+                    handle=candidate,
+                )
+            )
+            if claimed:
+                return candidate
+        raise DomainError(f"could not find a free handle for {display_name} in this room")
+
+    async def _backfill_participant_handles(self) -> None:
+        """Address the participants who joined before handles existed.
+
+        Rows arrive in a fixed order so that two rooms upgrading from the same state
+        end up with the same handles, including which of two colliding names got the
+        bare one.
+        """
+        for row in await self.repos.handles.list_participants_without_handles():
+            await self._issue_handle(
+                str(row["room_id"]),
+                ParticipantType(str(row["participant_type"])),
+                str(row["participant_id"]),
+                str(row["display_name"]),
             )
 
     async def _seed_default_templates(self) -> None:
@@ -526,6 +592,7 @@ class MultiplayerService:
             await self.repos.room_members.add(
                 RoomMember(room_id=room.room_id, user_id=user_id, role="admin")
             )
+            await self._issue_handle(room.room_id, ParticipantType.USER, user_id, user_id)
             created_event = await self.repos.events.append_with_next_sequence_in_transaction(
                 RoomEvent(
                     room_id=room.room_id,
@@ -583,6 +650,7 @@ class MultiplayerService:
         await self.repos.room_members.add(
             RoomMember(room_id=room.room_id, user_id=creator_id, role="admin")
         )
+        await self._issue_handle(room.room_id, ParticipantType.USER, creator_id, creator_id)
         await self._append_room_event(
             room.room_id,
             EventType.ROOM_CREATED,
@@ -654,6 +722,9 @@ class MultiplayerService:
             if await self.repos.room_members.get(room_id, invited_user_id) is not None:
                 raise DomainError("user is already a channel member")
             await self.repos.room_members.add(member)
+            await self._issue_handle(
+                room_id, ParticipantType.USER, invited_user_id, invited_user_id
+            )
             event = await self.repos.events.append_with_next_sequence_in_transaction(
                 RoomEvent(
                     room_id=room_id,
@@ -869,12 +940,20 @@ class MultiplayerService:
             await self.repos.agents.add_room_membership(
                 AgentRoomMembership(agent_id=agent.agent_id, room_id=room_id)
             )
+            handle = await self._issue_handle(
+                room_id, ParticipantType.AGENT, agent.agent_id, agent.name
+            )
             event = await self.repos.events.append_with_next_sequence_in_transaction(
                 RoomEvent(
                     room_id=room_id,
                     sequence=0,
                     event_type=EventType.AGENT_JOINED_ROOM,
-                    payload={"agent_id": agent.agent_id, "name": agent.name, "role": agent.role},
+                    payload={
+                        "agent_id": agent.agent_id,
+                        "name": agent.name,
+                        "handle": handle,
+                        "role": agent.role,
+                    },
                     actor_id=agent.agent_id,
                     actor_type="agent",
                 )
@@ -2748,41 +2827,67 @@ class MultiplayerService:
 
     # ── Messages ─────────────────────────────────────────────────────────────
 
+    async def _read_addressed_handles(
+        self, room_id: str, content: str
+    ) -> tuple[list[RoomParticipantHandle], list[str]]:
+        """Split the @tokens in this text into the ones the room answers to and the rest.
+
+        The room's issued handles are the entire vocabulary. A handle is matched
+        exactly, so nothing here guesses from a prefix of somebody's display name,
+        and a client cannot claim a mention the text does not contain. What the
+        author typed is normalised the same way a handle is minted, which is what
+        lets @Architect and @architect address the same agent and lets a mention end
+        a sentence without the full stop becoming part of the address.
+
+        The second list is the point of returning a tuple: an @handle that addresses
+        nobody used to vanish silently, and the caller has to be able to say so.
+        """
+        typed = list(dict.fromkeys(_MENTION_PATTERN.findall(content)))
+        if not typed:
+            return [], []
+        by_handle = {
+            record.handle: record for record in await self.repos.handles.list_by_room(room_id)
+        }
+        resolved: list[RoomParticipantHandle] = []
+        unresolved: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for token in typed:
+            record = by_handle.get(handle_from_display_name(token))
+            if record is None:
+                unresolved.append(token)
+                continue
+            key = (record.participant_type.value, record.participant_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append(record)
+        return resolved, unresolved
+
     async def _resolve_mentions(
         self, room_id: str, message_id: str, content: str
-    ) -> list[MessageMention]:
-        """Derive the addressed targets from the text alone.
-
-        The room's own members and agents are the only vocabulary, so a client
-        cannot claim a mention that the message does not contain, nor address
-        somebody who is not in the room.
-        """
-        handles = list(dict.fromkeys(_MENTION_PATTERN.findall(content)))
-        if not handles:
-            return []
-        targets: dict[str, tuple[MentionTargetType, str]] = {}
-        for member in await self.repos.room_members.list(room_id):
-            targets[member.user_id.lower()] = (MentionTargetType.USER, member.user_id)
-        for agent in await self.repos.agents.list_instances_by_room(room_id):
-            targets[agent.agent_id.lower()] = (MentionTargetType.AGENT, agent.agent_id)
-            targets.setdefault(agent.name.lower(), (MentionTargetType.AGENT, agent.agent_id))
-        mentions: list[MessageMention] = []
-        seen: set[tuple[MentionTargetType, str]] = set()
-        for handle in handles:
-            resolved = targets.get(handle.lower())
-            if resolved is None or resolved in seen:
-                continue
-            seen.add(resolved)
-            mentions.append(
-                MessageMention(
-                    message_id=message_id,
-                    room_id=room_id,
-                    target_type=resolved[0],
-                    target_id=resolved[1],
-                    handle=handle,
-                )
+    ) -> tuple[list[MessageMention], list[str]]:
+        """The addressed targets of one message, and the handles that addressed nobody."""
+        resolved, unresolved = await self._read_addressed_handles(room_id, content)
+        mentions = [
+            MessageMention(
+                message_id=message_id,
+                room_id=room_id,
+                target_type=MentionTargetType(record.participant_type.value),
+                target_id=record.participant_id,
+                handle=record.handle,
             )
-        return mentions
+            for record in resolved
+        ]
+        return mentions, unresolved
+
+    async def unrecognized_mention_handles(self, room_id: str, content: str) -> list[str]:
+        """The @handles in this text that address nobody in this room.
+
+        Silence was the bug: a misspelled agent handle returned 200 with an empty
+        mention list, so the author waited for an answer that was never coming.
+        """
+        _, unresolved = await self._read_addressed_handles(room_id, content)
+        return unresolved
 
     async def _invoke_mentioned_agent_in_transaction(
         self, room_id: str, agent_id: str, requested_by: str, message_id: str
@@ -2911,6 +3016,14 @@ class MultiplayerService:
                 # would tell the author their message was lost when it was not.
                 log.exception("Failed to settle mention run %s", execution_id)
 
+    @staticmethod
+    def _output_excerpt(content: str) -> tuple[str, bool]:
+        """What the conversation shows of an output, and whether it is all of it."""
+        text = " ".join(content.split())
+        if len(text) <= _AGENT_MESSAGE_EXCERPT_CHARS:
+            return text, False
+        return text[:_AGENT_MESSAGE_EXCERPT_CHARS].rstrip() + "…", True
+
     async def _agent_message_for_mention(
         self, execution: Execution, session: Session, output: AgentOutput
     ) -> tuple[Message | None, RoomEvent | None]:
@@ -2921,6 +3034,12 @@ class MultiplayerService:
         The output remains the first-class inspectable record; this message names it
         by output_id and sits at the mention's own thread coordinates, so the answer
         lands in the conversation that asked the question.
+
+        The message carries an excerpt, not the output. Copying the content in full
+        would put the same text in two places, and then the two places could be
+        edited, exported or retracted apart from each other while both claimed to be
+        what the agent said. The metadata says who asked for the turn, so the room
+        can read why the agent spoke without opening anything.
         """
         if execution.triggered_by is not AgentTrigger.MENTION:
             return None, None
@@ -2928,16 +3047,21 @@ class MultiplayerService:
         mention = await self.repos.messages.get(mention_message_id) if mention_message_id else None
         if mention is None or mention.room_id != session.room_id:
             return None, None
+        excerpt, excerpted = self._output_excerpt(output.content)
         message = Message(
             message_id=new_id("msg"),
             room_id=session.room_id,
             role=MessageRole.AGENT,
             sender_id=execution.agent_id,
-            content=output.content,
+            content=excerpt,
             metadata={
                 "output_id": output.output_id,
                 "execution_id": execution.execution_id,
                 "triggered_by": execution.triggered_by.value,
+                "requested_by": str(execution.input_data.get("requested_by", "")),
+                # The reader is told when there is more in the record than here, so
+                # a truncated excerpt is never mistaken for the whole answer.
+                "output_excerpted": excerpted,
             },
             parent_message_id=mention.message_id,
             root_message_id=mention.root_message_id or mention.message_id,
@@ -2959,6 +3083,9 @@ class MultiplayerService:
                 "thread_depth": message.thread_depth,
                 "broadcast_to_room": message.broadcast_to_room,
                 "output_id": output.output_id,
+                "execution_id": execution.execution_id,
+                "triggered_by": execution.triggered_by.value,
+                "requested_by": str(execution.input_data.get("requested_by", "")),
                 "mentions": [],
             },
             actor_id=execution.agent_id,
@@ -3027,7 +3154,7 @@ class MultiplayerService:
                         root_message_id=parent.root_message_id or parent.message_id,
                         thread_depth=parent.thread_depth + 1,
                     )
-                mentions = await self._resolve_mentions(room_id, msg.message_id, content)
+                mentions, _ = await self._resolve_mentions(room_id, msg.message_id, content)
                 if invoke_mentioned_agents and msg.thread_depth >= MAX_THREAD_DEPTH:
                     # The agent's answer is a reply to this message, and it has to fit.
                     raise DomainError(
@@ -3145,13 +3272,36 @@ class MultiplayerService:
             raise DomainError("reaction emoji must be a short non-empty token")
         return value
 
+    async def _require_reaction_actor_in_transaction(
+        self, room_id: str, actor_id: str, actor_type: ParticipantType
+    ) -> None:
+        """Authorize the reacting principal against its own kind of room membership.
+
+        A member is checked against room_members, an agent against the agent's own
+        durable membership of this room. Neither borrows the other's: an agent id is
+        not in room_members and never gains MUTATE by being mentioned there, and an
+        authenticated HTTP principal never reaches the agent branch because the
+        routes only ever call the member-facing methods.
+        """
+        if actor_type is ParticipantType.AGENT:
+            if not await self.repos.agents.has_room_membership(actor_id, room_id):
+                raise AuthorizationError(f"agent {actor_id} is not a member of this room")
+            return
+        await self._require_mutate_in_transaction(room_id, actor_id)
+
     async def _set_reaction(
-        self, message_id: str, actor_id: str, emoji: str, *, removed: bool
+        self,
+        message_id: str,
+        actor_id: str,
+        emoji: str,
+        *,
+        removed: bool,
+        actor_type: ParticipantType = ParticipantType.USER,
     ) -> MessageReaction:
         emoji = self._validate_emoji(emoji)
         message = await self.get_message(message_id)
         async with self.db.transaction():
-            await self._require_mutate_in_transaction(message.room_id, actor_id)
+            await self._require_reaction_actor_in_transaction(message.room_id, actor_id, actor_type)
             existing = await self.repos.reactions.get(message_id, actor_id, emoji)
             if existing is not None and (existing.removed_at is not None) == removed:
                 # Repeating an add or a remove is a no-op, so a retry appends no event.
@@ -3159,7 +3309,12 @@ class MultiplayerService:
             if existing is None and removed:
                 raise DomainError("no such reaction to remove")
             reaction = await self.repos.reactions.set_removed_at(
-                message_id, message.room_id, actor_id, emoji, utcnow() if removed else None
+                message_id,
+                message.room_id,
+                actor_id,
+                emoji,
+                utcnow() if removed else None,
+                actor_type,
             )
             event = await self.repos.events.append_with_next_sequence_in_transaction(
                 RoomEvent(
@@ -3170,19 +3325,45 @@ class MultiplayerService:
                         if removed
                         else EventType.MESSAGE_REACTION_ADDED
                     ),
-                    payload={"message_id": message_id, "actor_id": actor_id, "emoji": emoji},
+                    payload={
+                        "message_id": message_id,
+                        "actor_id": actor_id,
+                        "actor_type": actor_type.value,
+                        "emoji": emoji,
+                    },
                     actor_id=actor_id,
-                    actor_type="user",
+                    actor_type=actor_type.value.lower(),
                 )
             )
         await self._broadcast_persisted_events([event])
         return reaction
 
     async def add_reaction(self, message_id: str, actor_id: str, emoji: str) -> MessageReaction:
+        """A member reacts. This is the only reaction path an HTTP route may reach."""
         return await self._set_reaction(message_id, actor_id, emoji, removed=False)
 
     async def remove_reaction(self, message_id: str, actor_id: str, emoji: str) -> MessageReaction:
         return await self._set_reaction(message_id, actor_id, emoji, removed=True)
+
+    async def add_agent_reaction(
+        self, message_id: str, agent_id: str, emoji: str
+    ) -> MessageReaction:
+        """An agent reacts as itself, on its own membership of the room.
+
+        Deliberately not reachable from a route: an agent reaction is attributed to
+        the agent, so letting a human ask for one would let a human sign an agent's
+        name.
+        """
+        return await self._set_reaction(
+            message_id, agent_id, emoji, removed=False, actor_type=ParticipantType.AGENT
+        )
+
+    async def remove_agent_reaction(
+        self, message_id: str, agent_id: str, emoji: str
+    ) -> MessageReaction:
+        return await self._set_reaction(
+            message_id, agent_id, emoji, removed=True, actor_type=ParticipantType.AGENT
+        )
 
     async def list_reactions(self, message_id: str) -> list[MessageReaction]:
         return await self.repos.reactions.list_live(message_id)
@@ -3198,7 +3379,9 @@ class MultiplayerService:
             "user_id": user_id,
             "last_read_sequence": last_read,
             "latest_sequence": latest,
-            "unread_messages": await self.repos.messages.count_since_sequence(room_id, last_read),
+            "unread_messages": await self.repos.messages.count_since_sequence(
+                room_id, last_read, user_id
+            ),
             "updated_at": cursor.updated_at.isoformat() if cursor else None,
         }
 
@@ -4149,12 +4332,20 @@ class MultiplayerService:
     # ── Room State (for reconnect) ───────────────────────────────────────────
 
     @staticmethod
-    def _thread_state(summary: ThreadSummary | None) -> dict[str, Any]:
+    def _thread_state(message: Message, summaries: dict[str, ThreadSummary]) -> dict[str, Any]:
         """How a channel describes one message's thread, every field counted on read.
 
         The whole thread, not just the direct answers: a message with no thread has
         no replies, no later reply time, and one participant — its own author.
+
+        A reply broadcast to the channel is summarised by the thread it belongs to,
+        not by itself. Summaries are keyed on roots, so looking one up by the reply's
+        own id found nothing and the channel drew it as a message with no thread at
+        all — offering "Reply" on something that was already an answer. It is told
+        here that it is a reply, and which conversation it came out of.
         """
+        root_id = message.root_message_id or message.message_id
+        summary = summaries.get(root_id)
         return {
             "reply_count": summary.descendant_count if summary else 0,
             "participant_count": summary.participant_count if summary else 1,
@@ -4163,6 +4354,8 @@ class MultiplayerService:
                 if summary is not None and summary.last_reply_at is not None
                 else None
             ),
+            "is_thread_reply": message.root_message_id is not None,
+            "thread_root_id": root_id,
         }
 
     async def get_room_state(
@@ -4172,13 +4365,23 @@ class MultiplayerService:
         events = await self.get_room_events(room_id, last_sequence)
         members = await self.get_room_members(room_id)
         agents = await self.list_room_agents(room_id)
+        # The roster is where a reader learns what to type: a participant whose
+        # handle the client cannot see is a participant nobody can address.
+        handles = {
+            (record.participant_type.value, record.participant_id): record.handle
+            for record in await self.repos.handles.list_by_room(room_id)
+        }
         tasks = await self.list_room_tasks(room_id)
         messages = await self.list_room_messages(room_id, limit=50)
         thread_summaries = await self.repos.messages.thread_summaries_by_room(room_id)
         reactions: dict[str, list[dict[str, str]]] = {}
         for reaction in await self.repos.reactions.list_live_by_room(room_id):
             reactions.setdefault(reaction.message_id, []).append(
-                {"emoji": reaction.emoji, "actor_id": reaction.actor_id}
+                {
+                    "emoji": reaction.emoji,
+                    "actor_id": reaction.actor_id,
+                    "actor_type": reaction.actor_type.value,
+                }
             )
         artifacts = await self.list_room_artifacts(room_id)
         decisions = await self.list_room_decisions(room_id)
@@ -4233,9 +4436,22 @@ class MultiplayerService:
                 }
                 for e in events
             ],
-            "members": [{"user_id": m.user_id, "role": m.role} for m in members],
+            "members": [
+                {
+                    "user_id": m.user_id,
+                    "role": m.role,
+                    "handle": handles.get((ParticipantType.USER.value, m.user_id), ""),
+                }
+                for m in members
+            ],
             "agents": [
-                {"agent_id": a.agent_id, "name": a.name, "role": a.role, "status": a.status.value}
+                {
+                    "agent_id": a.agent_id,
+                    "name": a.name,
+                    "handle": handles.get((ParticipantType.AGENT.value, a.agent_id), ""),
+                    "role": a.role,
+                    "status": a.status.value,
+                }
                 for a in agents
             ],
             "branches": [
@@ -4359,7 +4575,7 @@ class MultiplayerService:
                     "thread_depth": m.thread_depth,
                     "broadcast_to_room": m.broadcast_to_room,
                     # Derived here too: the snapshot never carries a stored counter.
-                    **self._thread_state(thread_summaries.get(m.message_id)),
+                    **self._thread_state(m, thread_summaries),
                     "reactions": reactions.get(m.message_id, []),
                     "created_at": m.created_at.isoformat(),
                 }

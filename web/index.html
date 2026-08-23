@@ -173,6 +173,13 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
 .msg-actions button.reacted{background:oklch(94% .03 185);border-color:oklch(84% .05 185);color:var(--text)}
 .msg-actions .thread-open{font-weight:650;color:var(--accent)}
 .msg .mention{background:oklch(94% .035 250);border-radius:3px;padding:0 2px;font-weight:650}
+.agent-provenance{font-size:10px;color:var(--text2);margin:1px 0 3px}
+.agent-provenance .output-link{border:1px solid var(--border);background:transparent;color:var(--accent2);border-radius:5px;padding:1px 6px;font-size:10px;cursor:pointer;font-weight:650}
+.agent-provenance .output-link:hover{color:var(--text)}
+.output-record{margin-top:6px;border:1px solid var(--border);border-radius:var(--radius);padding:8px;background:var(--surface);font-size:11px}
+.output-record-head{color:var(--text2);font-size:10px;margin-bottom:5px}
+.output-record-body{white-space:pre-wrap}
+.handle{color:var(--text2);font-weight:500}
 .msg.unread{box-shadow:inset 2px 0 0 var(--accent)}
 .unread-rule{max-width:74ch;display:flex;align-items:center;gap:8px;margin:8px 0;color:var(--red);font-size:10px;font-weight:650}
 .unread-rule::after{content:"";flex:1;height:1px;background:oklch(80% .09 25)}
@@ -355,6 +362,9 @@ let orgId = '';
 let workspaceId = '';
 let agentTemplates = [];
 let roomAgents = [];
+// Every output the room holds, unfiltered by branch: a mention-run output belongs
+// to no branch, and its message still has to be able to open it.
+let allRoomOutputs = [];
 let roomOutputs = [];
 let currentBranchId = '';
 let currentBranchMode = '';
@@ -697,6 +707,7 @@ async function loadState() {
   }
   const currentBranch = durableBranches.find(branch => branch.branch_id === currentBranchId);
   currentBranchMode = currentBranch ? currentBranch.mode : '';
+  allRoomOutputs = state.outputs || [];
   roomOutputs = (state.outputs || []).filter(output =>
     !currentBranchId || output.branch_id === currentBranchId
   );
@@ -789,6 +800,13 @@ function handleRealtimeEvent(msg) {
         }
         appendMessage({message_id: msg.payload.message_id, role: msg.payload.role,
                        sender_id: msg.payload.sender_id, content: msg.payload.content,
+                       // The event says why an agent spoke, so a message that
+                       // arrives live is as readable as one that arrives on reload.
+                       metadata: {output_id: msg.payload.output_id,
+                                  execution_id: msg.payload.execution_id,
+                                  triggered_by: msg.payload.triggered_by,
+                                  requested_by: msg.payload.requested_by},
+                       is_thread_reply: Boolean(msg.payload.root_message_id),
                        sequence: msg.sequence, created_at: msg.timestamp});
         refreshUnread();
         break;
@@ -855,11 +873,56 @@ function appendMessage(m) {
   msg.className = `msg ${role}`;
   if (m.message_id) msg.dataset.messageId = m.message_id;
   if (m.sequence && m.sequence > readCursor) msg.classList.add('unread');
-  const senderName = m.sender_id === userId ? userName : (m.sender_id || 'System');
   const time = m.created_at ? new Date(m.created_at).toLocaleTimeString() : '';
-  msg.innerHTML = `<div class="sender">${escHtml(senderName)}</div><div class="bubble">${renderMentions(m.content)}</div><div class="time">${time}</div>${messageActions(m)}`;
+  msg.innerHTML = `<div class="sender">${escHtml(displayNameFor(m))}</div>${agentProvenance(m)}<div class="bubble">${renderMentions(m.content)}</div><div class="time">${time}</div>${messageActions(m)}`;
   div.appendChild(msg);
   div.scrollTop = div.scrollHeight;
+}
+
+// An agent's id is not a name. The roster knows what it is called, and falls back
+// to the raw id only when the sender is genuinely not in this room.
+function displayNameFor(m) {
+  if (m.sender_id === userId) return userName;
+  const agent = roomAgents.find(a => a.agent_id === m.sender_id);
+  if (agent) return agent.name;
+  return m.sender_id || 'System';
+}
+
+// Why this agent spoke: what triggered the turn, who asked for it, and a way
+// through to the AgentOutput this message is the conversational surface of.
+function agentProvenance(m) {
+  if ((m.role || '').toUpperCase() !== 'AGENT') return '';
+  const meta = m.metadata || {};
+  if (!meta.output_id && !meta.triggered_by) return '';
+  const trigger = String(meta.triggered_by || 'DIRECT').toLowerCase();
+  const invoker = meta.requested_by
+    ? ` · asked by ${escHtml(meta.requested_by === userId ? userName : meta.requested_by)}`
+    : '';
+  const record = meta.output_id
+    ? ` · <button class="output-link" data-output-id="${escHtml(meta.output_id)}" onclick="openAgentOutput(this.dataset.outputId)">Full output ${escHtml(shortId(meta.output_id))}</button>`
+    : '';
+  const excerpted = meta.output_excerpted ? ' · excerpt' : '';
+  return `<div class="agent-provenance">Answered on ${escHtml(trigger)}${invoker}${excerpted}${record}</div>`;
+}
+
+// The message is the excerpt; this is the record it points at. Nothing is fetched
+// again — the room snapshot already carries every output the reader may see.
+function openAgentOutput(outputId) {
+  const holder = document.querySelector(`.msg[data-output-open="${CSS.escape(outputId)}"]`);
+  if (holder) { holder.querySelector('.output-record').remove(); holder.removeAttribute('data-output-open'); return; }
+  const output = allRoomOutputs.find(o => o.output_id === outputId);
+  if (!output) { toast('That output is not in this room snapshot.', 'error'); return; }
+  const button = document.querySelector(`.output-link[data-output-id="${CSS.escape(outputId)}"]`);
+  const msg = button && button.closest('.msg');
+  if (!msg) return;
+  const agent = roomAgents.find(a => a.agent_id === output.agent_id);
+  const record = document.createElement('div');
+  record.className = 'output-record';
+  record.innerHTML = `<div class="output-record-head">${escHtml(agent ? agent.name : output.agent_id)} · output <code>${escHtml(shortId(output.output_id))}</code> · run <code>${escHtml(shortId(output.execution_id))}</code></div>
+    <div class="output-record-body">${escHtml(output.content || 'No readable content returned.')}</div>
+    <details class="prompt-detail"><summary>Exact source prompt</summary><div>${escHtml(output.source_prompt || 'Unavailable')}</div></details>`;
+  msg.appendChild(record);
+  msg.dataset.outputOpen = outputId;
 }
 
 function appendSystemMessage(text) {
@@ -888,9 +951,14 @@ function messageActions(m) {
   // thread, who is in it, and when it last moved.
   const count = m.reply_count || 0;
   const people = m.participant_count || 1;
-  const replyLabel = count
+  const thread = count
     ? `${count} ${count === 1 ? 'reply' : 'replies'} · ${people} ${people === 1 ? 'person' : 'people'}`
-    : 'Reply';
+    : '';
+  // A broadcast reply is already an answer in a thread. Offering it as somewhere to
+  // start one said the opposite of what it is.
+  const replyLabel = m.is_thread_reply
+    ? (thread ? `Reply in thread · ${thread}` : 'Reply in thread')
+    : (thread || 'Reply');
   const lastReply = m.last_reply_at ? ` title="Last reply ${escHtml(new Date(m.last_reply_at).toLocaleString())}"` : '';
   return `<div class="msg-actions"><button class="thread-open" data-message-id="${id}"${lastReply} onclick="openThread(this.dataset.messageId)">${replyLabel}</button>${chips}</div>`;
 }
@@ -961,9 +1029,10 @@ async function submitThreadReply(event) {
   const invoke = document.getElementById('thread-invoke-agents').checked;
   input.value = '';
   try {
-    await api('POST', `/messages/${target}/replies`,
+    const sent = await api('POST', `/messages/${target}/replies`,
       {content, invoke_mentioned_agents: invoke},
       {idempotencyKey: idempotencyKey()});
+    reportUnrecognizedMentions(sent);
     await loadState();
   } catch (err) {
     input.value = content;
@@ -1045,7 +1114,7 @@ function renderAgents(agents) {
   panel.innerHTML = agents.map(a => `
     <div class="card">
       <div class="title">${escHtml(a.name)} <span class="badge ${a.status.toLowerCase()}">${a.status}</span></div>
-      <div class="detail">${escHtml(a.role)}</div>
+      <div class="detail">${escHtml(a.role)}${a.handle ? ` · <span class="handle">@${escHtml(a.handle)}</span>` : ''}</div>
     </div>
   `).join('');
 }
@@ -1055,7 +1124,7 @@ function renderSidebarAgents(agents) {
   el.innerHTML = agents.map(a => `
     <div class="item">
       <span class="dot ${a.status === 'WORKING' ? 'working' : a.status === 'IDLE' ? 'idle' : 'online'}"></span>
-      ${escHtml(a.name)} <span class="badge ${a.status.toLowerCase()}" style="margin-left:auto">${a.status}</span>
+      ${escHtml(a.name)}${a.handle ? ` <span class="handle">@${escHtml(a.handle)}</span>` : ''} <span class="badge ${a.status.toLowerCase()}" style="margin-left:auto">${a.status}</span>
     </div>
   `).join('');
 }
@@ -1313,7 +1382,7 @@ async function reviewOntologyRelationship(relationshipId, action) {
 function renderMembers(members) {
   const el = document.getElementById('team-list');
   el.innerHTML = members.map(m => `
-    <button class="nav-item" onclick="openContext('members')"><span class="presence-dot"></span><span class="nav-name">${escHtml(m.user_id)}</span><span class="nav-meta">${escHtml(m.role)}</span></button>
+    <button class="nav-item" onclick="openContext('members')"><span class="presence-dot"></span><span class="nav-name">${escHtml(m.user_id)}</span><span class="nav-meta">${m.handle ? `@${escHtml(m.handle)}` : escHtml(m.role)}</span></button>
   `).join('');
   const isAdmin = currentRoomRole === 'admin';
   const canInvite = ['admin','editor','member'].includes(currentRoomRole);
@@ -1776,14 +1845,23 @@ async function sendMessage() {
 
   const invokeAgents = document.getElementById('invoke-agents');
   try {
-    await api('POST', `/rooms/${roomId}/messages`, {
+    const sent = await api('POST', `/rooms/${roomId}/messages`, {
       content: text, role: 'HUMAN',
       invoke_mentioned_agents: Boolean(invokeAgents && invokeAgents.checked)
     }, { idempotencyKey: idempotencyKey() });
+    reportUnrecognizedMentions(sent);
   } catch(err) {
     console.error('Failed to send message:', err);
     input.value = text;
   }
+}
+
+// The message was sent either way; this says who it did not reach, because an
+// unaddressed @handle used to be indistinguishable from no mention at all.
+function reportUnrecognizedMentions(sent) {
+  const missed = (sent && sent.unrecognized_mentions) || [];
+  if (!missed.length) return;
+  toast(`Nobody here answers to ${missed.map(h => `@${h}`).join(', ')}. Check the handle in People or Agents.`, 'error');
 }
 
 async function approveAction(approvalId) {
