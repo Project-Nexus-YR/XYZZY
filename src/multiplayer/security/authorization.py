@@ -30,6 +30,18 @@ def capabilities_for_role(role: str | None) -> frozenset[RoomCapability]:
     return _ROLE_CAPABILITIES.get(role or "", frozenset())
 
 
+def roles_with_capability(capability: RoomCapability) -> tuple[str, ...]:
+    """Every durable role granting one capability, for a query that authorizes in SQL.
+
+    A predicate over role names belongs in the query, but the role names must be
+    derived from this table rather than copied beside it, or the copy silently
+    outlives a change here.
+    """
+    return tuple(
+        sorted(role for role, granted in _ROLE_CAPABILITIES.items() if capability in granted)
+    )
+
+
 class RoomPolicy:
     """Authorize effective room capabilities from durable membership only."""
 

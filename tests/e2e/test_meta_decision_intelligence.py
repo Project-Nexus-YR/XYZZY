@@ -300,7 +300,7 @@ def test_meta_returns_only_selected_bounded_room_evidence_and_governed_correctio
 
 
 def test_browser_meta_contract_exposes_scope_freshness_and_drilldown() -> None:
-    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text()
+    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
     assert 'id="meta-panel"' in ui
     assert 'id="meta-question"' in ui
     assert 'id="meta-scope"' in ui

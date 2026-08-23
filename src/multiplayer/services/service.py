@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -14,11 +15,13 @@ from ..db.connection import Database
 from ..db.repositories import Repos
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
+    MAX_THREAD_DEPTH,
     AgentInstance,
     AgentOutput,
     AgentRoomMembership,
     AgentStatus,
     AgentTemplate,
+    AgentTrigger,
     Approval,
     ApprovalStatus,
     Artifact,
@@ -41,7 +44,10 @@ from ..domain.models import (
     IdempotencyRecord,
     Memory,
     MemoryScope,
+    MentionTargetType,
     Message,
+    MessageMention,
+    MessageReaction,
     MessageRole,
     Notification,
     OntologyDerivationKind,
@@ -55,13 +61,17 @@ from ..domain.models import (
     OrgMember,
     OutputDisposition,
     OutputSelection,
+    ReadCursor,
     Room,
     RoomMember,
+    SearchHit,
     Session,
     SessionStatus,
     Task,
     TaskPriority,
     TaskStatus,
+    ThreadReply,
+    ThreadSummary,
     ToolRequest,
     TurnLock,
     TurnLockScopeType,
@@ -101,6 +111,11 @@ from ..security.capabilities import (
 from ..services.presence import PresenceService
 
 log = logging.getLogger(__name__)
+
+# A mention is whatever the text says, resolved against the room's own roster.
+_MENTION_PATTERN = re.compile(r"(?<![\w@])@([A-Za-z0-9][A-Za-z0-9_.\-]*)")
+# FTS5 reads its own query syntax, so user input becomes quoted phrases instead.
+_SEARCH_TERM_PATTERN = re.compile(r"\w+")
 
 # ── State machine transition tables ──────────────────────────────────────────
 
@@ -158,7 +173,13 @@ VALID_SESSION_TRANSITIONS: dict[SessionStatus, set[SessionStatus]] = {
 }
 
 VALID_EXECUTION_TRANSITIONS: dict[ExecutionStatus, set[ExecutionStatus]] = {
-    ExecutionStatus.PENDING: {ExecutionStatus.RUNNING, ExecutionStatus.CANCELLED},
+    # A run that was opened but never started can still fail: its dispatcher may
+    # have died, and a run nothing will pick up must reach a terminal state.
+    ExecutionStatus.PENDING: {
+        ExecutionStatus.RUNNING,
+        ExecutionStatus.CANCELLED,
+        ExecutionStatus.FAILED,
+    },
     ExecutionStatus.RUNNING: {
         ExecutionStatus.COMPLETED,
         ExecutionStatus.FAILED,
@@ -230,6 +251,22 @@ class MultiplayerService:
             )
         await self._backfill_legacy_artifact_provenance_hashes()
         await self._seed_default_templates()
+        await self._settle_orphaned_mention_runs()
+
+    async def _settle_orphaned_mention_runs(self) -> None:
+        """Settle mention runs whose dispatcher died before it could start them.
+
+        A mention run is committed PENDING and dispatched immediately afterwards by
+        the same process. A process that dies in between leaves a run nothing will
+        ever pick up, so startup settles it as FAILED with an event that says why,
+        rather than leaving a PENDING row the system cannot describe. Restarting the
+        turn here instead would replay a question the room has probably moved past;
+        the author can address the agent again.
+        """
+        for orphan in await self.repos.executions.list_pending_by_trigger(AgentTrigger.MENTION):
+            await self._settle_undispatched_run(
+                orphan.execution_id, "dispatcher stopped before the run started"
+            )
 
     async def _backfill_legacy_artifact_provenance_hashes(self) -> None:
         """Bind pre-migration snapshots using the best evidence available at upgrade time."""
@@ -1367,15 +1404,9 @@ class MultiplayerService:
         if not execution.run_id:
             await self.nexus.create_execution(agent, session, provider_prompt, execution)
             run_id = f"run_{execution.execution_id}"
-            execution = Execution(
-                execution_id=execution.execution_id,
-                session_id=execution.session_id,
-                agent_id=execution.agent_id,
-                branch_id=execution.branch_id,
-                run_id=run_id,
-                status=ExecutionStatus.RUNNING,
-                input_data=execution.input_data,
-            )
+            # replace(), not a rebuild: a rebuild silently reset triggered_by to
+            # DIRECT, losing why the run was opened at the moment it starts.
+            execution = replace(execution, run_id=run_id, status=ExecutionStatus.RUNNING)
             await self.repos.executions.mark_running(execution.execution_id, run_id)
 
         terms = await self._capability_terms(agent, session.room_id, branch.initiated_by)
@@ -1437,6 +1468,9 @@ class MultiplayerService:
                 provider_interventions=interventions,
                 provider_evidence=str(provenance.get("provider_evidence", "")),
             )
+            agent_message, agent_message_event = await self._agent_message_for_mention(
+                execution, session, output
+            )
             persisted_events = await self.repos.agent_outputs.complete_execution(
                 output,
                 [
@@ -1469,6 +1503,8 @@ class MultiplayerService:
                         actor_type="agent",
                     ),
                 ],
+                agent_message,
+                agent_message_event,
             )
             await self._broadcast_persisted_events(persisted_events)
             await self._set_agent_status_safe(execution.agent_id, AgentStatus.COMPLETED)
@@ -2627,6 +2663,208 @@ class MultiplayerService:
 
     # ── Messages ─────────────────────────────────────────────────────────────
 
+    async def _resolve_mentions(
+        self, room_id: str, message_id: str, content: str
+    ) -> list[MessageMention]:
+        """Derive the addressed targets from the text alone.
+
+        The room's own members and agents are the only vocabulary, so a client
+        cannot claim a mention that the message does not contain, nor address
+        somebody who is not in the room.
+        """
+        handles = list(dict.fromkeys(_MENTION_PATTERN.findall(content)))
+        if not handles:
+            return []
+        targets: dict[str, tuple[MentionTargetType, str]] = {}
+        for member in await self.repos.room_members.list(room_id):
+            targets[member.user_id.lower()] = (MentionTargetType.USER, member.user_id)
+        for agent in await self.repos.agents.list_instances_by_room(room_id):
+            targets[agent.agent_id.lower()] = (MentionTargetType.AGENT, agent.agent_id)
+            targets.setdefault(agent.name.lower(), (MentionTargetType.AGENT, agent.agent_id))
+        mentions: list[MessageMention] = []
+        seen: set[tuple[MentionTargetType, str]] = set()
+        for handle in handles:
+            resolved = targets.get(handle.lower())
+            if resolved is None or resolved in seen:
+                continue
+            seen.add(resolved)
+            mentions.append(
+                MessageMention(
+                    message_id=message_id,
+                    room_id=room_id,
+                    target_type=resolved[0],
+                    target_id=resolved[1],
+                    handle=handle,
+                )
+            )
+        return mentions
+
+    async def _invoke_mentioned_agent_in_transaction(
+        self, room_id: str, agent_id: str, requested_by: str, message_id: str
+    ) -> tuple[Execution, RoomEvent]:
+        """Open one agent turn that a mention explicitly asked for.
+
+        The five-way capability intersection is the existing check for what a
+        member may lend an agent. An empty effective set means this member may
+        lend this agent nothing, so they may not make it speak, and raising here
+        rolls the whole message write back rather than half-applying it.
+
+        This only opens the turn. Running it is long provider I/O, so it happens
+        after this transaction commits, in :meth:`_dispatch_mention_run`.
+        """
+        agent = await self.get_agent(agent_id)
+        if agent.room_id != room_id:
+            raise DomainError("mentioned agent is not in this room")
+        terms = await self._capability_terms(agent, room_id, requested_by)
+        if not terms.effective:
+            raise AuthorizationError(
+                f"{requested_by} may not invoke agent {agent_id}: no effective capability"
+            )
+        session = Session(
+            session_id=new_id("sess"),
+            room_id=room_id,
+            agent_id=agent_id,
+            status=SessionStatus.ACTIVE,
+        )
+        execution = Execution(
+            execution_id=new_id("exec"),
+            session_id=session.session_id,
+            agent_id=agent_id,
+            triggered_by=AgentTrigger.MENTION,
+            input_data={"mention_message_id": message_id, "requested_by": requested_by},
+        )
+        await self.repos.sessions.create(session)
+        execution = await self.repos.executions.create(execution)
+        event = await self.repos.events.append_with_next_sequence_in_transaction(
+            RoomEvent(
+                room_id=room_id,
+                sequence=0,
+                event_type=EventType.AGENT_RUN_STARTED,
+                payload={
+                    "execution_id": execution.execution_id,
+                    "session_id": session.session_id,
+                    "agent_id": agent_id,
+                    "triggered_by": AgentTrigger.MENTION.value,
+                    "mention_message_id": message_id,
+                    "requested_by": requested_by,
+                },
+                actor_id=agent_id,
+                actor_type="agent",
+            )
+        )
+        return execution, event
+
+    async def _settle_undispatched_run(self, execution_id: str, error: str) -> None:
+        """Bring a run that will never produce a result to a described terminal state."""
+        execution = await self.repos.executions.get(execution_id)
+        if execution is None or execution.status in {
+            ExecutionStatus.COMPLETED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
+            return
+        session = await self.repos.sessions.get(execution.session_id)
+        if session is None:
+            return
+        events = await self.repos.executions.terminalize_without_output(
+            execution,
+            ExecutionStatus.FAILED,
+            error,
+            [
+                RoomEvent(
+                    room_id=session.room_id,
+                    sequence=0,
+                    event_type=EventType.EXECUTION_FAILED,
+                    payload={
+                        "execution_id": execution.execution_id,
+                        "agent_id": execution.agent_id,
+                        "triggered_by": execution.triggered_by.value,
+                        "error": error,
+                    },
+                    actor_id=execution.agent_id,
+                    actor_type="agent",
+                )
+            ],
+        )
+        await self._broadcast_persisted_events(events)
+        await self._set_agent_status_safe(execution.agent_id, AgentStatus.FAILED)
+
+    async def _dispatch_mention_run(self, execution_id: str, prompt: str) -> None:
+        """Run a mention-invoked turn, after the write that recorded it committed.
+
+        The invariant this holds is that no run is left in a state the system
+        cannot describe. Provider failures are already terminalised by
+        :meth:`execute_agent_step`; anything else that escapes it is settled here
+        as FAILED with an event saying why. The one gap a running process cannot
+        close is a crash between the commit and this call, and
+        :meth:`_settle_orphaned_mention_runs` closes that at the next startup.
+        """
+        try:
+            await self.execute_agent_step(execution_id, prompt)
+        except Exception as exc:
+            log.exception("Mention-invoked run %s did not complete", execution_id)
+            try:
+                await self._settle_undispatched_run(execution_id, f"dispatch failed: {exc}")
+            except Exception:
+                # The message itself is already committed. Failing its write here
+                # would tell the author their message was lost when it was not.
+                log.exception("Failed to settle mention run %s", execution_id)
+
+    async def _agent_message_for_mention(
+        self, execution: Execution, session: Session, output: AgentOutput
+    ) -> tuple[Message | None, RoomEvent | None]:
+        """The conversational surface for a turn a mention asked for.
+
+        An authenticated HTTP principal may never author an AGENT-role message, so
+        the service authors it here instead, in the same transaction as the output.
+        The output remains the first-class inspectable record; this message names it
+        by output_id and sits at the mention's own thread coordinates, so the answer
+        lands in the conversation that asked the question.
+        """
+        if execution.triggered_by is not AgentTrigger.MENTION:
+            return None, None
+        mention_message_id = str(execution.input_data.get("mention_message_id", ""))
+        mention = await self.repos.messages.get(mention_message_id) if mention_message_id else None
+        if mention is None or mention.room_id != session.room_id:
+            return None, None
+        message = Message(
+            message_id=new_id("msg"),
+            room_id=session.room_id,
+            role=MessageRole.AGENT,
+            sender_id=execution.agent_id,
+            content=output.content,
+            metadata={
+                "output_id": output.output_id,
+                "execution_id": execution.execution_id,
+                "triggered_by": execution.triggered_by.value,
+            },
+            parent_message_id=mention.message_id,
+            root_message_id=mention.root_message_id or mention.message_id,
+            thread_depth=mention.thread_depth + 1,
+            # An answer belongs wherever the question was asked.
+            broadcast_to_room=mention.broadcast_to_room,
+        )
+        event = RoomEvent(
+            room_id=session.room_id,
+            sequence=0,
+            event_type=EventType.MESSAGE_CREATED,
+            payload={
+                "message_id": message.message_id,
+                "role": message.role.value,
+                "sender_id": message.sender_id,
+                "content": message.content[:500],
+                "parent_message_id": message.parent_message_id,
+                "root_message_id": message.root_message_id,
+                "thread_depth": message.thread_depth,
+                "broadcast_to_room": message.broadcast_to_room,
+                "output_id": output.output_id,
+                "mentions": [],
+            },
+            actor_id=execution.agent_id,
+            actor_type="agent",
+        )
+        return message, event
+
     async def send_message(
         self,
         room_id: str,
@@ -2635,11 +2873,20 @@ class MultiplayerService:
         content: str,
         metadata: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        parent_message_id: str | None = None,
+        broadcast_to_room: bool = True,
+        invoke_mentioned_agents: bool = False,
     ) -> Message:
         content = self._validate_non_empty(content, "message content")
         if idempotency_key is not None:
             idempotency_key = self._validate_idempotency_key(idempotency_key)
-        request = {"role": role.value, "content": content, "metadata": metadata or {}}
+        request = {
+            "role": role.value,
+            "content": content,
+            "metadata": metadata or {},
+            "parent_message_id": parent_message_id,
+            "invoke_mentioned_agents": invoke_mentioned_agents,
+        }
         msg = Message(
             message_id=new_id("msg"),
             room_id=room_id,
@@ -2647,7 +2894,10 @@ class MultiplayerService:
             sender_id=sender_id,
             content=content,
             metadata=metadata or {},
+            broadcast_to_room=broadcast_to_room,
         )
+        events: list[RoomEvent] = []
+        invoked: dict[str, str] = {}
         try:
             async with self.db.transaction():
                 if role is MessageRole.HUMAN:
@@ -2661,22 +2911,85 @@ class MultiplayerService:
                         if replay is None:
                             raise DomainError("idempotent message replay lost its result")
                         return replay
-                event = await self.repos.messages.create_with_event_and_turn_guard_in_transaction(
-                    msg,
-                    RoomEvent(
-                        room_id=room_id,
-                        sequence=0,
-                        event_type=EventType.MESSAGE_CREATED,
-                        payload={
-                            "message_id": msg.message_id,
-                            "role": role.value,
-                            "sender_id": sender_id,
-                            "content": content[:500],
-                        },
-                        actor_id=sender_id,
-                        actor_type=role.value.lower(),
-                    ),
+                if parent_message_id is not None:
+                    parent = await self.repos.messages.get(parent_message_id)
+                    if parent is None or parent.room_id != room_id:
+                        raise DomainError(f"parent message not found in room: {parent_message_id}")
+                    if parent.thread_depth + 1 > MAX_THREAD_DEPTH:
+                        raise DomainError(
+                            f"thread depth limit reached: a reply may not nest deeper "
+                            f"than {MAX_THREAD_DEPTH}"
+                        )
+                    msg = replace(
+                        msg,
+                        parent_message_id=parent.message_id,
+                        root_message_id=parent.root_message_id or parent.message_id,
+                        thread_depth=parent.thread_depth + 1,
+                    )
+                mentions = await self._resolve_mentions(room_id, msg.message_id, content)
+                if invoke_mentioned_agents and msg.thread_depth >= MAX_THREAD_DEPTH:
+                    # The agent's answer is a reply to this message, and it has to fit.
+                    raise DomainError(
+                        "thread depth limit reached: no room for an agent's answer below "
+                        f"depth {MAX_THREAD_DEPTH}"
+                    )
+                for mention in mentions:
+                    if mention.target_type is not MentionTargetType.AGENT:
+                        continue
+                    if not invoke_mentioned_agents:
+                        continue
+                    execution, run_event = await self._invoke_mentioned_agent_in_transaction(
+                        room_id, mention.target_id, sender_id, msg.message_id
+                    )
+                    invoked[mention.target_id] = execution.execution_id
+                    events.append(run_event)
+                message_event = (
+                    await self.repos.messages.create_with_event_and_turn_guard_in_transaction(
+                        msg,
+                        RoomEvent(
+                            room_id=room_id,
+                            sequence=0,
+                            event_type=EventType.MESSAGE_CREATED,
+                            payload={
+                                "message_id": msg.message_id,
+                                "role": role.value,
+                                "sender_id": sender_id,
+                                "content": content[:500],
+                                "parent_message_id": msg.parent_message_id,
+                                "root_message_id": msg.root_message_id,
+                                "thread_depth": msg.thread_depth,
+                                "broadcast_to_room": msg.broadcast_to_room,
+                                "mentions": [
+                                    {
+                                        "target_type": mention.target_type.value,
+                                        "target_id": mention.target_id,
+                                        "invoked_execution_id": invoked.get(mention.target_id),
+                                    }
+                                    for mention in mentions
+                                ],
+                            },
+                            actor_id=sender_id,
+                            actor_type=role.value.lower(),
+                        ),
+                    )
                 )
+                events.append(message_event)
+                msg = replace(msg, event_sequence=message_event.sequence)
+                for mention in mentions:
+                    await self.repos.mentions.create(
+                        replace(mention, invoked_execution_id=invoked.get(mention.target_id))
+                    )
+                    if mention.target_type is MentionTargetType.USER:
+                        await self.repos.notifications.create(
+                            Notification(
+                                notification_id=new_id("notif"),
+                                user_id=mention.target_id,
+                                room_id=room_id,
+                                title="You were mentioned",
+                                body=content[:500],
+                                notification_type="mention",
+                            )
+                        )
                 if idempotency_key is not None:
                     await self._record_idempotency(
                         room_id,
@@ -2690,11 +3003,132 @@ class MultiplayerService:
             raise
         except ValueError as exc:
             raise DomainError(str(exc)) from exc
-        await self._broadcast_persisted_events([event])
+        await self._broadcast_persisted_events(events)
+        # Dispatch belongs here, after the commit, beside the broadcast: a turn that
+        # waited on a provider inside the write transaction would hold the room's
+        # write lock for the length of the model call. The mention's own text is the
+        # prompt, because that is what the author addressed to the agent.
+        for execution_id in invoked.values():
+            await self._dispatch_mention_run(execution_id, content)
         return msg
 
-    async def list_room_messages(self, room_id: str, limit: int = 100) -> list[Message]:
-        return await self.repos.messages.list_by_room(room_id, limit=self._validate_limit(limit))
+    async def list_room_messages(
+        self, room_id: str, limit: int = 100, after_sequence: int | None = None
+    ) -> list[Message]:
+        return await self.repos.messages.list_by_room(
+            room_id, limit=self._validate_limit(limit), after_sequence=after_sequence
+        )
+
+    async def list_message_mentions(self, message_id: str) -> list[MessageMention]:
+        return await self.repos.mentions.list_for_message(message_id)
+
+    async def get_message(self, message_id: str) -> Message:
+        message = await self.repos.messages.get(message_id)
+        if message is None:
+            raise DomainError(f"message not found: {message_id}")
+        return message
+
+    async def list_thread(self, root_message_id: str, limit: int = 200) -> list[ThreadReply]:
+        """The whole thread with counts derived from the reply rows on every read."""
+        root = await self.get_message(root_message_id)
+        if root.root_message_id is not None:
+            root_message_id = root.root_message_id
+        return await self.repos.messages.list_thread(root_message_id, limit)
+
+    # ── Reactions ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _validate_emoji(value: str) -> str:
+        value = value.strip()
+        if not value or len(value) > 16 or any(char.isspace() for char in value):
+            raise DomainError("reaction emoji must be a short non-empty token")
+        return value
+
+    async def _set_reaction(
+        self, message_id: str, actor_id: str, emoji: str, *, removed: bool
+    ) -> MessageReaction:
+        emoji = self._validate_emoji(emoji)
+        message = await self.get_message(message_id)
+        async with self.db.transaction():
+            await self._require_mutate_in_transaction(message.room_id, actor_id)
+            existing = await self.repos.reactions.get(message_id, actor_id, emoji)
+            if existing is not None and (existing.removed_at is not None) == removed:
+                # Repeating an add or a remove is a no-op, so a retry appends no event.
+                return existing
+            if existing is None and removed:
+                raise DomainError("no such reaction to remove")
+            reaction = await self.repos.reactions.set_removed_at(
+                message_id, message.room_id, actor_id, emoji, utcnow() if removed else None
+            )
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=message.room_id,
+                    sequence=0,
+                    event_type=(
+                        EventType.MESSAGE_REACTION_REMOVED
+                        if removed
+                        else EventType.MESSAGE_REACTION_ADDED
+                    ),
+                    payload={"message_id": message_id, "actor_id": actor_id, "emoji": emoji},
+                    actor_id=actor_id,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
+        return reaction
+
+    async def add_reaction(self, message_id: str, actor_id: str, emoji: str) -> MessageReaction:
+        return await self._set_reaction(message_id, actor_id, emoji, removed=False)
+
+    async def remove_reaction(self, message_id: str, actor_id: str, emoji: str) -> MessageReaction:
+        return await self._set_reaction(message_id, actor_id, emoji, removed=True)
+
+    async def list_reactions(self, message_id: str) -> list[MessageReaction]:
+        return await self.repos.reactions.list_live(message_id)
+
+    # ── Read cursors ─────────────────────────────────────────────────────────
+
+    async def get_read_cursor(self, room_id: str, user_id: str) -> dict[str, Any]:
+        cursor = await self.repos.read_cursors.get(room_id, user_id)
+        last_read = cursor.last_read_sequence if cursor else 0
+        latest = await self.repos.events.get_latest_sequence(room_id)
+        return {
+            "room_id": room_id,
+            "user_id": user_id,
+            "last_read_sequence": last_read,
+            "latest_sequence": latest,
+            "unread_messages": await self.repos.messages.count_since_sequence(room_id, last_read),
+            "updated_at": cursor.updated_at.isoformat() if cursor else None,
+        }
+
+    async def set_read_cursor(
+        self, room_id: str, user_id: str, last_read_sequence: int
+    ) -> dict[str, Any]:
+        if last_read_sequence < 0:
+            raise DomainError("read cursor sequence must not be negative")
+        async with self.db.transaction():
+            await self._require_capability_in_transaction(room_id, user_id, RoomCapability.READ)
+            latest = await self.repos.events.get_latest_sequence(room_id)
+            if last_read_sequence > latest:
+                raise DomainError("read cursor cannot pass the room's latest sequence")
+            await self.repos.read_cursors.set(
+                ReadCursor(room_id=room_id, user_id=user_id, last_read_sequence=last_read_sequence)
+            )
+        return await self.get_read_cursor(room_id, user_id)
+
+    # ── Search ───────────────────────────────────────────────────────────────
+
+    async def search(
+        self, user_id: str, query: str, room_id: str | None = None, limit: int = 50
+    ) -> list[SearchHit]:
+        """Authorization is a join inside the matching query, never a later filter."""
+        terms = _SEARCH_TERM_PATTERN.findall(self._validate_non_empty(query, "search query"))
+        if not terms:
+            raise DomainError("search query must contain a searchable term")
+        match_query = " ".join(f'"{term}"' for term in terms[:16])
+        return await self.repos.search.search(
+            user_id, match_query, room_id, self._validate_limit(limit)
+        )
 
     # ── Artifacts ────────────────────────────────────────────────────────────
 
@@ -3599,13 +4033,38 @@ class MultiplayerService:
 
     # ── Room State (for reconnect) ───────────────────────────────────────────
 
-    async def get_room_state(self, room_id: str, last_sequence: int = 0) -> dict[str, Any]:
+    @staticmethod
+    def _thread_state(summary: ThreadSummary | None) -> dict[str, Any]:
+        """How a channel describes one message's thread, every field counted on read.
+
+        The whole thread, not just the direct answers: a message with no thread has
+        no replies, no later reply time, and one participant — its own author.
+        """
+        return {
+            "reply_count": summary.descendant_count if summary else 0,
+            "participant_count": summary.participant_count if summary else 1,
+            "last_reply_at": (
+                summary.last_reply_at.isoformat()
+                if summary is not None and summary.last_reply_at is not None
+                else None
+            ),
+        }
+
+    async def get_room_state(
+        self, room_id: str, last_sequence: int = 0, user_id: str = ""
+    ) -> dict[str, Any]:
         room = await self.get_room(room_id)
         events = await self.get_room_events(room_id, last_sequence)
         members = await self.get_room_members(room_id)
         agents = await self.list_room_agents(room_id)
         tasks = await self.list_room_tasks(room_id)
         messages = await self.list_room_messages(room_id, limit=50)
+        thread_summaries = await self.repos.messages.thread_summaries_by_room(room_id)
+        reactions: dict[str, list[dict[str, str]]] = {}
+        for reaction in await self.repos.reactions.list_live_by_room(room_id):
+            reactions.setdefault(reaction.message_id, []).append(
+                {"emoji": reaction.emoji, "actor_id": reaction.actor_id}
+            )
         artifacts = await self.list_room_artifacts(room_id)
         decisions = await self.list_room_decisions(room_id)
         memories = await self.list_room_memories(room_id)
@@ -3694,6 +4153,8 @@ class MultiplayerService:
                     "agent_id": run.agent_id,
                     "run_id": run.run_id,
                     "status": run.status.value,
+                    # Half of "why did this agent speak"; the other half is the event.
+                    "triggered_by": run.triggered_by.value,
                     "started_at": run.started_at.isoformat(),
                     "completed_at": run.completed_at.isoformat() if run.completed_at else None,
                 }
@@ -3776,10 +4237,20 @@ class MultiplayerService:
                     "role": m.role.value,
                     "sender_id": m.sender_id,
                     "content": m.content,
+                    "metadata": m.metadata,
+                    "sequence": m.event_sequence,
+                    "parent_message_id": m.parent_message_id,
+                    "root_message_id": m.root_message_id,
+                    "thread_depth": m.thread_depth,
+                    "broadcast_to_room": m.broadcast_to_room,
+                    # Derived here too: the snapshot never carries a stored counter.
+                    **self._thread_state(thread_summaries.get(m.message_id)),
+                    "reactions": reactions.get(m.message_id, []),
                     "created_at": m.created_at.isoformat(),
                 }
                 for m in messages
             ],
+            "read_cursor": (await self.get_read_cursor(room_id, user_id) if user_id else None),
             "artifacts": artifact_state,
             "decisions": [
                 {"decision_id": d.decision_id, "title": d.title, "status": d.status.value}

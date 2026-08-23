@@ -174,7 +174,7 @@ def test_reload_stale_storage_and_second_browser_restore_without_duplicate_write
 
 
 def test_web_setup_discovers_before_writes_and_persists_no_credential() -> None:
-    html = (Path(__file__).parents[2] / "web" / "index.html").read_text()
+    html = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
 
     discovery = html.index("const context = await api('GET', '/me/context')")
     bootstrap_write = html.index("const bootstrap = await api('POST', '/me/bootstrap'")

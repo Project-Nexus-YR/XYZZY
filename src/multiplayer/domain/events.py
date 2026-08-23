@@ -28,6 +28,8 @@ class EventType(StrEnum):
     # Messages
     MESSAGE_CREATED = "message.created"
     MESSAGE_EDITED = "message.edited"
+    MESSAGE_REACTION_ADDED = "message.reaction_added"
+    MESSAGE_REACTION_REMOVED = "message.reaction_removed"
 
     # Tasks
     TASK_CREATED = "task.created"

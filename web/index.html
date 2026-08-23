@@ -167,6 +167,27 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
 .member-row{display:flex;align-items:center;gap:8px}.member-row>div{flex:1;min-width:0}
 .member-row select,.invite-form input,.invite-form select{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:5px 8px;color:var(--text);font-size:11px;min-width:0}
 .invite-form{display:flex;gap:6px;margin:10px 0 6px}.invite-form input{flex:1}
+.msg-actions{display:flex;align-items:center;gap:5px;margin-top:4px;flex-wrap:wrap}
+.msg-actions button{border:1px solid transparent;background:transparent;color:var(--text2);border-radius:5px;padding:2px 6px;font-size:10px;cursor:pointer}
+.msg-actions button:hover{border-color:var(--border);color:var(--text)}
+.msg-actions button.reacted{background:oklch(94% .03 185);border-color:oklch(84% .05 185);color:var(--text)}
+.msg-actions .thread-open{font-weight:650;color:var(--accent)}
+.msg .mention{background:oklch(94% .035 250);border-radius:3px;padding:0 2px;font-weight:650}
+.msg.unread{box-shadow:inset 2px 0 0 var(--accent)}
+.unread-rule{max-width:74ch;display:flex;align-items:center;gap:8px;margin:8px 0;color:var(--red);font-size:10px;font-weight:650}
+.unread-rule::after{content:"";flex:1;height:1px;background:oklch(80% .09 25)}
+.thread-item{border-bottom:1px solid var(--border);padding:9px 4px}
+.thread-item .thread-meta{font-size:10px;color:var(--text2);display:flex;gap:8px;margin-bottom:3px}
+.thread-item .thread-body{font-size:12px;line-height:1.5}
+.thread-reply{display:flex;gap:6px;padding:10px 14px;border-top:1px solid var(--border)}
+.thread-reply input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 9px;font-size:12px;color:var(--text)}
+.search-form{display:flex;gap:6px;padding:10px 14px}
+.search-form input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 9px;font-size:12px;color:var(--text)}
+.search-hit{border-bottom:1px solid var(--border);padding:9px 14px;font-size:12px;cursor:pointer}
+.search-hit .hit-meta{font-size:10px;color:var(--text2);margin-bottom:3px}
+.search-hit mark{background:oklch(93% .09 95);color:inherit}
+.mention-toggle{display:flex;align-items:center;gap:4px;font-size:9px;color:var(--text2)}
+.unread-pill{background:var(--red);color:var(--surface);border-radius:9px;padding:1px 6px;font-size:9px;font-weight:700}
 </style>
 </head>
 <body>
@@ -216,7 +237,7 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
 
 <div class="center">
 <div class="room-header" id="room-header">
-<button class="icon-button mobile-nav hidden" onclick="toggleSidebar()" aria-label="Open navigation">☰</button><div><h2># <span id="room-name">channel</span></h2><div class="meta" id="room-meta"></div></div><div class="header-actions"><span class="status" id="ws-status">Connecting</span><button class="icon-button" onclick="openContext('members')" aria-label="Open members">◉</button><button class="icon-button" onclick="openContext('branch')" aria-label="Open context">☷</button></div>
+<button class="icon-button mobile-nav hidden" onclick="toggleSidebar()" aria-label="Open navigation">☰</button><div><h2># <span id="room-name">channel</span></h2><div class="meta" id="room-meta"></div></div><div class="header-actions"><span class="status" id="ws-status">Connecting</span><span class="unread-pill" id="unread-pill" hidden>0</span><button class="icon-button" onclick="markRoomRead()" id="mark-read-button" aria-label="Mark channel read" title="Mark this channel read">✓</button><button class="icon-button" onclick="openContext('search')" aria-label="Search channel" title="Search">⌕</button><button class="icon-button" onclick="openContext('members')" aria-label="Open members">◉</button><button class="icon-button" onclick="openContext('branch')" aria-label="Open context">☷</button></div>
 </div>
 <div class="messages" id="messages" role="log" aria-live="polite" aria-label="Channel conversation"></div>
 <div class="turn-lock" id="turn-lock-banner" role="status"><span class="spinner"></span><div class="lock-copy"><div class="lock-title" id="turn-lock-title">AI owns this turn</div><div class="lock-detail" id="turn-lock-detail">Messages resume when the branch finishes.</div></div><button class="btn-sm" onclick="openContext('branch')">Inspect branch</button><button class="btn-sm" id="cancel-turn-button" onclick="cancelCurrentTurn()">Cancel</button></div>
@@ -237,12 +258,12 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
     <div class="studio-footer"><div class="launch-note" id="launch-note">The branch preserves every individual output and its provenance.</div><button class="btn-primary" id="launch-button" onclick="launchParallelAnalyses()" disabled>Run selected in parallel</button></div>
   </section>
 </div>
-<div class="composer"><textarea id="msg-input" aria-label="Message channel" placeholder="Message #channel" onkeydown="handleComposerKey(event)"></textarea><div class="composer-tools"><button class="btn-sm" id="ai-trigger" onclick="toggleAITray()" aria-expanded="false">AI branch</button><span class="composer-hint">Enter to send · Shift Enter for newline</span><button class="btn-primary send" id="send-message-button" onclick="sendMessage()">Send</button></div></div>
+<div class="composer"><textarea id="msg-input" aria-label="Message channel" placeholder="Message #channel" onkeydown="handleComposerKey(event)"></textarea><div class="composer-tools"><button class="btn-sm" id="ai-trigger" onclick="toggleAITray()" aria-expanded="false">AI branch</button><label class="mention-toggle" title="An @agent mention only notifies unless you tick this"><input type="checkbox" id="invoke-agents"> Run mentioned agents</label><span class="composer-hint">Enter to send · Shift Enter for newline</span><button class="btn-primary send" id="send-message-button" onclick="sendMessage()">Send</button></div></div>
 </div>
 </div>
 
 <div class="right-panel">
-<div class="context-head"><h2 id="context-title">AI branch</h2><button class="icon-button" onclick="closeContext()" aria-label="Close context panel">×</button></div><div class="context-tabs"><button class="context-tab active" data-view="branch" onclick="openContext('branch')">Branch</button><button class="context-tab" data-view="artifacts" onclick="openContext('artifacts')">Artifact</button><button class="context-tab" data-view="meta" onclick="openContext('meta')">Meta</button><button class="context-tab" data-view="ontology" onclick="openContext('ontology')">Evidence</button><button class="context-tab" data-view="members" onclick="openContext('members')">People</button></div><div class="context-scroll">
+<div class="context-head"><h2 id="context-title">AI branch</h2><button class="icon-button" onclick="closeContext()" aria-label="Close context panel">×</button></div><div class="context-tabs"><button class="context-tab active" data-view="branch" onclick="openContext('branch')">Branch</button><button class="context-tab" data-view="artifacts" onclick="openContext('artifacts')">Artifact</button><button class="context-tab" data-view="meta" onclick="openContext('meta')">Meta</button><button class="context-tab" data-view="ontology" onclick="openContext('ontology')">Evidence</button><button class="context-tab" data-view="thread" onclick="openContext('thread')">Thread</button><button class="context-tab" data-view="search" onclick="openContext('search')">Search</button><button class="context-tab" data-view="members" onclick="openContext('members')">People</button></div><div class="context-scroll">
 <section class="context-view active" data-context-view="branch"><div class="panel-section"><div class="panel-title" id="branch-panel-title">No AI branch selected</div><div class="panel-copy" id="branch-panel-copy">Start AI work from the composer. Runs and outputs remain together here.</div><div id="branch-runs"></div></div><div class="outputs-head">
   <h3>Inspectable outputs</h3>
   <span class="outputs-count" id="outputs-count">0 authored branches</span>
@@ -294,6 +315,18 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
   <details class="ontology-history" id="ontology-history"><summary>Review history · 0 entries</summary><div id="ontology-history-list"></div></details>
 </section>
 
+<section class="context-view" data-context-view="thread" aria-labelledby="thread-title">
+  <div class="panel-section"><div class="panel-title" id="thread-title">No thread open</div><div class="panel-copy" id="thread-copy">Reply to any message to branch the conversation. Reply counts are derived from the replies themselves, never from a stored counter.</div></div>
+  <div id="thread-list"></div>
+  <form class="thread-reply" id="thread-reply-form" onsubmit="submitThreadReply(event)" hidden><input id="thread-reply-input" placeholder="Reply in thread" aria-label="Reply in thread" autocomplete="off" required><label class="mention-toggle"><input type="checkbox" id="thread-invoke-agents"> Run mentioned agents</label><button class="btn-sm" type="submit">Reply</button></form>
+</section>
+
+<section class="context-view" data-context-view="search" aria-labelledby="search-title">
+  <div class="panel-section"><div class="panel-title" id="search-title">Search</div><div class="panel-copy">Your channel membership constrains the query itself, so results never include a room you cannot read.</div></div>
+  <form class="search-form" onsubmit="runSearch(event)"><input id="search-input" placeholder="Search messages" aria-label="Search messages" autocomplete="off" required><label class="mention-toggle"><input type="checkbox" id="search-this-room" checked> This channel</label><button class="btn-sm" type="submit">Search</button></form>
+  <div id="search-results"><div class="panel-copy" style="padding:0 14px">No search yet.</div></div>
+</section>
+
 <section class="context-view" data-context-view="artifacts"><div class="panel-section"><div class="panel-title">Published artifacts</div><div class="panel-copy">Open the shared work product, then inspect its selected inputs.</div></div><div class="panel-section" id="artifact-surface"></div></section>
 <section class="context-view" data-context-view="members"><div class="panel-section"><div class="panel-title">People and permissions</div><div class="panel-copy">Your channel role determines which actions are available.</div><div id="members-panel"></div></div><details class="records">
   <summary>Workspace records</summary>
@@ -331,6 +364,10 @@ let currentRoomRole = 'viewer';
 let myRooms = [];
 let roomBranches = [];
 let roomRuns = [];
+let openThreadRootId = '';
+let threadReplyTargetId = '';
+let readCursor = 0;
+const QUICK_REACTIONS = ['👍', '🎯', '⚠️'];
 const outputSelections = new Map();
 
 function toast(message, tone = '') {
@@ -347,7 +384,7 @@ function openContext(view = 'branch') {
   panel.classList.add('open');
   document.querySelectorAll('.context-view').forEach(el => el.classList.toggle('active', el.dataset.contextView === view));
   document.querySelectorAll('.context-tab').forEach(el => el.classList.toggle('active', el.dataset.view === view));
-  const titles = {branch:'AI branch',artifacts:'Artifact',meta:'Meta',ontology:'Evidence',members:'People'};
+  const titles = {branch:'AI branch',artifacts:'Artifact',meta:'Meta',ontology:'Evidence',thread:'Thread',search:'Search',members:'People'};
   document.getElementById('context-title').textContent = titles[view] || 'Context';
 }
 
@@ -454,6 +491,9 @@ async function switchRoom(targetRoomId) {
   rememberRoomId(roomId);
   currentBranchId = '';
   lastSequence = 0;
+  openThreadRootId = '';
+  threadReplyTargetId = '';
+  readCursor = 0;
   document.getElementById('sidebar').classList.remove('open');
   renderRoomsList();
   if (ws) ws.close();
@@ -623,10 +663,23 @@ async function loadState() {
   else myRooms.push({room_id: roomId, workspace_id: workspaceId, name: state.room.name});
   renderRoomsList();
 
-  // Messages
+  // Messages. A reply lives in its thread unless it was explicitly broadcast, and
+  // the server applies that rule to the listing, so this renders what it sends.
+  applyReadCursor(state.read_cursor);
   const msgDiv = document.getElementById('messages');
   msgDiv.innerHTML = '';
-  state.messages.forEach(m => appendMessage(m));
+  let unreadRuleShown = false;
+  state.messages
+    .forEach(m => {
+      if (!unreadRuleShown && m.sequence && m.sequence > readCursor) {
+        unreadRuleShown = true;
+        const rule = document.createElement('div');
+        rule.className = 'unread-rule';
+        rule.textContent = 'New';
+        msgDiv.appendChild(rule);
+      }
+      appendMessage(m);
+    });
 
   // Agents
   roomAgents = state.agents || [];
@@ -705,6 +758,8 @@ async function loadState() {
   lastSequence = state.events_since.length > 0
     ? Math.max(...state.events_since.map(event => event.sequence))
     : 0;
+
+  if (openThreadRootId) await refreshThread();
 }
 
 function handleRealtimeEvent(msg) {
@@ -727,8 +782,18 @@ function handleRealtimeEvent(msg) {
     logEvent(msg);
     switch(msg.event_type) {
       case 'message.created':
-        appendMessage({role: msg.payload.role, sender_id: msg.payload.sender_id,
-                       content: msg.payload.content, created_at: msg.timestamp});
+        if (msg.payload.parent_message_id && !msg.payload.broadcast_to_room) {
+          // A thread reply belongs to its thread, not to the channel log.
+          loadState();
+          break;
+        }
+        appendMessage({message_id: msg.payload.message_id, role: msg.payload.role,
+                       sender_id: msg.payload.sender_id, content: msg.payload.content,
+                       sequence: msg.sequence, created_at: msg.timestamp});
+        refreshUnread();
+        break;
+      case 'message.reaction_added': case 'message.reaction_removed':
+        loadState();
         break;
       case 'user.joined_room':
         appendSystemMessage(`${msg.payload.user_id} joined the room`);
@@ -788,15 +853,190 @@ function appendMessage(m) {
   const msg = document.createElement('div');
   const role = (m.role || 'system').toLowerCase();
   msg.className = `msg ${role}`;
+  if (m.message_id) msg.dataset.messageId = m.message_id;
+  if (m.sequence && m.sequence > readCursor) msg.classList.add('unread');
   const senderName = m.sender_id === userId ? userName : (m.sender_id || 'System');
   const time = m.created_at ? new Date(m.created_at).toLocaleTimeString() : '';
-  msg.innerHTML = `<div class="sender">${escHtml(senderName)}</div><div class="bubble">${escHtml(m.content)}</div><div class="time">${time}</div>`;
+  msg.innerHTML = `<div class="sender">${escHtml(senderName)}</div><div class="bubble">${renderMentions(m.content)}</div><div class="time">${time}</div>${messageActions(m)}`;
   div.appendChild(msg);
   div.scrollTop = div.scrollHeight;
 }
 
 function appendSystemMessage(text) {
   appendMessage({role: 'system', sender_id: 'system', content: text});
+}
+
+// A mention is whatever the server derived from the text; this only marks it up.
+function renderMentions(text) {
+  return escHtml(text).replace(/(^|[^\w@])@([A-Za-z0-9][A-Za-z0-9_.\-]*)/g,
+    (all, lead, handle) => `${lead}<span class="mention">@${handle}</span>`);
+}
+
+function messageActions(m) {
+  if (!m.message_id || (m.role || '').toUpperCase() === 'SYSTEM') return '';
+  const id = escHtml(m.message_id);
+  const groups = new Map(QUICK_REACTIONS.map(emoji => [emoji, {count: 0, mine: false}]));
+  (m.reactions || []).forEach(reaction => {
+    const entry = groups.get(reaction.emoji) || {count: 0, mine: false};
+    entry.count += 1;
+    if (reaction.actor_id === userId) entry.mine = true;
+    groups.set(reaction.emoji, entry);
+  });
+  const chips = [...groups.entries()].map(([emoji, entry]) =>
+    `<button class="${entry.mine ? 'reacted' : ''}" data-message-id="${id}" data-emoji="${escHtml(emoji)}" data-mine="${entry.mine}" onclick="toggleReaction(this.dataset)" aria-label="React ${escHtml(emoji)}">${escHtml(emoji)}${entry.count ? ` ${entry.count}` : ''}</button>`).join('');
+  // Every number here was counted from the reply rows on this read: the whole
+  // thread, who is in it, and when it last moved.
+  const count = m.reply_count || 0;
+  const people = m.participant_count || 1;
+  const replyLabel = count
+    ? `${count} ${count === 1 ? 'reply' : 'replies'} · ${people} ${people === 1 ? 'person' : 'people'}`
+    : 'Reply';
+  const lastReply = m.last_reply_at ? ` title="Last reply ${escHtml(new Date(m.last_reply_at).toLocaleString())}"` : '';
+  return `<div class="msg-actions"><button class="thread-open" data-message-id="${id}"${lastReply} onclick="openThread(this.dataset.messageId)">${replyLabel}</button>${chips}</div>`;
+}
+
+async function toggleReaction(data) {
+  const emoji = data.emoji;
+  const messageId = data.messageId;
+  try {
+    if (data.mine === 'true') {
+      await api('DELETE', `/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
+    } else {
+      await api('POST', `/messages/${messageId}/reactions`, {emoji});
+    }
+    await loadState();
+  } catch (err) {
+    toast(`Reaction was not saved: ${errorMessage(err)}`, 'error');
+  }
+}
+
+async function openThread(messageId) {
+  openThreadRootId = messageId;
+  threadReplyTargetId = messageId;
+  openContext('thread');
+  await refreshThread();
+}
+
+function setThreadTarget(messageId) {
+  threadReplyTargetId = messageId;
+  const input = document.getElementById('thread-reply-input');
+  input.placeholder = `Reply to ${shortId(messageId)}`;
+  input.focus();
+}
+
+async function refreshThread() {
+  if (!openThreadRootId) return;
+  const list = document.getElementById('thread-list');
+  const form = document.getElementById('thread-reply-form');
+  let thread;
+  try {
+    thread = await api('GET', `/messages/${openThreadRootId}/thread`);
+  } catch (err) {
+    list.innerHTML = `<div class="panel-copy" style="padding:0 14px">${escHtml(errorMessage(err))}</div>`;
+    form.hidden = true;
+    return;
+  }
+  if (thread.length) {
+    openThreadRootId = thread[0].message_id;
+    if (!thread.some(entry => entry.message_id === threadReplyTargetId)) threadReplyTargetId = openThreadRootId;
+  }
+  const replies = Math.max(thread.length - 1, 0);
+  document.getElementById('thread-title').textContent = `Thread · ${replies} ${replies === 1 ? 'reply' : 'replies'}`;
+  document.getElementById('thread-copy').textContent = 'Every count here is counted from the replies themselves on this read.';
+  list.innerHTML = thread.map(entry => `
+    <div class="thread-item" style="margin-left:${Math.min(entry.thread_depth, 4) * 12}px">
+      <div class="thread-meta"><span>${escHtml(entry.sender_id === userId ? userName : entry.sender_id)}</span><span>#${entry.sequence}</span><span>${entry.reply_count} ${entry.reply_count === 1 ? 'reply' : 'replies'}</span></div>
+      <div class="thread-body">${renderMentions(entry.content)}</div>
+      <div class="msg-actions"><button data-message-id="${escHtml(entry.message_id)}" onclick="setThreadTarget(this.dataset.messageId)">Reply to this</button></div>
+    </div>`).join('');
+  form.hidden = !['admin', 'editor', 'member'].includes(currentRoomRole);
+}
+
+async function submitThreadReply(event) {
+  event.preventDefault();
+  const input = document.getElementById('thread-reply-input');
+  const content = input.value.trim();
+  const target = threadReplyTargetId || openThreadRootId;
+  if (!content || !target) return;
+  const invoke = document.getElementById('thread-invoke-agents').checked;
+  input.value = '';
+  try {
+    await api('POST', `/messages/${target}/replies`,
+      {content, invoke_mentioned_agents: invoke},
+      {idempotencyKey: idempotencyKey()});
+    await loadState();
+  } catch (err) {
+    input.value = content;
+    toast(`Reply was not sent: ${errorMessage(err)}`, 'error');
+  }
+}
+
+async function runSearch(event) {
+  event.preventDefault();
+  const query = document.getElementById('search-input').value.trim();
+  const scoped = document.getElementById('search-this-room').checked;
+  const results = document.getElementById('search-results');
+  if (!query) return;
+  results.innerHTML = '<div class="panel-copy" style="padding:0 14px">Searching…</div>';
+  try {
+    const scope = scoped ? `&room_id=${encodeURIComponent(roomId)}` : '';
+    const hits = await api('GET', `/search?q=${encodeURIComponent(query)}${scope}`);
+    if (!hits.length) {
+      results.innerHTML = '<div class="panel-copy" style="padding:0 14px">No results you are allowed to read.</div>';
+      return;
+    }
+    results.innerHTML = hits.map(hit => `
+      <div class="search-hit" data-message-id="${escHtml(hit.object_id)}" data-room-id="${escHtml(hit.room_id)}" onclick="openSearchHit(this.dataset)">
+        <div class="hit-meta">#${escHtml(hit.room_name || hit.room_id)} · ${escHtml(hit.object_kind)} · ${escHtml(hit.author_id)} · ${new Date(hit.created_at).toLocaleString()}</div>
+        <div>${highlightExcerpt(hit.excerpt)}</div>
+      </div>`).join('');
+  } catch (err) {
+    results.innerHTML = `<div class="panel-copy" style="padding:0 14px">${escHtml(errorMessage(err))}</div>`;
+  }
+}
+
+// A hit in another channel opens that channel first. Opening its thread while the
+// main pane still showed the old one is what made the result unreadable.
+async function openSearchHit(data) {
+  const hitRoomId = data.roomId;
+  if (hitRoomId && hitRoomId !== roomId) {
+    if (!myRooms.some(room => room.room_id === hitRoomId)) await refreshRooms();
+    if (!myRooms.some(room => room.room_id === hitRoomId)) {
+      toast('That result is in a channel this view cannot open.', 'error');
+      return;
+    }
+    await switchRoom(hitRoomId);
+  }
+  await openThread(data.messageId);
+}
+
+// The server brackets each match; escape first, then turn the brackets into marks.
+function highlightExcerpt(excerpt) {
+  return escHtml(excerpt).replace(/\[([^\]]*)\]/g, '<mark>$1</mark>');
+}
+
+function applyReadCursor(cursor) {
+  if (!cursor) return;
+  readCursor = cursor.last_read_sequence || 0;
+  const unread = cursor.unread_messages || 0;
+  const pill = document.getElementById('unread-pill');
+  pill.hidden = unread === 0;
+  pill.textContent = unread;
+}
+
+async function refreshUnread() {
+  try { applyReadCursor(await api('GET', `/rooms/${roomId}/read-cursor`)); }
+  catch (err) { console.error('Failed to read the read cursor:', err); }
+}
+
+async function markRoomRead() {
+  try {
+    applyReadCursor(await api('PUT', `/rooms/${roomId}/read-cursor`, {last_read_sequence: lastSequence}));
+    document.querySelectorAll('.msg.unread').forEach(el => el.classList.remove('unread'));
+    document.querySelectorAll('.unread-rule').forEach(el => el.remove());
+  } catch (err) {
+    toast(`Read position was not saved: ${errorMessage(err)}`, 'error');
+  }
 }
 
 function renderAgents(agents) {
@@ -1247,6 +1487,15 @@ function applyPermissions() {
     button.disabled = !canEdit;
     button.title = canEdit ? '' : readOnly;
   });
+  // Reacting and replying are mutations; reading a thread or searching is not.
+  document.querySelectorAll('.msg-actions button[data-emoji]').forEach(button => {
+    button.disabled = !canEdit;
+    button.title = canEdit ? '' : readOnly;
+  });
+  const invokeAgents = document.getElementById('invoke-agents');
+  if (invokeAgents) invokeAgents.disabled = !canEdit;
+  const threadForm = document.getElementById('thread-reply-form');
+  if (threadForm) threadForm.hidden = !canEdit || !openThreadRootId;
 }
 
 async function cancelCurrentTurn() {
@@ -1525,9 +1774,11 @@ async function sendMessage() {
   if (!text) return;
   input.value = '';
 
+  const invokeAgents = document.getElementById('invoke-agents');
   try {
     await api('POST', `/rooms/${roomId}/messages`, {
-      content: text, role: 'HUMAN'
+      content: text, role: 'HUMAN',
+      invoke_mentioned_agents: Boolean(invokeAgents && invokeAgents.checked)
     }, { idempotencyKey: idempotencyKey() });
   } catch(err) {
     console.error('Failed to send message:', err);

@@ -1,0 +1,245 @@
+"""End-to-end coverage for the conversation endpoints.
+
+Threaded replies, derived counts, mention derivation on the write path, reactions,
+the durable read cursor, the sequence cursor on the room listing, and search.
+"""
+
+from __future__ import annotations
+
+from urllib.parse import quote
+
+from fastapi.testclient import TestClient
+
+from multiplayer.server import create_app
+
+OWNER_HEADERS = {"Authorization": "Bearer owner-token"}
+PEER_HEADERS = {"Authorization": "Bearer peer-token"}
+
+
+def _seed(client: TestClient) -> dict[str, str]:
+    org = client.post(
+        "/api/v1/organizations", headers=OWNER_HEADERS, json={"name": "Conv", "slug": "conv"}
+    ).json()
+    workspace = client.post(
+        f"/api/v1/organizations/{org['org_id']}/workspaces",
+        headers=OWNER_HEADERS,
+        json={"name": "Main", "slug": "main"},
+    ).json()
+    room = client.post(
+        f"/api/v1/workspaces/{workspace['workspace_id']}/rooms",
+        headers=OWNER_HEADERS,
+        json={"name": "Authentication migration"},
+    ).json()
+    invited = client.post(
+        f"/api/v1/rooms/{room['room_id']}/members/invitations",
+        headers=OWNER_HEADERS,
+        json={"user_id": "user-b", "role": "editor"},
+    )
+    assert invited.status_code == 200, invited.text
+    templates = client.get("/api/v1/agent-templates", headers=OWNER_HEADERS).json()
+    agent = client.post(
+        f"/api/v1/rooms/{room['room_id']}/agents",
+        headers=OWNER_HEADERS,
+        json={"template_id": templates[0]["template_id"], "name": "Architect"},
+    ).json()
+    return {"room_id": room["room_id"], "agent_id": agent["agent_id"]}
+
+
+def _app() -> TestClient:
+    return TestClient(
+        create_app(
+            ":memory:",
+            auth_tokens={"owner-token": "user-a", "peer-token": "user-b"},
+        )
+    )
+
+
+def test_threads_reactions_read_state_and_search_end_to_end() -> None:
+    with _app() as client:
+        seeded = _seed(client)
+        room_id = seeded["room_id"]
+
+        root = client.post(
+            f"/api/v1/rooms/{room_id}/messages",
+            headers=OWNER_HEADERS,
+            json={"content": "Do we adopt a managed identity provider?"},
+        ).json()
+        first = client.post(
+            f"/api/v1/messages/{root['message_id']}/replies",
+            headers=PEER_HEADERS,
+            json={"content": "Only with a rollback rehearsal."},
+        )
+        assert first.status_code == 200, first.text
+        second = client.post(
+            f"/api/v1/messages/{first.json()['message_id']}/replies",
+            headers=OWNER_HEADERS,
+            json={"content": "Rehearsal needs a dual-write window."},
+        ).json()
+
+        assert first.json()["thread_depth"] == 1
+        assert second["thread_depth"] == 2
+        assert second["root_message_id"] == root["message_id"]
+
+        thread = client.get(
+            f"/api/v1/messages/{root['message_id']}/thread", headers=OWNER_HEADERS
+        ).json()
+        assert [entry["reply_count"] for entry in thread] == [1, 1, 0]
+
+        # Reactions: add, list, remove, and re-add over one durable row.
+        emoji = quote("👍")
+        added = client.post(
+            f"/api/v1/messages/{root['message_id']}/reactions",
+            headers=PEER_HEADERS,
+            json={"emoji": "👍"},
+        )
+        assert added.status_code == 200, added.text
+        live = client.get(
+            f"/api/v1/messages/{root['message_id']}/reactions", headers=OWNER_HEADERS
+        ).json()
+        assert [r["actor_id"] for r in live] == ["user-b"]
+        removed = client.delete(
+            f"/api/v1/messages/{root['message_id']}/reactions/{emoji}", headers=PEER_HEADERS
+        )
+        assert removed.status_code == 200, removed.text
+        assert (
+            client.get(
+                f"/api/v1/messages/{root['message_id']}/reactions", headers=OWNER_HEADERS
+            ).json()
+            == []
+        )
+        client.post(
+            f"/api/v1/messages/{root['message_id']}/reactions",
+            headers=PEER_HEADERS,
+            json={"emoji": "👍"},
+        )
+        assert (
+            len(
+                client.get(
+                    f"/api/v1/messages/{root['message_id']}/reactions", headers=OWNER_HEADERS
+                ).json()
+            )
+            == 1
+        )
+
+        # The room listing resumes from a sequence cursor, and it is the flat
+        # channel: neither reply above asked to be broadcast, so neither appears.
+        after = client.get(
+            f"/api/v1/rooms/{room_id}/messages",
+            headers=OWNER_HEADERS,
+            params={"after_sequence": root["sequence"]},
+        ).json()
+        assert after == []
+
+        # The read cursor is durable server-side state.
+        before = client.get(f"/api/v1/rooms/{room_id}/read-cursor", headers=PEER_HEADERS).json()
+        assert before["last_read_sequence"] == 0
+        assert before["unread_messages"] == 3
+        client.put(
+            f"/api/v1/rooms/{room_id}/read-cursor",
+            headers=PEER_HEADERS,
+            json={"last_read_sequence": second["sequence"]},
+        )
+        after_set = client.get(f"/api/v1/rooms/{room_id}/read-cursor", headers=PEER_HEADERS).json()
+        assert after_set["last_read_sequence"] == second["sequence"]
+        assert after_set["unread_messages"] == 0
+        # It is per user: the owner's own position is untouched.
+        assert (
+            client.get(f"/api/v1/rooms/{room_id}/read-cursor", headers=OWNER_HEADERS).json()[
+                "last_read_sequence"
+            ]
+            == 0
+        )
+
+        # A reply that explicitly asks for the channel does appear in the flat log.
+        shared = client.post(
+            f"/api/v1/messages/{root['message_id']}/replies",
+            headers=PEER_HEADERS,
+            json={"content": "Summary for the channel.", "broadcast_to_room": True},
+        ).json()
+        after_broadcast = client.get(
+            f"/api/v1/rooms/{room_id}/messages",
+            headers=OWNER_HEADERS,
+            params={"after_sequence": root["sequence"]},
+        ).json()
+        assert [m["message_id"] for m in after_broadcast] == [shared["message_id"]]
+
+        hits = client.get(
+            "/api/v1/search", headers=OWNER_HEADERS, params={"q": "dual-write window"}
+        ).json()
+        assert [hit["object_id"] for hit in hits] == [second["message_id"]]
+        # A hit names the channel it lives in, not only its id.
+        assert hits[0]["room_name"] == "Authentication migration"
+
+
+def test_a_mention_records_the_target_and_only_invokes_when_asked() -> None:
+    with _app() as client:
+        seeded = _seed(client)
+        room_id, agent_id = seeded["room_id"], seeded["agent_id"]
+
+        quiet = client.post(
+            f"/api/v1/rooms/{room_id}/messages",
+            headers=OWNER_HEADERS,
+            json={"content": "@user-b and @Architect, opinions?"},
+        ).json()
+        assert {m["target_type"] for m in quiet["mentions"]} == {"USER", "AGENT"}
+        assert all(m["invoked_execution_id"] is None for m in quiet["mentions"])
+
+        invoked = client.post(
+            f"/api/v1/rooms/{room_id}/messages",
+            headers=OWNER_HEADERS,
+            json={"content": "@Architect assess it now", "invoke_mentioned_agents": True},
+        ).json()
+        agent_mention = next(m for m in invoked["mentions"] if m["target_type"] == "AGENT")
+        assert agent_mention["target_id"] == agent_id
+        assert agent_mention["invoked_execution_id"]
+
+        started = [
+            event
+            for event in client.get(f"/api/v1/rooms/{room_id}/events", headers=OWNER_HEADERS).json()
+            if event["event_type"] == "agent.run.started"
+        ]
+        assert len(started) == 1
+        assert started[0]["payload"]["triggered_by"] == "MENTION"
+
+        # Why the agent spoke is readable from the run itself, not only the event.
+        state = client.get(f"/api/v1/rooms/{room_id}/state", headers=OWNER_HEADERS).json()
+        run = next(
+            item
+            for item in state["runs"]
+            if item["execution_id"] == agent_mention["invoked_execution_id"]
+        )
+        assert run["triggered_by"] == "MENTION"
+        assert run["status"] == "COMPLETED"
+        produced = next(
+            item for item in state["outputs"] if item["execution_id"] == run["execution_id"]
+        )
+        branch = client.get(
+            f"/api/v1/branches/{produced['branch_id']}", headers=OWNER_HEADERS
+        ).json()
+        assert [item["triggered_by"] for item in branch["runs"]] == ["MENTION"]
+
+        # The answer landed in the thread as an AGENT message pointing at its output.
+        thread = client.get(
+            f"/api/v1/messages/{invoked['message_id']}/thread", headers=OWNER_HEADERS
+        ).json()
+        answer = thread[-1]
+        assert answer["role"] == "AGENT"
+        assert answer["sender_id"] == agent_id
+        assert answer["parent_message_id"] == invoked["message_id"]
+        output_id = answer["metadata"]["output_id"]
+        assert any(item["output_id"] == output_id for item in state["outputs"])
+
+        # And an authenticated principal still cannot author one themselves.
+        spoofed = client.post(
+            f"/api/v1/rooms/{room_id}/messages",
+            headers=OWNER_HEADERS,
+            json={"content": "I am the agent", "role": "AGENT"},
+        )
+        assert spoofed.status_code == 403
+
+
+def test_a_search_query_of_only_punctuation_is_rejected() -> None:
+    with _app() as client:
+        _seed(client)
+        rejected = client.get("/api/v1/search", headers=OWNER_HEADERS, params={"q": "***"})
+        assert rejected.status_code == 400

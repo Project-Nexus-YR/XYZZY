@@ -15,6 +15,7 @@ from ..domain.models import (
     AgentOutput,
     AgentStatus,
     AgentTemplate,
+    AgentTrigger,
     Approval,
     ApprovalStatus,
     Artifact,
@@ -37,7 +38,10 @@ from ..domain.models import (
     IdempotencyRecord,
     Memory,
     MemoryScope,
+    MentionTargetType,
     Message,
+    MessageMention,
+    MessageReaction,
     MessageRole,
     Notification,
     NotificationStatus,
@@ -55,15 +59,20 @@ from ..domain.models import (
     OutputDisposition,
     OutputSelection,
     Presence,
+    ReadCursor,
     Room,
     RoomMember,
     RoomStatus,
+    SearchHit,
+    SearchObjectKind,
     Session,
     SessionStatus,
     Task,
     TaskDependency,
     TaskPriority,
     TaskStatus,
+    ThreadReply,
+    ThreadSummary,
     ToolPermission,
     ToolRequest,
     TurnLock,
@@ -76,6 +85,7 @@ from ..domain.models import (
     new_id,
     utcnow,
 )
+from ..security.authorization import RoomCapability, roles_with_capability
 from .connection import Database, serialize_datetime
 
 log = logging.getLogger(__name__)
@@ -102,6 +112,10 @@ class Repos:
         self.turn_locks = TurnLockRepo(db)
         self.tasks = TaskRepo(db)
         self.messages = MessageRepo(db)
+        self.mentions = MessageMentionRepo(db)
+        self.reactions = MessageReactionRepo(db)
+        self.read_cursors = ReadCursorRepo(db)
+        self.search = SearchRepo(db)
         self.events = EventRepo(db)
         self.artifacts = ArtifactRepo(db)
         self.decisions = DecisionRepo(db)
@@ -1007,14 +1021,15 @@ class ExecutionRepo:
             execution = replace(execution, branch_id=branch.branch_id)
         await self.db.execute(
             "INSERT INTO executions(execution_id, session_id, agent_id, branch_id, run_id, "
-            "status, input_data, output_data, error, started_at, completed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "triggered_by, status, input_data, output_data, error, started_at, "
+            "completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 execution.execution_id,
                 execution.session_id,
                 execution.agent_id,
                 execution.branch_id,
                 execution.run_id,
+                execution.triggered_by.value,
                 execution.status.value,
                 json.dumps(execution.input_data),
                 json.dumps(execution.output_data),
@@ -1052,14 +1067,15 @@ class ExecutionRepo:
             )
             await self.db.execute(
                 "INSERT INTO executions(execution_id, session_id, agent_id, branch_id, run_id, "
-                "status, input_data, output_data, error, started_at, completed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "triggered_by, status, input_data, output_data, error, started_at, "
+                "completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     execution.execution_id,
                     execution.session_id,
                     execution.agent_id,
                     execution.branch_id,
                     execution.run_id,
+                    execution.triggered_by.value,
                     execution.status.value,
                     json.dumps(execution.input_data),
                     json.dumps(execution.output_data),
@@ -1190,6 +1206,14 @@ class ExecutionRepo:
         )
         return [self._from_row(r) for r in rows]
 
+    async def list_pending_by_trigger(self, trigger: AgentTrigger) -> list[Execution]:
+        """Runs still waiting to start, for a startup sweep that settles orphans."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM executions WHERE status = ? AND triggered_by = ? ORDER BY started_at",
+            (ExecutionStatus.PENDING.value, trigger.value),
+        )
+        return [self._from_row(r) for r in rows]
+
     async def list_by_branch(self, branch_id: str) -> list[Execution]:
         rows = await self.db.fetch_all(
             "SELECT * FROM executions WHERE branch_id = ? ORDER BY started_at, execution_id",
@@ -1212,6 +1236,7 @@ class ExecutionRepo:
             agent_id=row["agent_id"],
             branch_id=row.get("branch_id") or "",
             run_id=row.get("run_id"),
+            triggered_by=AgentTrigger(row["triggered_by"]),
             status=ExecutionStatus(row["status"]),
             input_data=input_data,
             output_data=output_data,
@@ -1267,8 +1292,16 @@ class AgentOutputRepo:
         self,
         output: AgentOutput,
         events: list[RoomEvent],
+        message: Message | None = None,
+        message_event: RoomEvent | None = None,
     ) -> list[RoomEvent]:
-        """Persist output, terminal state, and canonical events in one transaction."""
+        """Persist output, terminal state, and canonical events in one transaction.
+
+        When the turn was addressed in the conversation, the agent's message lands
+        in the same transaction as the output it points at: either the room gets
+        both or it gets neither, so a reader never sees an answer with no record or
+        a record the conversation never mentioned.
+        """
         persisted_events: list[RoomEvent] = []
         async with self.db.transaction():
             await self.db.execute(
@@ -1339,6 +1372,13 @@ class AgentOutputRepo:
                     ),
                 )
                 persisted_events.append(persisted)
+            if message is not None and message_event is not None:
+                # Last, so the log reads: output recorded, run completed, agent spoke.
+                persisted_events.append(
+                    await MessageRepo(self.db).create_with_event_and_turn_guard_in_transaction(
+                        message, message_event
+                    )
+                )
         return persisted_events
 
     @staticmethod
@@ -1747,8 +1787,9 @@ class MessageRepo:
     async def create(self, message: Message) -> Message:
         await self.db.execute(
             "INSERT INTO messages(message_id, room_id, role, sender_id, content, "
-            "metadata, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "metadata, event_sequence, parent_message_id, root_message_id, thread_depth, "
+            "broadcast_to_room, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 message.message_id,
                 message.room_id,
@@ -1756,8 +1797,21 @@ class MessageRepo:
                 message.sender_id,
                 message.content,
                 json.dumps(message.metadata),
+                message.event_sequence,
+                message.parent_message_id,
+                message.root_message_id,
+                message.thread_depth,
+                int(message.broadcast_to_room),
                 serialize_datetime(message.created_at),
             ),
+        )
+        await SearchRepo(self.db).index(
+            SearchObjectKind.MESSAGE,
+            message.message_id,
+            message.room_id,
+            message.sender_id,
+            message.content,
+            message.created_at,
         )
         await self.db.commit()
         return message
@@ -1782,19 +1836,105 @@ class MessageRepo:
                     f"room turn is locked by branch {lock.branch_id} until it is terminal"
                 )
         await self.create(message)
-        return await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
+        persisted = await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
+        # The message and the event that created it are one atomic unit, so the
+        # message can carry the sequence rather than a reader having to join for it.
+        await self.db.execute(
+            "UPDATE messages SET event_sequence = ? WHERE message_id = ?",
+            (persisted.sequence, message.message_id),
+        )
+        return persisted
 
     async def get(self, message_id: str) -> Message | None:
         row = await self.db.fetch_one("SELECT * FROM messages WHERE message_id = ?", (message_id,))
         return self._from_row(row) if row else None
 
-    async def list_by_room(self, room_id: str, limit: int = 100, offset: int = 0) -> list[Message]:
+    async def list_by_room(
+        self,
+        room_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        after_sequence: int | None = None,
+    ) -> list[Message]:
+        """The flat channel log: top-level messages, plus replies that were broadcast.
+
+        broadcast_to_room is enforced here rather than by whichever client happens
+        to filter, so every caller of this listing — browser or not — sees the same
+        channel.
+        """
         limit = min(limit, 500)
+        broadcast = "(parent_message_id IS NULL OR broadcast_to_room = 1)"
+        if after_sequence is not None:
+            rows = await self.db.fetch_all(
+                f"SELECT * FROM messages WHERE room_id = ? AND event_sequence > ? AND {broadcast} "
+                "ORDER BY event_sequence, message_id LIMIT ?",
+                (room_id, after_sequence, limit),
+            )
+            return [self._from_row(r) for r in rows]
         rows = await self.db.fetch_all(
-            "SELECT * FROM messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT * FROM messages WHERE room_id = ? AND {broadcast} "
+            "ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (room_id, limit, offset),
         )
         return [self._from_row(r) for r in reversed(rows)]
+
+    async def count_since_sequence(self, room_id: str, sequence: int) -> int:
+        row = await self.db.fetch_one(
+            "SELECT COUNT(*) AS unread FROM messages WHERE room_id = ? AND event_sequence > ?",
+            (room_id, sequence),
+        )
+        return int(row["unread"]) if row else 0
+
+    async def count_replies(self, message_id: str) -> int:
+        """Derived from the durable reply rows; this layer stores no reply counter."""
+        row = await self.db.fetch_one(
+            "SELECT COUNT(*) AS replies FROM messages WHERE parent_message_id = ?", (message_id,)
+        )
+        return int(row["replies"]) if row else 0
+
+    async def thread_summaries_by_room(self, room_id: str) -> dict[str, ThreadSummary]:
+        """Every thread in one room, summarised from its own rows on this read.
+
+        Grouped on root_message_id, not on parent_message_id: a channel shows one
+        entry per thread, so the number beside it must be the whole thread. Grouping
+        on the parent would tell a twelve-message thread it has two replies because
+        only two of them answered the root directly.
+        """
+        rows = await self.db.fetch_all(
+            "SELECT COALESCE(m.root_message_id, m.message_id) AS root_id, "
+            "SUM(CASE WHEN m.root_message_id IS NULL THEN 0 ELSE 1 END) AS descendants, "
+            "COUNT(DISTINCT m.sender_id) AS participants, "
+            "MAX(CASE WHEN m.root_message_id IS NULL THEN NULL ELSE m.created_at END) "
+            "AS last_reply_at "
+            "FROM messages m WHERE m.room_id = ? GROUP BY root_id HAVING descendants > 0",
+            (room_id,),
+        )
+        return {
+            str(row["root_id"]): ThreadSummary(
+                root_message_id=str(row["root_id"]),
+                descendant_count=int(row["descendants"]),
+                participant_count=int(row["participants"]),
+                last_reply_at=(
+                    datetime.fromisoformat(row["last_reply_at"])
+                    if row.get("last_reply_at")
+                    else None
+                ),
+            )
+            for row in rows
+        }
+
+    async def list_thread(self, root_message_id: str, limit: int = 200) -> list[ThreadReply]:
+        """The root and every descendant, each with its own count computed on read."""
+        rows = await self.db.fetch_all(
+            "SELECT m.*, ("
+            "  SELECT COUNT(*) FROM messages c WHERE c.parent_message_id = m.message_id"
+            ") AS reply_count "
+            "FROM messages m "
+            "WHERE m.message_id = ? OR m.root_message_id = ? "
+            "ORDER BY m.event_sequence, m.message_id LIMIT ?",
+            (root_message_id, root_message_id, min(limit, 500)),
+        )
+        return [ThreadReply(self._from_row(r), int(r["reply_count"])) for r in rows]
 
     @staticmethod
     def _from_row(r: dict[str, Any]) -> Message:
@@ -1805,8 +1945,224 @@ class MessageRepo:
             sender_id=r["sender_id"],
             content=r["content"],
             metadata=json.loads(r["metadata"]),
+            event_sequence=int(r["event_sequence"]),
+            parent_message_id=r.get("parent_message_id"),
+            root_message_id=r.get("root_message_id"),
+            thread_depth=int(r["thread_depth"]),
+            broadcast_to_room=bool(r["broadcast_to_room"]),
             created_at=datetime.fromisoformat(r["created_at"]),
         )
+
+
+class MessageMentionRepo:
+    """Mentions are derived from message text, so this repo only stores and reads."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create(self, mention: MessageMention) -> None:
+        await self.db.execute(
+            "INSERT INTO message_mentions(message_id, room_id, target_type, target_id, handle, "
+            "invoked_execution_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                mention.message_id,
+                mention.room_id,
+                mention.target_type.value,
+                mention.target_id,
+                mention.handle,
+                mention.invoked_execution_id,
+                serialize_datetime(mention.created_at),
+            ),
+        )
+        await self.db.commit()
+
+    async def list_for_message(self, message_id: str) -> list[MessageMention]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM message_mentions WHERE message_id = ? ORDER BY target_type, target_id",
+            (message_id,),
+        )
+        return [self._from_row(r) for r in rows]
+
+    @staticmethod
+    def _from_row(r: dict[str, Any]) -> MessageMention:
+        return MessageMention(
+            message_id=r["message_id"],
+            room_id=r["room_id"],
+            target_type=MentionTargetType(r["target_type"]),
+            target_id=r["target_id"],
+            handle=r["handle"],
+            invoked_execution_id=r.get("invoked_execution_id"),
+            created_at=datetime.fromisoformat(r["created_at"]),
+        )
+
+
+class MessageReactionRepo:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def set_removed_at(
+        self, message_id: str, room_id: str, actor_id: str, emoji: str, removed_at: datetime | None
+    ) -> MessageReaction:
+        """Add or restore when removed_at is None, soft-remove when it is a time."""
+        now = utcnow()
+        await self.db.execute(
+            "INSERT INTO message_reactions(message_id, room_id, actor_id, emoji, created_at, "
+            "updated_at, removed_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(message_id, actor_id, emoji) DO UPDATE SET "
+            "updated_at = excluded.updated_at, removed_at = excluded.removed_at",
+            (
+                message_id,
+                room_id,
+                actor_id,
+                emoji,
+                serialize_datetime(now),
+                serialize_datetime(now),
+                serialize_datetime(removed_at),
+            ),
+        )
+        reaction = await self.get(message_id, actor_id, emoji)
+        if reaction is None:
+            raise DomainError("reaction was not persisted")
+        return reaction
+
+    async def get(self, message_id: str, actor_id: str, emoji: str) -> MessageReaction | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM message_reactions WHERE message_id = ? AND actor_id = ? AND emoji = ?",
+            (message_id, actor_id, emoji),
+        )
+        return self._from_row(row) if row else None
+
+    async def list_live(self, message_id: str) -> list[MessageReaction]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM message_reactions WHERE message_id = ? AND removed_at IS NULL "
+            "ORDER BY emoji, actor_id",
+            (message_id,),
+        )
+        return [self._from_row(r) for r in rows]
+
+    async def list_live_by_room(self, room_id: str) -> list[MessageReaction]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM message_reactions WHERE room_id = ? AND removed_at IS NULL "
+            "ORDER BY message_id, emoji, actor_id",
+            (room_id,),
+        )
+        return [self._from_row(r) for r in rows]
+
+    @staticmethod
+    def _from_row(r: dict[str, Any]) -> MessageReaction:
+        return MessageReaction(
+            message_id=r["message_id"],
+            room_id=r["room_id"],
+            actor_id=r["actor_id"],
+            emoji=r["emoji"],
+            created_at=datetime.fromisoformat(r["created_at"]),
+            updated_at=datetime.fromisoformat(r["updated_at"]),
+            removed_at=(datetime.fromisoformat(r["removed_at"]) if r.get("removed_at") else None),
+        )
+
+
+class ReadCursorRepo:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def get(self, room_id: str, user_id: str) -> ReadCursor | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM room_read_cursors WHERE room_id = ? AND user_id = ?",
+            (room_id, user_id),
+        )
+        if row is None:
+            return None
+        return ReadCursor(
+            room_id=row["room_id"],
+            user_id=row["user_id"],
+            last_read_sequence=int(row["last_read_sequence"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    async def set(self, cursor: ReadCursor) -> None:
+        await self.db.execute(
+            "INSERT INTO room_read_cursors(room_id, user_id, last_read_sequence, updated_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(room_id, user_id) DO UPDATE SET "
+            "last_read_sequence = excluded.last_read_sequence, updated_at = excluded.updated_at",
+            (
+                cursor.room_id,
+                cursor.user_id,
+                cursor.last_read_sequence,
+                serialize_datetime(cursor.updated_at),
+            ),
+        )
+        await self.db.commit()
+
+
+class SearchRepo:
+    """Full-text search over an opt-in allowlist of object kinds.
+
+    Nothing reaches the index unless its kind has a row in search_indexed_kinds:
+    that is a foreign key, so an unlisted kind cannot be written at all. And the
+    asker's room membership is a join inside the matching query itself, so a
+    non-member's search produces zero rows in SQLite rather than rows that some
+    later Python filter is trusted to drop.
+    """
+
+    # The roles that carry RoomCapability.READ, derived from the authorization
+    # policy at import time rather than restated here. The join is still
+    # deny-by-default — it is a role predicate, not "any row in room_members" —
+    # but its predicate now cannot outlive a change to the policy table.
+    _READING_ROLES = roles_with_capability(RoomCapability.READ)
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def index(
+        self,
+        kind: SearchObjectKind,
+        object_id: str,
+        room_id: str,
+        author_id: str,
+        content: str,
+        created_at: datetime,
+    ) -> None:
+        await self.db.execute(
+            "INSERT INTO search_documents(object_kind, object_id, room_id, author_id, content, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(object_kind, object_id) DO UPDATE SET content = excluded.content",
+            (kind.value, object_id, room_id, author_id, content, serialize_datetime(created_at)),
+        )
+
+    async def search(
+        self, user_id: str, match_query: str, room_id: str | None = None, limit: int = 50
+    ) -> list[SearchHit]:
+        placeholders = ", ".join("?" for _ in self._READING_ROLES)
+        sql = (
+            "SELECT d.object_kind, d.object_id, d.room_id, r.name AS room_name, d.author_id, "
+            "d.created_at, snippet(search_documents_fts, 0, '[', ']', '…', 12) AS excerpt "
+            "FROM search_documents_fts f "
+            "JOIN search_documents d ON d.document_id = f.rowid "
+            "JOIN search_indexed_kinds k ON k.object_kind = d.object_kind "
+            "JOIN rooms r ON r.room_id = d.room_id "
+            "JOIN room_members rm ON rm.room_id = d.room_id AND rm.user_id = ? "
+            f"AND rm.role IN ({placeholders}) "
+            "WHERE search_documents_fts MATCH ?"
+        )
+        params: tuple[Any, ...] = (user_id, *self._READING_ROLES, match_query)
+        if room_id is not None:
+            sql += " AND d.room_id = ?"
+            params += (room_id,)
+        sql += " ORDER BY rank LIMIT ?"
+        params += (min(limit, 100),)
+        rows = await self.db.fetch_all(sql, params)
+        return [
+            SearchHit(
+                object_kind=SearchObjectKind(r["object_kind"]),
+                object_id=r["object_id"],
+                room_id=r["room_id"],
+                room_name=r["room_name"],
+                author_id=r["author_id"],
+                excerpt=r["excerpt"],
+                created_at=datetime.fromisoformat(r["created_at"]),
+            )
+            for r in rows
+        ]
 
 
 class EventRepo:

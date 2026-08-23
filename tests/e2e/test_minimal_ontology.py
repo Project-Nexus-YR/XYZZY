@@ -58,7 +58,7 @@ def _events(client: TestClient, room_id: str) -> list[dict[str, Any]]:
 
 def test_browser_ontology_contract_uses_public_reconnect_state_and_review_routes() -> None:
     """The visible panel is wired only to room state and capability-checked APIs."""
-    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text()
+    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
     assert 'id="ontology-panel"' in ui
     assert 'id="ontology-tree"' in ui
     assert 'id="ontology-history"' in ui

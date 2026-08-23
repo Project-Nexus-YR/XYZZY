@@ -71,6 +71,8 @@ async def test_workflow_only_run_persists_labelled_output_and_reconnect_state(se
             "agent_id": agent.agent_id,
             "run_id": f"run_{execution.execution_id}",
             "status": "COMPLETED",
+            # A reconnecting reader can see why this agent spoke.
+            "triggered_by": "DIRECT",
             "started_at": state["runs"][0]["started_at"],
             "completed_at": state["runs"][0]["completed_at"],
         }

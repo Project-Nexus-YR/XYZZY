@@ -21,6 +21,7 @@ from ..domain.models import (
     Execution,
     IdempotencyConflict,
     MemoryScope,
+    Message,
     MessageRole,
     OntologyRelationshipKind,
     OntologyReviewAction,
@@ -273,6 +274,23 @@ class CreateMessageRequest(BaseModel):
     content: str
     role: str = "HUMAN"
     sender_id: str = ""
+    # Mentions are derived from the content, never accepted from the client.
+    # Addressing an agent only records and notifies unless this is explicitly set.
+    invoke_mentioned_agents: bool = False
+
+
+class CreateReplyRequest(BaseModel):
+    content: str
+    broadcast_to_room: bool = False
+    invoke_mentioned_agents: bool = False
+
+
+class ReactionRequest(BaseModel):
+    emoji: str
+
+
+class ReadCursorRequest(BaseModel):
+    last_read_sequence: int
 
 
 class CreateArtifactRequest(BaseModel):
@@ -541,7 +559,7 @@ async def get_room_state(
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
     try:
-        return await svc.get_room_state(room_id, last_sequence)
+        return await svc.get_room_state(room_id, last_sequence, principal.user_id)
     except DomainError as e:
         raise HTTPException(404, str(e)) from e
 
@@ -730,6 +748,8 @@ def _run_record(run: Execution) -> dict[str, Any]:
         "agent_id": run.agent_id,
         "run_id": run.run_id,
         "status": run.status.value,
+        # Why the agent spoke, on every run a reader can see.
+        "triggered_by": run.triggered_by.value,
         "started_at": run.started_at.isoformat(),
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
         "error": run.error,
@@ -1240,7 +1260,11 @@ async def start_execution(
         execution = await svc.start_execution(session_id)
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
-    return {"execution_id": execution.execution_id, "status": execution.status.value}
+    return {
+        "execution_id": execution.execution_id,
+        "status": execution.status.value,
+        "triggered_by": execution.triggered_by.value,
+    }
 
 
 @router.post("/executions/{execution_id}/step")
@@ -1449,14 +1473,19 @@ async def send_message(
     sender = principal.user_id
     try:
         msg = await svc.send_message(
-            room_id, role, sender, req.content, idempotency_key=idempotency_key
+            room_id,
+            role,
+            sender,
+            req.content,
+            idempotency_key=idempotency_key,
+            invoke_mentioned_agents=req.invoke_mentioned_agents,
         )
     except IdempotencyConflict as e:
         raise HTTPException(409, str(e)) from e
     except DomainError as e:
         status = 409 if "turn is locked" in str(e) else 400
         raise HTTPException(status, str(e)) from e
-    return {"message_id": msg.message_id, "role": msg.role.value, "content": msg.content}
+    return await _message_response(msg)
 
 
 @router.get("/rooms/{room_id}/messages")
@@ -1464,19 +1493,189 @@ async def list_messages(
     room_id: str,
     principal: CurrentUser,
     limit: int = Query(100, ge=1, le=500),
+    after_sequence: int | None = Query(None, ge=0),
 ) -> list[dict[str, Any]]:
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    messages = await svc.list_room_messages(room_id, limit)
+    messages = await svc.list_room_messages(room_id, limit, after_sequence)
+    return [_message_summary(m) for m in messages]
+
+
+# ── Threads, mentions, reactions, read state, search ─────────────────────────
+
+
+def _message_summary(message: Message) -> dict[str, Any]:
+    return {
+        "message_id": message.message_id,
+        "role": message.role.value,
+        "sender_id": message.sender_id,
+        "content": message.content,
+        # An agent's message names the output it came from here; the output stays
+        # the inspectable record and this is the pointer to it.
+        "metadata": message.metadata,
+        "sequence": message.event_sequence,
+        "parent_message_id": message.parent_message_id,
+        "root_message_id": message.root_message_id,
+        "thread_depth": message.thread_depth,
+        "broadcast_to_room": message.broadcast_to_room,
+        "created_at": message.created_at.isoformat(),
+    }
+
+
+async def _message_response(message: Message) -> dict[str, Any]:
+    """A written message plus the mentions the server derived from its text."""
+    svc = _svc_or_404()
+    mentions = await svc.list_message_mentions(message.message_id)
+    return {
+        **_message_summary(message),
+        "mentions": [
+            {
+                "target_type": mention.target_type.value,
+                "target_id": mention.target_id,
+                "handle": mention.handle,
+                "invoked_execution_id": mention.invoked_execution_id,
+            }
+            for mention in mentions
+        ],
+    }
+
+
+async def _authorized_message(
+    message_id: str, principal: AuthenticatedUser, capability: RoomCapability
+) -> Message:
+    try:
+        message = await _svc_or_404().get_message(message_id)
+    except DomainError as exc:
+        raise HTTPException(404, "message not found") from exc
+    await _require_room(message.room_id, principal, capability)
+    return message
+
+
+@router.post("/messages/{message_id}/replies")
+async def reply_to_message(
+    message_id: str,
+    req: CreateReplyRequest,
+    principal: CurrentUser,
+    idempotency_key: IdempotencyKey = None,
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    parent = await _authorized_message(message_id, principal, RoomCapability.MUTATE)
+    try:
+        reply = await svc.send_message(
+            parent.room_id,
+            MessageRole.HUMAN,
+            principal.user_id,
+            req.content,
+            idempotency_key=idempotency_key,
+            parent_message_id=parent.message_id,
+            broadcast_to_room=req.broadcast_to_room,
+            invoke_mentioned_agents=req.invoke_mentioned_agents,
+        )
+    except IdempotencyConflict as e:
+        raise HTTPException(409, str(e)) from e
+    except DomainError as e:
+        status = 409 if "turn is locked" in str(e) else 400
+        raise HTTPException(status, str(e)) from e
+    return await _message_response(reply)
+
+
+@router.get("/messages/{message_id}/thread")
+async def get_thread(
+    message_id: str,
+    principal: CurrentUser,
+    limit: int = Query(200, ge=1, le=500),
+) -> list[dict[str, Any]]:
+    svc = _svc_or_404()
+    await _authorized_message(message_id, principal, RoomCapability.READ)
+    thread = await svc.list_thread(message_id, limit)
+    return [
+        # reply_count is counted over the reply rows on this read, never stored.
+        {**_message_summary(entry.message), "reply_count": entry.reply_count}
+        for entry in thread
+    ]
+
+
+@router.post("/messages/{message_id}/reactions")
+async def add_reaction(
+    message_id: str, req: ReactionRequest, principal: CurrentUser
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _authorized_message(message_id, principal, RoomCapability.MUTATE)
+    try:
+        reaction = await svc.add_reaction(message_id, principal.user_id, req.emoji)
+    except DomainError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"message_id": message_id, "emoji": reaction.emoji, "removed": False}
+
+
+@router.delete("/messages/{message_id}/reactions/{emoji}")
+async def remove_reaction(message_id: str, emoji: str, principal: CurrentUser) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _authorized_message(message_id, principal, RoomCapability.MUTATE)
+    try:
+        reaction = await svc.remove_reaction(message_id, principal.user_id, emoji)
+    except DomainError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"message_id": message_id, "emoji": reaction.emoji, "removed": True}
+
+
+@router.get("/messages/{message_id}/reactions")
+async def list_reactions(message_id: str, principal: CurrentUser) -> list[dict[str, Any]]:
+    svc = _svc_or_404()
+    await _authorized_message(message_id, principal, RoomCapability.READ)
+    return [
+        {"emoji": r.emoji, "actor_id": r.actor_id, "created_at": r.created_at.isoformat()}
+        for r in await svc.list_reactions(message_id)
+    ]
+
+
+@router.get("/rooms/{room_id}/read-cursor")
+async def get_read_cursor(room_id: str, principal: CurrentUser) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.READ)
+    return await svc.get_read_cursor(room_id, principal.user_id)
+
+
+@router.put("/rooms/{room_id}/read-cursor")
+async def set_read_cursor(
+    room_id: str, req: ReadCursorRequest, principal: CurrentUser
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.READ)
+    try:
+        return await svc.set_read_cursor(room_id, principal.user_id, req.last_read_sequence)
+    except DomainError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.get("/search")
+async def search(
+    principal: CurrentUser,
+    q: str = Query(..., min_length=1),
+    room_id: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=100),
+) -> list[dict[str, Any]]:
+    """Room membership constrains the SQL itself, so a non-member matches nothing.
+
+    There is deliberately no authorization step in Python here: adding one would
+    hide whether the query is the thing enforcing isolation.
+    """
+    svc = _svc_or_404()
+    try:
+        hits = await svc.search(principal.user_id, q, room_id, limit)
+    except DomainError as e:
+        raise HTTPException(400, str(e)) from e
     return [
         {
-            "message_id": m.message_id,
-            "role": m.role.value,
-            "sender_id": m.sender_id,
-            "content": m.content,
-            "created_at": m.created_at.isoformat(),
+            "object_kind": hit.object_kind.value,
+            "object_id": hit.object_id,
+            "room_id": hit.room_id,
+            "room_name": hit.room_name,
+            "author_id": hit.author_id,
+            "excerpt": hit.excerpt,
+            "created_at": hit.created_at.isoformat(),
         }
-        for m in messages
+        for hit in hits
     ]
 
 

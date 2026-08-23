@@ -260,6 +260,14 @@ class ExecutionStatus(StrEnum):
     PAUSED = "PAUSED"
 
 
+class AgentTrigger(StrEnum):
+    """Why an agent turn happened, recorded on the turn itself."""
+
+    MENTION = "MENTION"
+    DIRECT = "DIRECT"
+    SCHEDULE = "SCHEDULE"
+
+
 @dataclass(frozen=True, slots=True)
 class Execution:
     execution_id: str
@@ -267,6 +275,7 @@ class Execution:
     agent_id: str
     branch_id: str = ""
     run_id: str | None = None
+    triggered_by: AgentTrigger = AgentTrigger.DIRECT
     status: ExecutionStatus = ExecutionStatus.PENDING
     input_data: dict[str, Any] = field(default_factory=dict)
     output_data: dict[str, Any] = field(default_factory=dict)
@@ -451,7 +460,100 @@ class Message:
     sender_id: str
     content: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    # The sequence of the canonical event that created this message, so a client
+    # resumes a message listing on the same cursor it resumes the event log on.
+    event_sequence: int = 0
+    parent_message_id: str | None = None
+    root_message_id: str | None = None
+    thread_depth: int = 0
+    broadcast_to_room: bool = True
     created_at: datetime = field(default_factory=utcnow)
+
+
+class MentionTargetType(StrEnum):
+    USER = "USER"
+    AGENT = "AGENT"
+
+
+@dataclass(frozen=True, slots=True)
+class MessageMention:
+    """One addressed target, derived from the message text, never client-supplied."""
+
+    message_id: str
+    room_id: str
+    target_type: MentionTargetType
+    target_id: str
+    handle: str
+    invoked_execution_id: str | None = None
+    created_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass(frozen=True, slots=True)
+class MessageReaction:
+    message_id: str
+    room_id: str
+    actor_id: str
+    emoji: str
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+    removed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReadCursor:
+    """A member's durable read position on the room's canonical event sequence."""
+
+    room_id: str
+    user_id: str
+    last_read_sequence: int
+    updated_at: datetime = field(default_factory=utcnow)
+
+
+class SearchObjectKind(StrEnum):
+    """Kinds that opted in to indexing. Anything absent here is never searchable."""
+
+    MESSAGE = "MESSAGE"
+
+
+@dataclass(frozen=True, slots=True)
+class SearchHit:
+    object_kind: SearchObjectKind
+    object_id: str
+    room_id: str
+    # The room's name travels with the hit: a result the reader cannot place is a
+    # result they cannot act on, and re-reading rooms client-side would leak which
+    # rooms exist beyond the ones the query already authorized.
+    room_name: str
+    author_id: str
+    excerpt: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadReply:
+    """A reply and the number of replies it has, counted at read time."""
+
+    message: Message
+    reply_count: int
+
+
+# A thread is a conversation, not a tree to recurse forever. Bounding the depth
+# bounds every read that walks it and keeps the rendered indent finite.
+MAX_THREAD_DEPTH = 8
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadSummary:
+    """What a channel needs to describe a thread, every field counted on read.
+
+    Nothing here is stored: a counter maintained on the write path drifts from the
+    reply rows it claims to summarise and nothing detects the drift.
+    """
+
+    root_message_id: str
+    descendant_count: int
+    participant_count: int
+    last_reply_at: datetime | None
 
 
 # ── Artifact ─────────────────────────────────────────────────────────────────
