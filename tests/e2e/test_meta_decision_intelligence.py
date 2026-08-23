@@ -8,7 +8,21 @@ import pytest
 from fastapi.testclient import TestClient
 
 from multiplayer.api import routes
-from multiplayer.domain.models import DomainError
+from multiplayer.db.connection import Database
+from multiplayer.domain.meta import (
+    ACCEPTED_QUESTIONS,
+    MetaQuestionKind,
+    _bears_surveillance_marker,
+    classify_meta_question,
+    normalize_question,
+)
+from multiplayer.domain.models import (
+    DomainError,
+    MessageRole,
+    OntologyExtractor,
+    OntologyReviewAction,
+)
+from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.server import create_app
 from multiplayer.services.service import MultiplayerService
 
@@ -53,6 +67,146 @@ def test_meta_accepts_only_explicit_decision_query_grammar(question: str, expect
 def test_meta_rejects_productivity_and_ambiguous_adjacent_queries(question: str) -> None:
     with pytest.raises(DomainError, match="unsupported Meta question"):
         MultiplayerService._meta_question_kind(question)
+
+
+def test_every_kind_has_at_least_one_accepted_form() -> None:
+    assert set(ACCEPTED_QUESTIONS.values()) == set(MetaQuestionKind)
+
+
+@pytest.mark.parametrize("form", sorted(ACCEPTED_QUESTIONS))
+def test_every_accepted_form_survives_the_refusal_pass(form: str) -> None:
+    """The two layers agree, and markers match whole words rather than substrings."""
+    assert not _bears_surveillance_marker(form)
+    assert classify_meta_question(form) is ACCEPTED_QUESTIONS[form]
+
+
+def test_no_accepted_form_of_one_kind_resolves_to_another() -> None:
+    """A cross-product, so a new form cannot silently widen a neighbouring kind."""
+    by_kind: dict[MetaQuestionKind, set[str]] = {}
+    for form, kind in ACCEPTED_QUESTIONS.items():
+        by_kind.setdefault(kind, set()).add(form)
+    for kind, forms in by_kind.items():
+        for other_kind, other_forms in by_kind.items():
+            if other_kind is kind:
+                continue
+            assert not forms & other_forms
+            for form in other_forms:
+                assert classify_meta_question(form) is not kind
+
+
+def test_refusal_pass_is_not_shadowed_by_the_exact_match_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A question that is both marker-bearing and an exact accepted form still refuses."""
+    laundered = "who closed the most blockers"
+    monkeypatch.setitem(ACCEPTED_QUESTIONS, laundered, MetaQuestionKind.BLOCKERS)
+    assert ACCEPTED_QUESTIONS[laundered] is MetaQuestionKind.BLOCKERS
+    assert _bears_surveillance_marker(laundered)
+    with pytest.raises(DomainError, match="unsupported Meta question"):
+        classify_meta_question(laundered)
+
+
+@pytest.mark.parametrize(
+    "written",
+    [
+        "  WHY   was   this DECISION   made ??? ",
+        "Why Was This Decision Made.",
+        "why was this decision made!",
+        "\twhy was this decision made\n",
+    ],
+)
+def test_normalization_is_stable_across_whitespace_case_and_punctuation(written: str) -> None:
+    assert normalize_question(written) == "why was this decision made"
+    assert classify_meta_question(written) is MetaQuestionKind.WHY_DECISION
+
+
+async def _seed_assertion_room(service: MultiplayerService) -> str:
+    """A room carrying one governed assertion for each of the five new kinds."""
+    org = await service.create_organization("Meta org", "meta-kinds-org", "owner")
+    workspace = await service.create_workspace(org.org_id, "Engineering", "meta-kinds", "owner")
+    room = await service.create_room(workspace.workspace_id, "Kinds", "owner")
+    await service.invite_room_member(room.room_id, "viewer", "viewer", "owner")
+    await service.create_task(room.room_id, "Ship the gateway", created_by="owner")
+    await service.create_task(room.room_id, "Rotate the keys", created_by="owner")
+    await service.create_decision(room.room_id, "Adopt the gateway", "content", created_by="owner")
+    await service.run_ontology_extraction(room.room_id, OntologyExtractor.IMMEDIATE)
+    await service.send_message(
+        room.room_id,
+        MessageRole.HUMAN,
+        "owner",
+        "Ship the gateway is blocked by Rotate the keys",
+    )
+    await service.run_ontology_extraction(room.room_id, OntologyExtractor.ASYNC)
+    blocks = [
+        item
+        for item in await service.repos.ontology.list_relationships(room.room_id)
+        if item.kind.value == "BLOCKS"
+    ]
+    assert len(blocks) == 1
+    await service.review_ontology_relationship(
+        room.room_id,
+        blocks[0].relationship_id,
+        OntologyReviewAction.CONFIRM,
+        "owner",
+        "Confirmed against the message that reported it.",
+    )
+    return room.room_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question", "kind"),
+    [
+        ("what is the status", "STATUS"),
+        ("what is blocking", "BLOCKERS"),
+        ("what changed", "CHANGES"),
+        ("what decisions require attention", "DECISIONS"),
+    ],
+)
+async def test_each_new_kind_answers_from_governed_assertions(question: str, kind: str) -> None:
+    db = Database(":memory:")
+    await db.connect()
+    service = MultiplayerService(db, RealtimeHub(), known_users=frozenset({"owner", "viewer"}))
+    try:
+        await service.initialize()
+        room_id = await _seed_assertion_room(service)
+        answer = await service.answer_decision_meta(room_id, question, user_id="viewer")
+        assert answer["query"]["kind"] == kind
+        assert answer["status"] == "ANSWERED"
+        assert answer["refusal_reason"] is None
+        assert answer["claims"]
+        assert answer["counts"]["claims"] == len(answer["claims"])
+        assert answer["freshness"]["authorized_head"] > 0
+        for claim in answer["claims"]:
+            assert claim["source_object_id"]
+            assert not (
+                claim["derivation_kind"] == "AI_DERIVED" and claim["review_status"] == "UNCONFIRMED"
+            )
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_seeded_empty_room_refuses_with_a_reason_and_writes_nothing() -> None:
+    db = Database(":memory:")
+    await db.connect()
+    service = MultiplayerService(db, RealtimeHub(), known_users=frozenset({"owner"}))
+    try:
+        await service.initialize()
+        org = await service.create_organization("Empty org", "empty-meta-org", "owner")
+        workspace = await service.create_workspace(org.org_id, "Engineering", "empty-meta", "owner")
+        room = await service.create_room(workspace.workspace_id, "Empty", "owner")
+        before = await service.get_room_events(room.room_id)
+        answer = await service.answer_decision_meta(
+            room.room_id, "what is blocking", user_id="owner"
+        )
+        assert answer["status"] == "REFUSED"
+        assert answer["refusal_reason"] == "NO_ASSERTIONS_IN_SCOPE"
+        assert answer["claims"] == [] and answer["unconfirmed"] == []
+        # A Meta read has nothing to emit, because reads never write.
+        assert await service.get_room_events(room.room_id) == before
+    finally:
+        await db.close()
 
 
 def _seed_output(client: TestClient, room_id: str, template_id: str, prompt: str) -> str:
@@ -179,7 +333,7 @@ def test_meta_returns_only_selected_bounded_room_evidence_and_governed_correctio
         assert chain["claim"]["review_status"] == "UNCONFIRMED"
         assert excluded not in str(answer)
         assert included_two not in str(answer)
-        assert answer["freshness"]["room_event_cursor"] > 0
+        assert answer["freshness"]["authorized_head"] > 0
         assert answer["provenance"]["verified"] is None
 
         evidence = _ask(client, room_id, "What evidence supports this decision?")
@@ -308,7 +462,7 @@ def test_browser_meta_contract_exposes_scope_freshness_and_drilldown() -> None:
     assert 'id="meta-evidence"' in ui
     assert 'onclick="askMeta(' in ui
     assert "rooms/${roomId}/meta" in ui
-    assert "room_event_cursor" in ui
+    assert "authorized_head" in ui
     assert "retrieval_counts" in ui
     assert "exact_source_evidence" in ui
     assert "provider_response_id" in ui

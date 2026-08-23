@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from multiplayer.db.connection import Database
 from multiplayer.domain.events import EventType
-from multiplayer.domain.models import OutputDisposition
+from multiplayer.domain.models import OntologyReviewAction, OutputDisposition
 from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.server import create_app
 from multiplayer.services.service import MultiplayerService
@@ -351,5 +351,64 @@ async def test_ontology_failure_rolls_back_artifact_provenance_and_events() -> N
             output_ids[1]: OutputDisposition.INCLUDED,
             output_ids[2]: OutputDisposition.EXCLUDED,
         }
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_extractions_never_enter_the_confirmed_claim_set() -> None:
+    """AI-derived claims are a second result set, and merging them would take new code."""
+    db = Database(":memory:")
+    await db.connect()
+    service = MultiplayerService(db, RealtimeHub(), known_users=frozenset({"owner", "viewer"}))
+    try:
+        await service.initialize()
+        org = await service.create_organization("Assurance org", "assurance-org", "owner")
+        workspace = await service.create_workspace(org.org_id, "Engineering", "assurance", "owner")
+        room = await service.create_room(workspace.workspace_id, "Assurance", "owner")
+        await service.invite_room_member(room.room_id, "viewer", "viewer", "owner")
+        templates = await service.list_agent_templates()
+        for template, prompt in zip(
+            templates[:2], ("first evidence", "second evidence"), strict=True
+        ):
+            agent = await service.spawn_agent(room.room_id, template.template_id)
+            session = await service.start_agent_session(room.room_id, agent.agent_id)
+            execution = await service.start_execution(session.session_id, "owner")
+            result = await service.execute_agent_step(execution.execution_id, prompt)
+            await service.select_output(
+                room.room_id, str(result["output_id"]), OutputDisposition.INCLUDED, "owner"
+            )
+        await service.synthesize_decision_brief(room.room_id, "Adopt the provider", "owner")
+
+        answer = await service.answer_decision_meta(room.room_id, "why", user_id="viewer")
+        assert answer["unconfirmed"]
+        for claim in answer["claims"]:
+            assert not (
+                claim["derivation_kind"] == "AI_DERIVED" and claim["review_status"] == "UNCONFIRMED"
+            )
+        # Sole support is unconfirmed, so the status says so and claims[] stays empty.
+        assert answer["status"] == "ANSWERED_UNCONFIRMED_ONLY"
+        assert answer["claims"] == []
+        assert answer["counts"]["claims"] == 0
+        assert answer["counts"]["unconfirmed"] == len(answer["unconfirmed"])
+        for record in answer["unconfirmed"]:
+            assert record["assurance"] == "UNCONFIRMED_AI"
+            assert record["text"] == f"an unreviewed extraction suggests: {record['label']}"
+
+        # Human review is the only promotion, and it moves the claim across the two sets.
+        decision_id = answer["unconfirmed"][0]["assertion_id"]
+        await service.review_ontology_entity(
+            room.room_id,
+            decision_id,
+            OntologyReviewAction.CONFIRM,
+            "owner",
+            "Read against the frozen provenance.",
+        )
+        promoted = await service.answer_decision_meta(room.room_id, "why", user_id="viewer")
+        assert [claim["assertion_id"] for claim in promoted["claims"]] == [decision_id]
+        assert promoted["status"] == "ANSWERED"
+        assert decision_id not in {record["assertion_id"] for record in promoted["unconfirmed"]}
+        for record in promoted["unconfirmed"]:
+            assert record["label"] not in promoted["summary"]
     finally:
         await db.close()

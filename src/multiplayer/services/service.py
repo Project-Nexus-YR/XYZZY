@@ -15,6 +15,15 @@ from typing import Any
 from ..db.connection import Database
 from ..db.repositories import Repos
 from ..domain.events import EventType, RoomEvent
+from ..domain.meta import (
+    DECISION_KINDS,
+    MetaAnswerStatus,
+    MetaQuestionKind,
+    MetaRefusalReason,
+    OntologyAssurance,
+    classify_meta_question,
+    invalidation_class,
+)
 from ..domain.models import (
     MAX_THREAD_DEPTH,
     AddressingMode,
@@ -60,10 +69,12 @@ from ..domain.models import (
     OntologyDerivationKind,
     OntologyEntity,
     OntologyEntityKind,
+    OntologyExtractor,
     OntologyRelationship,
     OntologyRelationshipKind,
     OntologyReview,
     OntologyReviewAction,
+    OntologyReviewStatus,
     Organization,
     OrgMember,
     OutputDisposition,
@@ -273,6 +284,13 @@ def _policy_list(raw: str | None) -> list[str] | None:
     return [str(item) for item in parsed] if isinstance(parsed, list) else None
 
 
+_ASYNC_PASS_LIMIT = 200
+# What an unreviewed extraction is worth before a human has looked at it. No
+# threshold ever promotes it: only human review does.
+_INFERRED_CONFIDENCE = 0.6
+_UNCONFIRMED_TEMPLATE = "an unreviewed extraction suggests"
+
+
 class AgentLaunchRefused(AuthorizationError):
     """A launch the workspace refused before any run row existed.
 
@@ -326,6 +344,8 @@ class MultiplayerService:
         # Identifies this dispatcher's claims on runs, so another process can tell
         # a run somebody is dispatching from one nobody ever picked up.
         self._dispatch_claim = new_id("dispatch")
+        # One in-process lease per room, so two drains never do the same pass twice.
+        self._ontology_drains: set[str] = set()
 
     async def initialize(self) -> None:
         migrations_dir = Path(__file__).parent.parent / "migrations"
@@ -3263,6 +3283,7 @@ class MultiplayerService:
             derivation_kind: OntologyDerivationKind,
             evidence_ids: tuple[str, ...],
             source_ids: tuple[str, ...],
+            source_object: tuple[str, str],
         ) -> None:
             relationships.append(
                 OntologyRelationship(
@@ -3276,11 +3297,16 @@ class MultiplayerService:
                     derivation_kind=derivation_kind,
                     evidence_ids=evidence_ids,
                     source_ids=source_ids,
+                    # The durable row whose content states the relation, so a
+                    # relationship-centric answer can drill down to it.
+                    source_object_kind=source_object[0],
+                    source_object_id=source_object[1],
                     created_at=timestamp,
                     updated_at=timestamp,
                 )
             )
 
+        published_version = (OntologyEntityKind.ARTIFACT.value, version.version_id)
         relationship(
             OntologyRelationshipKind.OWNS,
             project_id,
@@ -3288,6 +3314,7 @@ class MultiplayerService:
             OntologyDerivationKind.SYSTEM_MATERIALIZED,
             (version.version_id,),
             (room_id, artifact.artifact_id, version.version_id),
+            published_version,
         )
         relationship(
             OntologyRelationshipKind.OWNS,
@@ -3296,6 +3323,7 @@ class MultiplayerService:
             OntologyDerivationKind.SYSTEM_MATERIALIZED,
             (version.version_id,),
             (created_by, artifact.artifact_id, version.version_id),
+            published_version,
         )
         relationship(
             OntologyRelationshipKind.REFERENCES,
@@ -3304,11 +3332,13 @@ class MultiplayerService:
             OntologyDerivationKind.SYSTEM_MATERIALIZED,
             (version.version_id,),
             (artifact.artifact_id, version.version_id),
+            published_version,
         )
         for claim, source in claims_and_sources:
             claim_entity_id = claim_entity_ids[claim.claim_id]
             output_entity_id = output_entity_ids[source.output_id]
             exact_evidence = (source.output_id,)
+            stating_claim = (OntologyEntityKind.CLAIM.value, claim.claim_id)
             relationship(
                 OntologyRelationshipKind.SUPPORTS,
                 claim_entity_id,
@@ -3316,6 +3346,7 @@ class MultiplayerService:
                 OntologyDerivationKind.AI_DERIVED,
                 exact_evidence,
                 (claim.claim_id, source.output_id, version.version_id),
+                stating_claim,
             )
             relationship(
                 OntologyRelationshipKind.DERIVED_FROM,
@@ -3324,6 +3355,7 @@ class MultiplayerService:
                 OntologyDerivationKind.AI_DERIVED,
                 exact_evidence,
                 (claim.claim_id, source.output_id),
+                stating_claim,
             )
             relationship(
                 OntologyRelationshipKind.DERIVED_FROM,
@@ -3332,6 +3364,7 @@ class MultiplayerService:
                 OntologyDerivationKind.AI_DERIVED,
                 exact_evidence,
                 (version.version_id, claim.claim_id, source.output_id),
+                (OntologyEntityKind.AGENT_OUTPUT.value, source.output_id),
             )
         return entities, relationships
 
@@ -4877,54 +4910,858 @@ class MultiplayerService:
             "reviews": [self._ontology_review_record(review) for review in reviews],
         }
 
+    # ── Lazy ontology extraction ─────────────────────────────────────────────
+
+    _IMMEDIATE_EVENTS: frozenset[EventType] = frozenset(
+        {
+            EventType.TASK_CREATED,
+            EventType.TASK_ASSIGNED,
+            EventType.TASK_UNASSIGNED,
+            EventType.TASK_STARTED,
+            EventType.TASK_COMPLETED,
+            EventType.TASK_FAILED,
+            EventType.TASK_CANCELLED,
+            EventType.TASK_DELEGATED,
+            EventType.DECISION_CREATED,
+            # An artifact version and a published synthesis are projected inside
+            # their own committing transaction, by create_synthesis_in_transaction.
+            # They stay in this allowlist so the cursor means "every structured
+            # action up to here is handled", not "every one this pass looked at".
+            EventType.ARTIFACT_VERSION_CREATED,
+            EventType.SYNTHESIS_PUBLISHED,
+        }
+    )
+    _ASYNC_EVENTS: frozenset[EventType] = frozenset(
+        {
+            EventType.MESSAGE_CREATED,
+            EventType.AGENT_OUTPUT_CREATED,
+            EventType.BRANCH_SYNTHESIS_COMPLETED,
+        }
+    )
+    _TASK_ID_KEYS = ("task_id", "child_task_id", "parent_task_id")
+    _BLOCKED_BY = " is blocked by "
+
+    async def run_ontology_extraction(
+        self,
+        room_id: str,
+        extractor: OntologyExtractor,
+        *,
+        actor_id: str = "system",
+        limit: int = _ASYNC_PASS_LIMIT,
+    ) -> dict[str, Any]:
+        """One bounded extraction pass. No read path calls this: reads never write.
+
+        The pass snapshots head, reads only what its cursor has not seen, and writes
+        the assertions, their events and the cursor advance in one transaction, so a
+        crash rolls the cursor back with the work. Assertions carry deterministic IDs
+        and land ON CONFLICT DO NOTHING, which makes at-least-once delivery over
+        idempotent writes exactly-once in effect.
+        """
+        persisted: list[RoomEvent] = []
+        result: dict[str, Any] = {}
+        async with self.db.transaction():
+            head = await self.repos.events.get_latest_sequence(room_id)
+            cursor = await self.repos.ontology.get_cursor(room_id, extractor)
+            last = cursor.last_sequence if cursor is not None else 0
+            entities, relationships, stale_ids, to_sequence = await self._extract(
+                room_id, extractor, last, head, limit
+            )
+            (
+                entities_written,
+                relationships_written,
+            ) = await self.repos.ontology.materialize_in_transaction(entities, relationships)
+            marked = await self.repos.ontology.mark_stale_in_transaction(
+                room_id, stale_ids, to_sequence
+            )
+            events: list[RoomEvent] = []
+            if entities_written or relationships_written:
+                events.append(
+                    RoomEvent(
+                        room_id=room_id,
+                        sequence=0,
+                        event_type=EventType.ONTOLOGY_MATERIALIZED,
+                        payload={
+                            "extractor": extractor.value,
+                            "entity_ids": [entity.entity_id for entity in entities],
+                            "relationship_ids": [item.relationship_id for item in relationships],
+                        },
+                        actor_id=actor_id,
+                        actor_type="system",
+                    )
+                )
+            if marked:
+                events.append(
+                    RoomEvent(
+                        room_id=room_id,
+                        sequence=0,
+                        event_type=EventType.ONTOLOGY_ASSERTION_SUPERSEDED,
+                        payload={"assertion_ids": marked, "stale_at_sequence": to_sequence},
+                        actor_id=actor_id,
+                        actor_type="system",
+                    )
+                )
+            if events:
+                events.append(
+                    RoomEvent(
+                        room_id=room_id,
+                        sequence=0,
+                        event_type=EventType.ONTOLOGY_EXTRACTION_ADVANCED,
+                        payload={
+                            "extractor": extractor.value,
+                            "from_sequence": last,
+                            "to_sequence": to_sequence,
+                            "entities_written": entities_written,
+                            "relationships_written": relationships_written,
+                        },
+                        actor_id=actor_id,
+                        actor_type="system",
+                    )
+                )
+            for event in events:
+                persisted.append(
+                    await self.repos.events.append_with_next_sequence_in_transaction(event)
+                )
+            if to_sequence > last:
+                await self.repos.ontology.advance_cursor_in_transaction(
+                    room_id, extractor, last, to_sequence, utcnow()
+                )
+            result = {
+                "extractor": extractor.value,
+                "from_sequence": last,
+                "to_sequence": to_sequence,
+                "entities_written": entities_written,
+                "relationships_written": relationships_written,
+                "superseded": marked,
+            }
+        await self._broadcast_persisted_events(persisted)
+        return result
+
+    async def drain_room_ontology(self, room_id: str) -> dict[str, Any] | None:
+        """The asynchronous drain, under one in-process lease per room.
+
+        Inference is slow and fallible, so it never sits in a write path; the lease
+        keeps two drains for one room from doing the same pass twice.
+        """
+        if room_id in self._ontology_drains:
+            return None
+        self._ontology_drains.add(room_id)
+        try:
+            return await self.run_ontology_extraction(room_id, OntologyExtractor.ASYNC)
+        finally:
+            self._ontology_drains.discard(room_id)
+
+    async def _extract(
+        self,
+        room_id: str,
+        extractor: OntologyExtractor,
+        last: int,
+        head: int,
+        limit: int,
+    ) -> tuple[list[OntologyEntity], list[OntologyRelationship], list[str], int]:
+        if extractor is OntologyExtractor.SCHEDULED:
+            relationships, stale_ids = await self._consolidate(room_id, head)
+            return [], relationships, stale_ids, head
+        allowed = (
+            self._IMMEDIATE_EVENTS
+            if extractor is OntologyExtractor.IMMEDIATE
+            else self._ASYNC_EVENTS
+        )
+        read = [
+            event
+            for event in await self.repos.events.list_since(room_id, last, limit)
+            if event.sequence <= head
+        ]
+        # A capped pass advances only as far as it actually read, or the next pass
+        # would skip the events this one never saw.
+        to_sequence = read[-1].sequence if len(read) >= limit and read else head
+        relevant = [event for event in read if event.event_type in allowed]
+        if extractor is OntologyExtractor.IMMEDIATE:
+            entities, relationships = await self._project_structured(room_id, relevant, to_sequence)
+        else:
+            entities, relationships = await self._project_inferred(room_id, relevant, to_sequence)
+        return entities, relationships, [], to_sequence
+
+    async def _project_structured(
+        self, room_id: str, events: list[RoomEvent], at_sequence: int
+    ) -> tuple[list[OntologyEntity], list[OntologyRelationship]]:
+        """Project structured records. A structured record needs no inference."""
+        task_events: dict[str, list[int]] = {}
+        decision_events: dict[str, list[int]] = {}
+        for event in events:
+            if event.event_type is EventType.DECISION_CREATED:
+                decision_id = str(event.payload.get("decision_id") or "")
+                if decision_id:
+                    decision_events.setdefault(decision_id, []).append(event.sequence)
+                continue
+            for key in self._TASK_ID_KEYS:
+                task_id = str(event.payload.get(key) or "")
+                if task_id:
+                    task_events.setdefault(task_id, []).append(event.sequence)
+        timestamp = utcnow()
+        entities: list[OntologyEntity] = []
+        relationships: list[OntologyRelationship] = []
+        owners: dict[str, str] = {}
+        for task_id, sequences in sorted(task_events.items()):
+            task = await self.repos.tasks.get(task_id)
+            if task is None or task.room_id != room_id:
+                continue
+            entity_id = self._ontology_id("ont", room_id, "Task", task_id)
+            entities.append(
+                OntologyEntity(
+                    entity_id=entity_id,
+                    room_id=room_id,
+                    kind=OntologyEntityKind.TASK,
+                    source_object_id=task_id,
+                    label=task.title,
+                    properties={
+                        "status": task.status.value,
+                        "priority": task.priority.value,
+                        "assigned_agent_id": task.assigned_agent_id or "",
+                    },
+                    derivation_kind=OntologyDerivationKind.SYSTEM_MATERIALIZED,
+                    confidence=1.0,
+                    evidence_ids=(task_id,),
+                    source_ids=(task_id,),
+                    extractor=OntologyExtractor.IMMEDIATE,
+                    asserted_at_sequence=at_sequence,
+                    evidence_event_sequences=tuple(sorted(set(sequences))),
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+            member = await self.repos.room_members.get(room_id, task.created_by)
+            if member is None:
+                continue
+            person_id = self._ontology_id("ont", room_id, "Person", task.created_by)
+            if task.created_by not in owners:
+                owners[task.created_by] = person_id
+                user = await self.repos.users.get(task.created_by)
+                entities.append(
+                    OntologyEntity(
+                        entity_id=person_id,
+                        room_id=room_id,
+                        kind=OntologyEntityKind.PERSON,
+                        source_object_id=task.created_by,
+                        label=user.display_name if user is not None else task.created_by,
+                        properties={"user_id": task.created_by},
+                        derivation_kind=OntologyDerivationKind.SYSTEM_MATERIALIZED,
+                        confidence=1.0,
+                        evidence_ids=(task.created_by,),
+                        source_ids=(task.created_by,),
+                        extractor=OntologyExtractor.IMMEDIATE,
+                        asserted_at_sequence=at_sequence,
+                        evidence_event_sequences=tuple(sorted(set(sequences))),
+                        created_at=timestamp,
+                        updated_at=timestamp,
+                    )
+                )
+            relationships.append(
+                OntologyRelationship(
+                    relationship_id=self._ontology_id("rel", room_id, "OWNS", person_id, entity_id),
+                    room_id=room_id,
+                    kind=OntologyRelationshipKind.OWNS,
+                    from_entity_id=person_id,
+                    to_entity_id=entity_id,
+                    derivation_kind=OntologyDerivationKind.SYSTEM_MATERIALIZED,
+                    confidence=1.0,
+                    evidence_ids=(task_id,),
+                    source_ids=(task.created_by, task_id),
+                    source_object_kind=OntologyEntityKind.TASK.value,
+                    source_object_id=task_id,
+                    extractor=OntologyExtractor.IMMEDIATE,
+                    asserted_at_sequence=at_sequence,
+                    evidence_event_sequences=tuple(sorted(set(sequences))),
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+        for decision_id, sequences in sorted(decision_events.items()):
+            decision = await self.repos.decisions.get(decision_id)
+            if decision is None or decision.room_id != room_id:
+                continue
+            entities.append(
+                OntologyEntity(
+                    entity_id=self._ontology_id("ont", room_id, "Decision", decision_id),
+                    room_id=room_id,
+                    kind=OntologyEntityKind.DECISION,
+                    source_object_id=decision_id,
+                    label=decision.title,
+                    properties={"status": decision.status.value, "decision_id": decision_id},
+                    derivation_kind=OntologyDerivationKind.SYSTEM_MATERIALIZED,
+                    confidence=1.0,
+                    evidence_ids=(decision_id,),
+                    source_ids=(decision_id,),
+                    extractor=OntologyExtractor.IMMEDIATE,
+                    asserted_at_sequence=at_sequence,
+                    evidence_event_sequences=tuple(sorted(set(sequences))),
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+        return entities, relationships
+
+    async def _project_inferred(
+        self, room_id: str, events: list[RoomEvent], at_sequence: int
+    ) -> tuple[list[OntologyEntity], list[OntologyRelationship]]:
+        """Read the fixed allowlist and label everything it produces unconfirmed."""
+        timestamp = utcnow()
+        entities: list[OntologyEntity] = []
+        relationships: list[OntologyRelationship] = []
+        tasks_by_label = {
+            entity.label.strip().lower().rstrip("."): entity
+            for entity in await self.repos.ontology.list_entities(room_id)
+            if entity.kind is OntologyEntityKind.TASK
+        }
+        for event in events:
+            if event.event_type is EventType.AGENT_OUTPUT_CREATED:
+                output_id = str(event.payload.get("output_id") or "")
+                output = await self.repos.agent_outputs.get(output_id) if output_id else None
+                if output is None or output.room_id != room_id:
+                    continue
+                entities.append(
+                    OntologyEntity(
+                        entity_id=self._ontology_id("ont", room_id, "AgentOutput", output_id),
+                        room_id=room_id,
+                        kind=OntologyEntityKind.AGENT_OUTPUT,
+                        source_object_id=output_id,
+                        label=f"Agent output {output_id}",
+                        properties={
+                            "agent_id": output.agent_id,
+                            "execution_id": output.execution_id,
+                            "provider_name": output.provider_name,
+                            "provider_model": output.provider_model,
+                        },
+                        derivation_kind=OntologyDerivationKind.AI_DERIVED,
+                        confidence=_INFERRED_CONFIDENCE,
+                        evidence_ids=(output_id,),
+                        source_ids=(output_id, output.execution_id),
+                        review_status=OntologyReviewStatus.UNCONFIRMED,
+                        extractor=OntologyExtractor.ASYNC,
+                        asserted_at_sequence=at_sequence,
+                        evidence_event_sequences=(event.sequence,),
+                        created_at=timestamp,
+                        updated_at=timestamp,
+                    )
+                )
+                continue
+            if event.event_type is not EventType.MESSAGE_CREATED:
+                continue
+            message_id = str(event.payload.get("message_id") or "")
+            message = await self.repos.messages.get(message_id) if message_id else None
+            if message is None or message.room_id != room_id:
+                continue
+            edge = self._blocking_edge(message.content, tasks_by_label)
+            if edge is None:
+                continue
+            blocker, blocked = edge
+            relationships.append(
+                OntologyRelationship(
+                    relationship_id=self._ontology_id(
+                        "rel", room_id, "BLOCKS", blocker.entity_id, blocked.entity_id
+                    ),
+                    room_id=room_id,
+                    kind=OntologyRelationshipKind.BLOCKS,
+                    from_entity_id=blocker.entity_id,
+                    to_entity_id=blocked.entity_id,
+                    derivation_kind=OntologyDerivationKind.AI_DERIVED,
+                    confidence=_INFERRED_CONFIDENCE,
+                    evidence_ids=(message_id,),
+                    source_ids=(message_id,),
+                    review_status=OntologyReviewStatus.UNCONFIRMED,
+                    # The durable row whose content states the blockage, not an
+                    # endpoint: the message is what reported it.
+                    source_object_kind="Message",
+                    source_object_id=message_id,
+                    extractor=OntologyExtractor.ASYNC,
+                    asserted_at_sequence=at_sequence,
+                    evidence_event_sequences=(event.sequence,),
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+        return entities, relationships
+
+    @classmethod
+    def _blocking_edge(
+        cls, content: str, tasks_by_label: dict[str, OntologyEntity]
+    ) -> tuple[OntologyEntity, OntologyEntity] | None:
+        """One fixed form over already-materialized tasks; there is no open-ended read."""
+        normalized = " ".join(content.strip().lower().split()).rstrip(".!?")
+        if cls._BLOCKED_BY not in normalized:
+            return None
+        blocked_label, _, blocker_label = normalized.partition(cls._BLOCKED_BY)
+        blocked = tasks_by_label.get(blocked_label.strip())
+        blocker = tasks_by_label.get(blocker_label.strip())
+        if blocked is None or blocker is None or blocked.entity_id == blocker.entity_id:
+            return None
+        return blocker, blocked
+
+    async def _consolidate(
+        self, room_id: str, head: int
+    ) -> tuple[list[OntologyRelationship], list[str]]:
+        """Relate and supersede existing assertions. It never reads raw evidence.
+
+        Deduplication has nothing to remove: assertions carry deterministic IDs under
+        a UNIQUE(room_id, kind, source_object_id) index, so a duplicate cannot be
+        written in the first place. What is left is contradiction detection and the
+        staleness marking that follows from it. Nothing here deletes: a removed
+        assertion cannot be audited.
+        """
+        entities = await self.repos.ontology.list_entities(room_id)
+        claims = [entity for entity in entities if entity.kind is OntologyEntityKind.CLAIM]
+        by_label = {claim.label.strip().lower().rstrip("."): claim for claim in claims}
+        timestamp = utcnow()
+        relationships: list[OntologyRelationship] = []
+        stale_ids: list[str] = []
+        for claim in claims:
+            label = claim.label.strip().lower().rstrip(".")
+            if not label.startswith("not "):
+                continue
+            target = by_label.get(label[4:].strip())
+            if target is None or target.entity_id == claim.entity_id:
+                continue
+            relationships.append(
+                OntologyRelationship(
+                    relationship_id=self._ontology_id(
+                        "rel", room_id, "CONTRADICTS", claim.entity_id, target.entity_id
+                    ),
+                    room_id=room_id,
+                    kind=OntologyRelationshipKind.CONTRADICTS,
+                    from_entity_id=claim.entity_id,
+                    to_entity_id=target.entity_id,
+                    # What this pass thinks its own detection is worth. The shared
+                    # repository method lowers it to the weakest of the two claims it
+                    # relates, which is why a consolidation edge over two unconfirmed
+                    # entities cannot reach a reader as confirmed truth.
+                    derivation_kind=OntologyDerivationKind.SYSTEM_MATERIALIZED,
+                    confidence=1.0,
+                    evidence_ids=claim.evidence_ids,
+                    source_ids=(claim.source_object_id, target.source_object_id),
+                    source_object_kind=OntologyEntityKind.CLAIM.value,
+                    source_object_id=claim.source_object_id,
+                    extractor=OntologyExtractor.SCHEDULED,
+                    asserted_at_sequence=head,
+                    evidence_event_sequences=claim.evidence_event_sequences,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+            if target.asserted_at_sequence < claim.asserted_at_sequence:
+                stale_ids.append(target.entity_id)
+        return relationships, stale_ids
+
+    # ── Meta ─────────────────────────────────────────────────────────────────
+
+    _META_ENTITY_KINDS: dict[MetaQuestionKind, tuple[OntologyEntityKind, ...]] = {
+        MetaQuestionKind.STATUS: (OntologyEntityKind.TASK, OntologyEntityKind.DECISION),
+        # Scoped to work objects, never actors, so this query shape cannot become a
+        # monitoring feed.
+        MetaQuestionKind.CHANGES: (
+            OntologyEntityKind.TASK,
+            OntologyEntityKind.DECISION,
+            OntologyEntityKind.ARTIFACT,
+            OntologyEntityKind.CLAIM,
+        ),
+        MetaQuestionKind.DECISIONS: (OntologyEntityKind.DECISION,),
+    }
+    _META_RELATIONSHIP_KINDS: dict[MetaQuestionKind, tuple[OntologyRelationshipKind, ...]] = {
+        MetaQuestionKind.STATUS: (OntologyRelationshipKind.OWNS,),
+        MetaQuestionKind.BLOCKERS: (OntologyRelationshipKind.BLOCKS,),
+        MetaQuestionKind.DECISIONS: (OntologyRelationshipKind.SUPPORTS,),
+        MetaQuestionKind.DISAGREEMENT: (OntologyRelationshipKind.CONTRADICTS,),
+    }
+    _DISAGREEMENT_ENDPOINTS = frozenset({OntologyEntityKind.CLAIM, OntologyEntityKind.AGENT_OUTPUT})
+
     @staticmethod
-    def _meta_question_kind(question: str) -> str:
-        normalized = " ".join(question.strip().lower().split()).rstrip("?!. ")
-        why_queries = frozenset(
-            {
-                "why",
-                "why_decision",
-                "why decision",
-                "why was this decision made",
-                "why was the decision made",
-                "what is the reason for this decision",
-                "what are the reasons for this decision",
-            }
-        )
-        evidence_queries = frozenset(
-            {
-                "evidence",
-                "decision_evidence",
-                "decision evidence",
-                "what evidence supports this decision",
-                "what evidence supports the decision",
-                "show supporting evidence",
-                "show the evidence for this decision",
-                "what sources support this decision",
-            }
-        )
-        if normalized in evidence_queries:
-            return "DECISION_EVIDENCE"
-        if normalized in why_queries:
-            return "WHY_DECISION"
-        raise DomainError(
-            "unsupported Meta question; ask why the decision was made or what evidence supports it"
-        )
+    def _meta_question_kind(question: str) -> MetaQuestionKind:
+        """Refuse first, match exactly second, refuse again otherwise."""
+        return classify_meta_question(question)
+
+    @staticmethod
+    def _meta_assurance(
+        derivation_kind: OntologyDerivationKind, review_status: OntologyReviewStatus
+    ) -> OntologyAssurance:
+        """What a reader is entitled to treat this assertion as."""
+        if review_status is not OntologyReviewStatus.UNCONFIRMED:
+            return OntologyAssurance.CONFIRMED
+        if derivation_kind is OntologyDerivationKind.SYSTEM_MATERIALIZED:
+            return OntologyAssurance.SYSTEM_MATERIALIZED
+        return OntologyAssurance.UNCONFIRMED_AI
+
+    def _meta_claim_record(
+        self,
+        *,
+        assertion_id: str,
+        assertion_type: str,
+        kind: str,
+        label: str,
+        properties: dict[str, Any],
+        derivation_kind: OntologyDerivationKind,
+        confidence: float,
+        review_status: OntologyReviewStatus,
+        evidence_ids: tuple[str, ...],
+        source_object_kind: str,
+        source_object_id: str,
+        asserted_at_sequence: int,
+        evidence_event_sequences: tuple[int, ...],
+        stale_at_sequence: int | None,
+        currency: tuple[bool, int],
+        review: OntologyReview | None,
+    ) -> dict[str, Any]:
+        assurance = self._meta_assurance(derivation_kind, review_status)
+        current, invalidating = currency
+        record: dict[str, Any] = {
+            "assertion_id": assertion_id,
+            "assertion_type": assertion_type,
+            "kind": kind,
+            "label": label,
+            # An unreviewed extraction is never rendered as a plain statement.
+            "text": f"{_UNCONFIRMED_TEMPLATE}: {label}"
+            if assurance is OntologyAssurance.UNCONFIRMED_AI
+            else label,
+            "properties": properties,
+            "assurance": assurance.value,
+            "derivation_kind": derivation_kind.value,
+            "confidence": confidence,
+            "review_status": review_status.value,
+            "evidence_ids": list(evidence_ids),
+            "source_object_kind": source_object_kind,
+            "source_object_id": source_object_id,
+            "asserted_at_sequence": asserted_at_sequence,
+            "evidence_event_sequences": list(evidence_event_sequences),
+            "stale_at_sequence": stale_at_sequence,
+            "current": current,
+            "invalidating_events": invalidating,
+        }
+        if assurance is OntologyAssurance.CONFIRMED and review is not None:
+            record["review_id"] = review.review_id
+            record["reviewed_by"] = review.reviewed_by
+        return record
+
+    async def _meta_currency(
+        self,
+        room_id: str,
+        user_id: str,
+        head: int,
+        positions: list[tuple[str, int, tuple[str, ...]]],
+    ) -> dict[str, tuple[bool, int]]:
+        """Derive currency per assertion, one grouped read per class, never per claim."""
+        grouped: dict[tuple[str, ...], list[tuple[str, int]]] = {}
+        for assertion_id, sequence, event_class in positions:
+            grouped.setdefault(event_class, []).append((assertion_id, sequence))
+        currency: dict[str, tuple[bool, int]] = {}
+        for event_class, members in grouped.items():
+            floor = min(sequence for _assertion_id, sequence in members)
+            sequences = await self.repos.meta.invalidating_sequences(
+                room_id, user_id, event_class, floor, head
+            )
+            for assertion_id, sequence in members:
+                invalidating = sum(1 for item in sequences if item > sequence)
+                currency[assertion_id] = (invalidating == 0, invalidating)
+        return currency
+
+    async def _meta_freshness(
+        self,
+        room_id: str,
+        user_id: str,
+        head: int,
+        claims: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Freshness, computed inside the authorized scope like every other aggregate."""
+        cursors = await self.repos.meta.extraction_cursors(room_id, user_id)
+        drained_to = min(cursors.values()) if cursors else 0
+        positions = [
+            int(claim["asserted_at_sequence"]) for claim in claims if not claim.get("hidden")
+        ]
+        return {
+            "authorized_head": head,
+            # Pending work a reader can see; it decides nothing they are shown.
+            "drain_lag_events": max(0, head - drained_to),
+            "claims_as_of": min(positions) if positions else None,
+        }
+
+    @staticmethod
+    def _meta_summary(
+        kind: MetaQuestionKind, claims: list[dict[str, Any]], distinct_sources: int
+    ) -> str:
+        """Prose over an already-authorized claim set; unconfirmed labels never enter it."""
+        if not claims:
+            return "no confirmed assertions in this room answer that question"
+        labels = "; ".join(str(claim["label"]) for claim in claims)
+        if kind is MetaQuestionKind.STATUS:
+            counts: dict[str, int] = {}
+            for claim in claims:
+                if claim["assertion_type"] != "ENTITY":
+                    continue
+                status = str(claim["properties"].get("status", "UNKNOWN"))
+                counts[status] = counts.get(status, 0) + 1
+            grouped = ", ".join(f"{status} {count}" for status, count in sorted(counts.items()))
+            return f"{len(claims)} governed assertions describe where things stand ({grouped})"
+        if kind is MetaQuestionKind.BLOCKERS:
+            return f"{len(claims)} blocking relationships: {labels}"
+        if kind is MetaQuestionKind.CHANGES:
+            latest = max(int(claim["asserted_at_sequence"]) for claim in claims)
+            return f"{len(claims)} work objects changed, latest at sequence {latest}: {labels}"
+        if kind is MetaQuestionKind.DECISIONS:
+            return f"{len(claims)} decisions carry governed support: {labels}"
+        return f"{len(claims)} contradictions from {distinct_sources} distinct sources: {labels}"
+
+    def _meta_envelope(
+        self,
+        *,
+        question: str,
+        kind: MetaQuestionKind,
+        room_id: str,
+        limit: int,
+        claims: list[dict[str, Any]],
+        unconfirmed: list[dict[str, Any]],
+        freshness: dict[str, Any],
+        summary: str,
+        refusal_reason: MetaRefusalReason,
+    ) -> dict[str, Any]:
+        """The shared answer envelope. "We do not know" is a real answer at HTTP 200."""
+        if claims:
+            status = MetaAnswerStatus.ANSWERED
+        elif unconfirmed:
+            status = MetaAnswerStatus.ANSWERED_UNCONFIRMED_ONLY
+        else:
+            status = MetaAnswerStatus.REFUSED
+        return {
+            "query": {
+                "question": question,
+                "kind": kind.value,
+                "supported_kinds": [member.value for member in MetaQuestionKind],
+            },
+            "status": status.value,
+            "refusal_reason": (
+                refusal_reason.value if status is MetaAnswerStatus.REFUSED else None
+            ),  # named only when the answer is a refusal
+            "summary": summary,
+            # Two result sets, never merged: merging them would require code that
+            # does not exist, which is a stronger guarantee than a naming convention.
+            "claims": claims,
+            "unconfirmed": unconfirmed,
+            "counts": {
+                # Unconfirmed extractions are excluded from every figure presented
+                # as fact, and counted separately.
+                "claims": len(claims),
+                "unconfirmed": len(unconfirmed),
+                "current_claims": sum(1 for claim in claims if claim["current"]),
+                "max_claims": limit,
+            },
+            "freshness": freshness,
+            "scope": {"room_id": room_id, "max_claims": limit},
+        }
 
     async def answer_decision_meta(
         self,
         room_id: str,
         question: str,
         *,
+        user_id: str,
         version_id: str | None = None,
         limit: int = 10,
     ) -> dict[str, Any]:
-        """Answer one bounded decision question from current governed assertions."""
+        """Answer one bounded Meta question from current governed assertions."""
         question_kind = self._meta_question_kind(question)
         if not 1 <= limit <= 10:
             raise DomainError("Meta evidence limit must be between 1 and 10")
         await self.get_room(room_id)
+        if question_kind in DECISION_KINDS:
+            return await self._answer_decision_meta(
+                room_id, user_id, question, question_kind, version_id, limit
+            )
+        return await self._answer_assertion_meta(room_id, user_id, question, question_kind, limit)
 
+    async def _answer_assertion_meta(
+        self,
+        room_id: str,
+        user_id: str,
+        question: str,
+        kind: MetaQuestionKind,
+        limit: int,
+    ) -> dict[str, Any]:
+        head = await self.repos.meta.head(room_id, user_id)
+        if head is None:
+            # Nothing this reader may see, so no head, no counts and no other
+            # aggregate — a consequence of the query, not a special case.
+            return self._meta_envelope(
+                question=question,
+                kind=kind,
+                room_id=room_id,
+                limit=limit,
+                claims=[],
+                unconfirmed=[],
+                freshness={},
+                summary="no authorized evidence in this room answers that question",
+                refusal_reason=MetaRefusalReason.NO_AUTHORIZED_EVIDENCE,
+            )
+        entities = await self.repos.meta.entities(
+            room_id,
+            user_id,
+            self._META_ENTITY_KINDS.get(kind, ()),
+            since_sequence=0 if kind is MetaQuestionKind.CHANGES else None,
+            limit=limit,
+        )
+        relationships = await self.repos.meta.relationships(
+            room_id, user_id, self._META_RELATIONSHIP_KINDS.get(kind, ()), limit=limit
+        )
+        endpoint_ids = sorted(
+            {
+                entity_id
+                for item in relationships
+                for entity_id in (item.from_entity_id, item.to_entity_id)
+            }
+        )
+        endpoints = {
+            entity.entity_id: entity
+            for entity in await self.repos.meta.entities_by_ids(room_id, user_id, endpoint_ids)
+        }
+        entity_ids = {entity.entity_id for entity in entities}
+        relationships = [
+            item
+            for item in relationships
+            if self._meta_edge_in_scope(kind, item, entity_ids, endpoints)
+        ]
+        positions: list[tuple[str, int, tuple[str, ...]]] = [
+            (entity.entity_id, entity.asserted_at_sequence, invalidation_class(entity.kind))
+            for entity in entities
+        ]
+        positions.extend(
+            (
+                item.relationship_id,
+                item.asserted_at_sequence,
+                invalidation_class(
+                    endpoints[item.from_entity_id].kind, endpoints[item.to_entity_id].kind
+                ),
+            )
+            for item in relationships
+        )
+        currency = await self._meta_currency(room_id, user_id, head, positions)
+
+        records: list[dict[str, Any]] = []
+        for entity in entities:
+            records.append(
+                self._meta_claim_record(
+                    assertion_id=entity.entity_id,
+                    assertion_type="ENTITY",
+                    kind=entity.kind.value,
+                    label=entity.label,
+                    properties=entity.properties,
+                    derivation_kind=entity.derivation_kind,
+                    confidence=entity.confidence,
+                    review_status=entity.review_status,
+                    evidence_ids=entity.evidence_ids,
+                    source_object_kind=entity.kind.value,
+                    source_object_id=entity.source_object_id,
+                    asserted_at_sequence=entity.asserted_at_sequence,
+                    evidence_event_sequences=entity.evidence_event_sequences,
+                    stale_at_sequence=entity.stale_at_sequence,
+                    currency=currency[entity.entity_id],
+                    review=await self.repos.meta.latest_review(room_id, user_id, entity.entity_id),
+                )
+            )
+        for item in relationships:
+            source = endpoints[item.from_entity_id]
+            target = endpoints[item.to_entity_id]
+            records.append(
+                self._meta_claim_record(
+                    assertion_id=item.relationship_id,
+                    assertion_type="RELATIONSHIP",
+                    kind=item.kind.value,
+                    label=f"{source.label} {item.kind.value} {target.label}",
+                    properties={},
+                    derivation_kind=item.derivation_kind,
+                    confidence=item.confidence,
+                    review_status=item.review_status,
+                    evidence_ids=item.evidence_ids,
+                    source_object_kind=item.source_object_kind,
+                    source_object_id=item.source_object_id,
+                    asserted_at_sequence=item.asserted_at_sequence,
+                    evidence_event_sequences=item.evidence_event_sequences,
+                    stale_at_sequence=item.stale_at_sequence,
+                    currency=currency[item.relationship_id],
+                    review=await self.repos.meta.latest_review(
+                        room_id, user_id, item.relationship_id
+                    ),
+                )
+            )
+        claims = [
+            record
+            for record in records
+            if record["assurance"] != OntologyAssurance.UNCONFIRMED_AI.value
+        ]
+        unconfirmed = [
+            record
+            for record in records
+            if record["assurance"] == OntologyAssurance.UNCONFIRMED_AI.value
+        ]
+        distinct_sources = len(
+            {
+                str(endpoints[item.from_entity_id].properties.get("agent_id", ""))
+                for item in relationships
+            }
+            - {""}
+        )
+        return self._meta_envelope(
+            question=question,
+            kind=kind,
+            room_id=room_id,
+            limit=limit,
+            claims=claims,
+            unconfirmed=unconfirmed,
+            freshness=await self._meta_freshness(room_id, user_id, head, records),
+            summary=self._meta_summary(kind, claims, distinct_sources),
+            refusal_reason=MetaRefusalReason.NO_ASSERTIONS_IN_SCOPE,
+        )
+
+    @staticmethod
+    def _meta_edge_in_scope(
+        kind: MetaQuestionKind,
+        relationship: OntologyRelationship,
+        entity_ids: set[str],
+        endpoints: dict[str, OntologyEntity],
+    ) -> bool:
+        """An edge whose endpoints this reader may not see is not part of the answer."""
+        if (
+            relationship.from_entity_id not in endpoints
+            or relationship.to_entity_id not in endpoints
+        ):
+            return False
+        if kind in {MetaQuestionKind.STATUS, MetaQuestionKind.DECISIONS}:
+            return relationship.to_entity_id in entity_ids
+        if kind is MetaQuestionKind.DISAGREEMENT:
+            return (
+                endpoints[relationship.from_entity_id].kind
+                in MultiplayerService._DISAGREEMENT_ENDPOINTS
+                and endpoints[relationship.to_entity_id].kind
+                in MultiplayerService._DISAGREEMENT_ENDPOINTS
+            )
+        return True
+
+    async def _answer_decision_meta(
+        self,
+        room_id: str,
+        user_id: str,
+        question: str,
+        question_kind: MetaQuestionKind,
+        version_id: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        """The frozen-provenance chain, unchanged, inside the authorized scope."""
+        head = await self.repos.meta.head(room_id, user_id)
+        if head is None:
+            return self._meta_envelope(
+                question=question,
+                kind=question_kind,
+                room_id=room_id,
+                limit=limit,
+                claims=[],
+                unconfirmed=[],
+                freshness={},
+                summary="no authorized evidence in this room answers that question",
+                refusal_reason=MetaRefusalReason.NO_AUTHORIZED_EVIDENCE,
+            )
         resolved = await self.repos.artifacts.resolve_decision_version(room_id, version_id)
         if resolved is None:
             raise DomainError("decision artifact version not found in room")
@@ -4932,38 +5769,38 @@ class MultiplayerService:
         provenance, available_claims = await self.repos.artifacts.get_version_provenance_bounded(
             version.version_id, limit
         )
-        decision = await self.repos.ontology.get_entity_by_source(
-            room_id, OntologyEntityKind.DECISION, version.version_id
+        decision = await self.repos.meta.entity_by_source(
+            room_id, user_id, OntologyEntityKind.DECISION, version.version_id
         )
         if decision is None:
             raise DomainError("decision ontology is not available for artifact version")
-        decision_review = await self.repos.ontology.get_latest_review(room_id, decision.entity_id)
+        decision_review = await self.repos.meta.latest_review(room_id, user_id, decision.entity_id)
 
         chains: list[dict[str, Any]] = []
         for source in provenance:
-            claim = await self.repos.ontology.get_entity_by_source(
-                room_id, OntologyEntityKind.CLAIM, str(source["claim_id"])
+            claim = await self.repos.meta.entity_by_source(
+                room_id, user_id, OntologyEntityKind.CLAIM, str(source["claim_id"])
             )
-            output = await self.repos.ontology.get_entity_by_source(
-                room_id, OntologyEntityKind.AGENT_OUTPUT, str(source["output_id"])
+            output = await self.repos.meta.entity_by_source(
+                room_id, user_id, OntologyEntityKind.AGENT_OUTPUT, str(source["output_id"])
             )
             if claim is None or output is None:
                 raise DomainError("decision evidence chain is incomplete")
-            claim_to_decision = await self.repos.ontology.get_relationship_between(
-                room_id, claim.entity_id, decision.entity_id
+            claim_to_decision = await self.repos.meta.relationship_between(
+                room_id, user_id, claim.entity_id, decision.entity_id
             )
-            claim_to_output = await self.repos.ontology.get_relationship_between(
-                room_id, claim.entity_id, output.entity_id
+            claim_to_output = await self.repos.meta.relationship_between(
+                room_id, user_id, claim.entity_id, output.entity_id
             )
             if claim_to_decision is None or claim_to_output is None:
                 raise DomainError("decision evidence relationship is incomplete")
-            claim_review = await self.repos.ontology.get_latest_review(room_id, claim.entity_id)
-            output_review = await self.repos.ontology.get_latest_review(room_id, output.entity_id)
-            decision_link_review = await self.repos.ontology.get_latest_review(
-                room_id, claim_to_decision.relationship_id
+            claim_review = await self.repos.meta.latest_review(room_id, user_id, claim.entity_id)
+            output_review = await self.repos.meta.latest_review(room_id, user_id, output.entity_id)
+            decision_link_review = await self.repos.meta.latest_review(
+                room_id, user_id, claim_to_decision.relationship_id
             )
-            output_link_review = await self.repos.ontology.get_latest_review(
-                room_id, claim_to_output.relationship_id
+            output_link_review = await self.repos.meta.latest_review(
+                room_id, user_id, claim_to_output.relationship_id
             )
             chains.append(
                 {
@@ -5015,10 +5852,22 @@ class MultiplayerService:
                         "provider_interventions": source["provider_interventions"],
                         "provider_evidence": source["provider_evidence"],
                     },
+                    "_assertions": (claim, claim_to_decision),
+                    "_reviews": (claim_review, decision_link_review),
                 }
             )
 
-        current_claims = [chain["claim"]["label"] for chain in chains]
+        # Only reviewed claims are named as fact; an unreviewed extraction reaches the
+        # reader through unconfirmed[] and its hedged template, never through prose.
+        current_claims = [
+            str(chain["claim"]["label"])
+            for chain in chains
+            if self._meta_assurance(
+                chain["_assertions"][0].derivation_kind,
+                chain["_assertions"][0].review_status,
+            )
+            is not OntologyAssurance.UNCONFIRMED_AI
+        ]
         relationship_counts: dict[str, int] = {}
         for chain in chains:
             kind = str(chain["relationships"]["claim_to_decision"]["kind"])
@@ -5026,11 +5875,11 @@ class MultiplayerService:
         relationship_summary = ", ".join(
             f"{kind} {count}" for kind, count in sorted(relationship_counts.items())
         )
-        if question_kind == "WHY_DECISION":
+        if question_kind is MetaQuestionKind.WHY_DECISION:
             summary = (
                 f"{decision.label} has {len(chains)} deliberately selected "
                 f"claim{'s' if len(chains) != 1 else ''} ({relationship_summary}): "
-                + "; ".join(current_claims)
+                + ("; ".join(current_claims) or "none of them reviewed yet")
             )
         else:
             summary = (
@@ -5039,61 +5888,166 @@ class MultiplayerService:
                 f"through governed claims ({relationship_summary})."
             )
 
-        freshness_cursor = await self.repos.events.get_latest_sequence(room_id)
-        return {
-            "query": {
-                "question": question,
-                "kind": question_kind,
-                "supported_kinds": ["WHY_DECISION", "DECISION_EVIDENCE"],
-            },
-            "scope": {
-                "room_id": room_id,
-                "artifact_id": artifact.artifact_id,
-                "version_id": version.version_id,
-                "version_number": version.version_number,
-                "max_claims": limit,
-            },
-            "summary": summary,
-            "decision": {
-                **self._ontology_entity_record(decision),
-                "evidence_ids": [chain["exact_source_evidence"]["output_id"] for chain in chains],
-                "source_ids": [
-                    version.version_id,
-                    *(chain["claim"]["source_object_id"] for chain in chains),
-                ],
-                "artifact_name": artifact.name,
-                "version_id": version.version_id,
-                "latest_review": (
-                    self._ontology_review_record(decision_review)
-                    if decision_review is not None
-                    else None
-                ),
-            },
-            "evidence_chains": chains,
-            "freshness": {
-                "room_event_cursor": freshness_cursor,
-                "artifact_created_at": version.created_at.isoformat(),
-                "decision_updated_at": decision.updated_at.isoformat(),
-            },
-            "retrieval_counts": {
-                "available_claims": available_claims,
-                "returned_claims": len(chains),
-                "returned_outputs": len(chains),
-                "truncated": available_claims > len(chains),
-            },
-            "provenance": {
-                "content_hash": version.content_hash,
-                "provenance_hash": version.provenance_hash,
-                "verified": self.verify_artifact_provenance_hash(version, provenance)
-                if available_claims == len(provenance)
-                else None,
-                "verification_note": (
-                    "verified against all frozen claims"
-                    if available_claims == len(provenance)
-                    else "not recomputed because bounded retrieval omitted claims"
-                ),
-            },
+        positions: list[tuple[str, int, tuple[str, ...]]] = [
+            (
+                decision.entity_id,
+                decision.asserted_at_sequence,
+                invalidation_class(decision.kind),
+            )
+        ]
+        for chain in chains:
+            claim_entity, link = chain["_assertions"]
+            positions.append(
+                (
+                    claim_entity.entity_id,
+                    claim_entity.asserted_at_sequence,
+                    invalidation_class(claim_entity.kind),
+                )
+            )
+            positions.append(
+                (
+                    link.relationship_id,
+                    link.asserted_at_sequence,
+                    invalidation_class(claim_entity.kind, decision.kind),
+                )
+            )
+        currency = await self._meta_currency(room_id, user_id, head, positions)
+        # Retrieval is bounded, so the answer names only the evidence it retrieved.
+        bounded_evidence = tuple(
+            str(chain["exact_source_evidence"]["output_id"]) for chain in chains
+        )
+        records = [
+            self._meta_claim_record(
+                assertion_id=decision.entity_id,
+                assertion_type="ENTITY",
+                kind=decision.kind.value,
+                label=decision.label,
+                properties=decision.properties,
+                derivation_kind=decision.derivation_kind,
+                confidence=decision.confidence,
+                review_status=decision.review_status,
+                evidence_ids=bounded_evidence,
+                source_object_kind=decision.kind.value,
+                source_object_id=decision.source_object_id,
+                asserted_at_sequence=decision.asserted_at_sequence,
+                evidence_event_sequences=decision.evidence_event_sequences,
+                stale_at_sequence=decision.stale_at_sequence,
+                currency=currency[decision.entity_id],
+                review=decision_review,
+            )
+        ]
+        for chain in chains:
+            claim_entity, link = chain["_assertions"]
+            claim_review, link_review = chain.pop("_reviews")
+            del chain["_assertions"]
+            records.append(
+                self._meta_claim_record(
+                    assertion_id=claim_entity.entity_id,
+                    assertion_type="ENTITY",
+                    kind=claim_entity.kind.value,
+                    label=claim_entity.label,
+                    properties=claim_entity.properties,
+                    derivation_kind=claim_entity.derivation_kind,
+                    confidence=claim_entity.confidence,
+                    review_status=claim_entity.review_status,
+                    evidence_ids=claim_entity.evidence_ids,
+                    source_object_kind=claim_entity.kind.value,
+                    source_object_id=claim_entity.source_object_id,
+                    asserted_at_sequence=claim_entity.asserted_at_sequence,
+                    evidence_event_sequences=claim_entity.evidence_event_sequences,
+                    stale_at_sequence=claim_entity.stale_at_sequence,
+                    currency=currency[claim_entity.entity_id],
+                    review=claim_review,
+                )
+            )
+            records.append(
+                self._meta_claim_record(
+                    assertion_id=link.relationship_id,
+                    assertion_type="RELATIONSHIP",
+                    kind=link.kind.value,
+                    label=f"{claim_entity.label} {link.kind.value} {decision.label}",
+                    properties={},
+                    derivation_kind=link.derivation_kind,
+                    confidence=link.confidence,
+                    review_status=link.review_status,
+                    evidence_ids=link.evidence_ids,
+                    source_object_kind=link.source_object_kind,
+                    source_object_id=link.source_object_id,
+                    asserted_at_sequence=link.asserted_at_sequence,
+                    evidence_event_sequences=link.evidence_event_sequences,
+                    stale_at_sequence=link.stale_at_sequence,
+                    currency=currency[link.relationship_id],
+                    review=link_review,
+                )
+            )
+        claims = [
+            record
+            for record in records
+            if record["assurance"] != OntologyAssurance.UNCONFIRMED_AI.value
+        ]
+        unconfirmed = [
+            record
+            for record in records
+            if record["assurance"] == OntologyAssurance.UNCONFIRMED_AI.value
+        ]
+        envelope = self._meta_envelope(
+            question=question,
+            kind=question_kind,
+            room_id=room_id,
+            limit=limit,
+            claims=claims,
+            unconfirmed=unconfirmed,
+            freshness=await self._meta_freshness(room_id, user_id, head, records),
+            summary=summary,
+            refusal_reason=MetaRefusalReason.NO_ASSERTIONS_IN_SCOPE,
+        )
+        envelope["scope"] = {
+            "room_id": room_id,
+            "artifact_id": artifact.artifact_id,
+            "version_id": version.version_id,
+            "version_number": version.version_number,
+            "max_claims": limit,
         }
+        envelope["decision"] = {
+            **self._ontology_entity_record(decision),
+            "evidence_ids": [chain["exact_source_evidence"]["output_id"] for chain in chains],
+            "source_ids": [
+                version.version_id,
+                *(chain["claim"]["source_object_id"] for chain in chains),
+            ],
+            "artifact_name": artifact.name,
+            "version_id": version.version_id,
+            "latest_review": (
+                self._ontology_review_record(decision_review)
+                if decision_review is not None
+                else None
+            ),
+        }
+        envelope["evidence_chains"] = chains
+        envelope["freshness"] = {
+            **envelope["freshness"],
+            "artifact_created_at": version.created_at.isoformat(),
+            "decision_updated_at": decision.updated_at.isoformat(),
+        }
+        envelope["retrieval_counts"] = {
+            "available_claims": available_claims,
+            "returned_claims": len(chains),
+            "returned_outputs": len(chains),
+            "truncated": available_claims > len(chains),
+        }
+        envelope["provenance"] = {
+            "content_hash": version.content_hash,
+            "provenance_hash": version.provenance_hash,
+            "verified": self.verify_artifact_provenance_hash(version, provenance)
+            if available_claims == len(provenance)
+            else None,
+            "verification_note": (
+                "verified against all frozen claims"
+                if available_claims == len(provenance)
+                else "not recomputed because bounded retrieval omitted claims"
+            ),
+        }
+        return envelope
 
     async def review_ontology_entity(
         self,

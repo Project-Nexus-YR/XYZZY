@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -55,6 +56,8 @@ from ..domain.models import (
     OntologyDerivationKind,
     OntologyEntity,
     OntologyEntityKind,
+    OntologyExtractionCursor,
+    OntologyExtractor,
     OntologyRelationship,
     OntologyRelationshipKind,
     OntologyReview,
@@ -95,6 +98,8 @@ from ..domain.models import (
     WorkspaceMember,
     new_id,
     utcnow,
+    weakest_derivation_kind,
+    weakest_review_status,
 )
 from ..security.authorization import RoomCapability, roles_with_capability
 from .connection import Database, serialize_datetime
@@ -143,6 +148,7 @@ class Repos:
         self.tool_requests = ToolRequestRepo(db)
         self.idempotency = IdempotencyRepo(db)
         self.ontology = OntologyRepo(db)
+        self.meta = MetaRepo(db)
 
 
 def _require_execution_transition(
@@ -3300,9 +3306,6 @@ class ArtifactRepo:
                     synthesis.synthesis_id,
                 ),
             )
-        await OntologyRepo(self.db).materialize_in_transaction(
-            ontology_entities, ontology_relationships
-        )
         for event in events:
             cursor = await self.db.execute(
                 "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
@@ -3329,6 +3332,38 @@ class ArtifactRepo:
                 ),
             )
             persisted_events.append(persisted)
+        # A structured action projects its own assertions inside its committing
+        # transaction, positioned at the ordered event that announced them, so a
+        # reader can derive their currency from the same axis as everything else.
+        if ontology_entities or ontology_relationships:
+            at = next(
+                (
+                    event.sequence
+                    for event in persisted_events
+                    if event.event_type is EventType.ONTOLOGY_MATERIALIZED
+                ),
+                persisted_events[-1].sequence if persisted_events else 0,
+            )
+            await OntologyRepo(self.db).materialize_in_transaction(
+                [
+                    replace(
+                        entity,
+                        extractor=OntologyExtractor.IMMEDIATE,
+                        asserted_at_sequence=at,
+                        evidence_event_sequences=(at,),
+                    )
+                    for entity in ontology_entities
+                ],
+                [
+                    replace(
+                        item,
+                        extractor=OntologyExtractor.IMMEDIATE,
+                        asserted_at_sequence=at,
+                        evidence_event_sequences=(at,),
+                    )
+                    for item in ontology_relationships
+                ],
+            )
         return persisted_events
 
     async def get_version_provenance(self, version_id: str) -> list[dict[str, Any]]:
@@ -3437,15 +3472,25 @@ class OntologyRepo:
         self,
         entities: list[OntologyEntity],
         relationships: list[OntologyRelationship],
-    ) -> None:
+    ) -> tuple[int, int]:
+        """Write assertions idempotently and return how many rows each table gained.
+
+        Every timing writes through here, so the transaction discipline, the
+        deterministic-ID conflict rule and the inheritance rule below are written
+        once rather than per writer.
+        """
         if not self.db.owns_current_transaction:
             raise RuntimeError("ontology materialization requires transaction ownership")
+        entities_written = 0
+        relationships_written = 0
         for entity in entities:
-            await self.db.execute(
+            cursor = await self.db.execute(
                 "INSERT INTO ontology_entities("
                 "entity_id, room_id, kind, source_object_id, label, properties, "
                 "derivation_kind, confidence, evidence_ids, source_ids, review_status, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "extractor, asserted_at_sequence, evidence_event_sequences, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(room_id, kind, source_object_id) DO NOTHING",
                 (
                     entity.entity_id,
@@ -3459,16 +3504,28 @@ class OntologyRepo:
                     json.dumps(entity.evidence_ids),
                     json.dumps(entity.source_ids),
                     entity.review_status.value,
+                    entity.extractor.value,
+                    entity.asserted_at_sequence,
+                    json.dumps(list(entity.evidence_event_sequences)),
                     serialize_datetime(entity.created_at),
                     serialize_datetime(entity.updated_at),
                 ),
             )
+            entities_written += cursor.rowcount if cursor.rowcount > 0 else 0
         for relationship in relationships:
-            await self.db.execute(
+            relationship = await self._inherit_the_weakest(relationship, entities)
+            if not relationship.source_object_id:
+                # SQLite cannot add a CHECK to a backfilled column without a table
+                # rebuild, so the write path is where an edge that cannot be drilled
+                # down is refused.
+                raise ValueError("ontology relationship requires a source object")
+            cursor = await self.db.execute(
                 "INSERT INTO ontology_relationships("
                 "relationship_id, room_id, kind, from_entity_id, to_entity_id, "
                 "derivation_kind, confidence, evidence_ids, source_ids, review_status, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "source_object_kind, source_object_id, extractor, asserted_at_sequence, "
+                "evidence_event_sequences, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(room_id, kind, from_entity_id, to_entity_id) DO NOTHING",
                 (
                     relationship.relationship_id,
@@ -3481,10 +3538,119 @@ class OntologyRepo:
                     json.dumps(relationship.evidence_ids),
                     json.dumps(relationship.source_ids),
                     relationship.review_status.value,
+                    relationship.source_object_kind,
+                    relationship.source_object_id,
+                    relationship.extractor.value,
+                    relationship.asserted_at_sequence,
+                    json.dumps(list(relationship.evidence_event_sequences)),
                     serialize_datetime(relationship.created_at),
                     serialize_datetime(relationship.updated_at),
                 ),
             )
+            relationships_written += cursor.rowcount if cursor.rowcount > 0 else 0
+        return entities_written, relationships_written
+
+    async def _inherit_the_weakest(
+        self,
+        relationship: OntologyRelationship,
+        batch: list[OntologyEntity],
+    ) -> OntologyRelationship:
+        """An edge whose inputs are assertions is only as good as its weakest input.
+
+        An IMMEDIATE edge is projected from a structured row, so its derivation is a
+        fact about that row and is left alone. An ASYNC or SCHEDULED edge is inferred
+        by reading its endpoints, so it takes the weakest derivation kind and review
+        status of them and a confidence no greater than either — otherwise a
+        consolidation edge over two unconfirmed entities lands as confirmed truth.
+        """
+        if relationship.extractor is OntologyExtractor.IMMEDIATE:
+            return relationship
+        by_id = {entity.entity_id: entity for entity in batch}
+        inputs: list[OntologyEntity] = []
+        for entity_id in (relationship.from_entity_id, relationship.to_entity_id):
+            endpoint = by_id.get(entity_id) or await self.get_entity(entity_id)
+            if endpoint is not None:
+                inputs.append(endpoint)
+        if not inputs:
+            return relationship
+        derivation = weakest_derivation_kind(
+            [relationship.derivation_kind, *(item.derivation_kind for item in inputs)]
+        )
+        review_status = weakest_review_status(
+            [relationship.review_status, *(item.review_status for item in inputs)]
+        )
+        return replace(
+            relationship,
+            derivation_kind=derivation if derivation is not None else relationship.derivation_kind,
+            review_status=(
+                review_status if review_status is not None else relationship.review_status
+            ),
+            confidence=min(relationship.confidence, *(item.confidence for item in inputs)),
+        )
+
+    async def mark_stale_in_transaction(
+        self, room_id: str, target_ids: list[str], stale_at_sequence: int
+    ) -> list[str]:
+        """Mark superseded assertions, never delete them: a removed one cannot be audited."""
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("ontology staleness marking requires transaction ownership")
+        statements = (
+            "UPDATE ontology_entities SET stale_at_sequence = ? "
+            "WHERE room_id = ? AND entity_id = ? AND stale_at_sequence IS NULL",
+            "UPDATE ontology_relationships SET stale_at_sequence = ? "
+            "WHERE room_id = ? AND relationship_id = ? AND stale_at_sequence IS NULL",
+        )
+        marked: list[str] = []
+        for target_id in target_ids:
+            for statement in statements:
+                cursor = await self.db.execute(statement, (stale_at_sequence, room_id, target_id))
+                if cursor.rowcount > 0:
+                    marked.append(target_id)
+        return marked
+
+    async def get_cursor(
+        self, room_id: str, extractor: OntologyExtractor
+    ) -> OntologyExtractionCursor | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM ontology_extraction_cursors WHERE room_id = ? AND extractor = ?",
+            (room_id, extractor.value),
+        )
+        if row is None:
+            return None
+        return OntologyExtractionCursor(
+            room_id=row["room_id"],
+            extractor=OntologyExtractor(row["extractor"]),
+            last_sequence=int(row["last_sequence"]),
+            last_run_at=row["last_run_at"],
+        )
+
+    async def advance_cursor_in_transaction(
+        self,
+        room_id: str,
+        extractor: OntologyExtractor,
+        from_sequence: int,
+        to_sequence: int,
+        at: datetime,
+    ) -> None:
+        """Compare-and-swap the resume hint; a trigger stops it regressing anyway."""
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("ontology cursor advance requires transaction ownership")
+        cursor = await self.db.execute(
+            "INSERT INTO ontology_extraction_cursors(room_id, extractor, last_sequence, "
+            "last_run_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(room_id, extractor) DO UPDATE SET last_sequence = excluded.last_sequence, "
+            "last_run_at = excluded.last_run_at "
+            "WHERE ontology_extraction_cursors.last_sequence = ?",
+            (
+                room_id,
+                extractor.value,
+                to_sequence,
+                serialize_datetime(at),
+                from_sequence,
+            ),
+        )
+        if cursor.rowcount < 1:
+            raise DomainError("ontology extraction cursor moved under this pass")
 
     async def get_entity(self, entity_id: str) -> OntologyEntity | None:
         row = await self.db.fetch_one(
@@ -3731,11 +3897,19 @@ class OntologyRepo:
             raise ValueError("ontology identifier list is malformed")
         return tuple(parsed)
 
+    @staticmethod
+    def _json_sequences(value: str) -> tuple[int, ...]:
+        parsed = json.loads(value)
+        if not isinstance(parsed, list) or not all(isinstance(item, int) for item in parsed):
+            raise ValueError("ontology evidence sequence list is malformed")
+        return tuple(parsed)
+
     @classmethod
     def _entity_from_row(cls, row: dict[str, Any]) -> OntologyEntity:
         properties = json.loads(row["properties"])
         if not isinstance(properties, dict):
             raise ValueError("ontology entity properties are malformed")
+        stale = row["stale_at_sequence"]
         return OntologyEntity(
             entity_id=row["entity_id"],
             room_id=row["room_id"],
@@ -3748,12 +3922,17 @@ class OntologyRepo:
             evidence_ids=cls._json_tuple(row["evidence_ids"]),
             source_ids=cls._json_tuple(row["source_ids"]),
             review_status=OntologyReviewStatus(row["review_status"]),
+            extractor=OntologyExtractor(row["extractor"]),
+            asserted_at_sequence=int(row["asserted_at_sequence"]),
+            evidence_event_sequences=cls._json_sequences(row["evidence_event_sequences"]),
+            stale_at_sequence=None if stale is None else int(stale),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
     @classmethod
     def _relationship_from_row(cls, row: dict[str, Any]) -> OntologyRelationship:
+        stale = row["stale_at_sequence"]
         return OntologyRelationship(
             relationship_id=row["relationship_id"],
             room_id=row["room_id"],
@@ -3765,6 +3944,12 @@ class OntologyRepo:
             evidence_ids=cls._json_tuple(row["evidence_ids"]),
             source_ids=cls._json_tuple(row["source_ids"]),
             review_status=OntologyReviewStatus(row["review_status"]),
+            source_object_kind=row["source_object_kind"],
+            source_object_id=row["source_object_id"],
+            extractor=OntologyExtractor(row["extractor"]),
+            asserted_at_sequence=int(row["asserted_at_sequence"]),
+            evidence_event_sequences=cls._json_sequences(row["evidence_event_sequences"]),
+            stale_at_sequence=None if stale is None else int(stale),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -3787,6 +3972,182 @@ class OntologyRepo:
             reviewed_by=row["reviewed_by"],
             created_at=datetime.fromisoformat(row["created_at"]),
         )
+
+
+class MetaRepo:
+    """Every read a Meta answer makes, authorized inside the SQL that makes it.
+
+    Existence-only membership is not authorization: ``room_members.role`` has no
+    CHECK, so a row bearing any role string — including one the policy grants
+    nothing for — satisfies ``m.user_id = :user_id`` and reads the room. Every
+    statement below therefore carries the role predicate too, expanded from
+    ``roles_with_capability(READ)`` rather than copied beside the policy, so an
+    unrecognized role yields zero rows and a missing membership row yields zero
+    rows without a forgettable Python branch.
+
+    Aggregates are here for the same reason as rows: a freshness head or an unread
+    count over content the asker may not read leaks that content's existence and
+    rate, so it is computed inside the authorized scope or not at all.
+    """
+
+    _READING_ROLES = roles_with_capability(RoomCapability.READ)
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    @classmethod
+    def _authorized(cls, select: str, alias: str, tail: str) -> str:
+        """Build a Meta statement. There is no way through here without the join."""
+        roles = ", ".join("?" for _ in cls._READING_ROLES)
+        return (
+            f"{select} JOIN room_members m ON m.room_id = {alias}.room_id "
+            f"AND m.user_id = ? AND m.role IN ({roles}) {tail}"
+        )
+
+    def _params(self, user_id: str, *rest: Any) -> tuple[Any, ...]:
+        return (user_id, *self._READING_ROLES, *rest)
+
+    async def head(self, room_id: str, user_id: str) -> int | None:
+        """The room's latest sequence as this reader may see it; None when they may not."""
+        sql = self._authorized(
+            "SELECT MAX(e.sequence) AS head FROM room_events e", "e", "WHERE e.room_id = ?"
+        )
+        row = await self.db.fetch_one(sql, self._params(user_id, room_id))
+        head = None if row is None else row["head"]
+        return None if head is None else int(head)
+
+    async def entities(
+        self,
+        room_id: str,
+        user_id: str,
+        kinds: Sequence[OntologyEntityKind],
+        *,
+        since_sequence: int | None = None,
+        limit: int = 50,
+    ) -> list[OntologyEntity]:
+        if not kinds:
+            return []
+        placeholders = ", ".join("?" for _ in kinds)
+        tail = f"WHERE e.room_id = ? AND e.kind IN ({placeholders})"
+        params: list[Any] = [room_id, *(kind.value for kind in kinds)]
+        if since_sequence is not None:
+            tail += " AND e.asserted_at_sequence > ?"
+            params.append(since_sequence)
+        tail += " ORDER BY e.asserted_at_sequence, e.entity_id LIMIT ?"
+        params.append(limit)
+        sql = self._authorized("SELECT e.* FROM ontology_entities e", "e", tail)
+        rows = await self.db.fetch_all(sql, self._params(user_id, *params))
+        return [OntologyRepo._entity_from_row(row) for row in rows]
+
+    async def relationships(
+        self,
+        room_id: str,
+        user_id: str,
+        kinds: Sequence[OntologyRelationshipKind],
+        *,
+        since_sequence: int | None = None,
+        limit: int = 50,
+    ) -> list[OntologyRelationship]:
+        if not kinds:
+            return []
+        placeholders = ", ".join("?" for _ in kinds)
+        tail = f"WHERE r.room_id = ? AND r.kind IN ({placeholders})"
+        params: list[Any] = [room_id, *(kind.value for kind in kinds)]
+        if since_sequence is not None:
+            tail += " AND r.asserted_at_sequence > ?"
+            params.append(since_sequence)
+        tail += " ORDER BY r.asserted_at_sequence, r.relationship_id LIMIT ?"
+        params.append(limit)
+        sql = self._authorized("SELECT r.* FROM ontology_relationships r", "r", tail)
+        rows = await self.db.fetch_all(sql, self._params(user_id, *params))
+        return [OntologyRepo._relationship_from_row(row) for row in rows]
+
+    async def entities_by_ids(
+        self, room_id: str, user_id: str, entity_ids: Sequence[str]
+    ) -> list[OntologyEntity]:
+        if not entity_ids:
+            return []
+        placeholders = ", ".join("?" for _ in entity_ids)
+        sql = self._authorized(
+            "SELECT e.* FROM ontology_entities e",
+            "e",
+            f"WHERE e.room_id = ? AND e.entity_id IN ({placeholders})",
+        )
+        rows = await self.db.fetch_all(sql, self._params(user_id, room_id, *entity_ids))
+        return [OntologyRepo._entity_from_row(row) for row in rows]
+
+    async def entity_by_source(
+        self, room_id: str, user_id: str, kind: OntologyEntityKind, source_object_id: str
+    ) -> OntologyEntity | None:
+        sql = self._authorized(
+            "SELECT e.* FROM ontology_entities e",
+            "e",
+            "WHERE e.room_id = ? AND e.kind = ? AND e.source_object_id = ? LIMIT 1",
+        )
+        row = await self.db.fetch_one(
+            sql, self._params(user_id, room_id, kind.value, source_object_id)
+        )
+        return None if row is None else OntologyRepo._entity_from_row(row)
+
+    async def relationship_between(
+        self, room_id: str, user_id: str, from_entity_id: str, to_entity_id: str
+    ) -> OntologyRelationship | None:
+        sql = self._authorized(
+            "SELECT r.* FROM ontology_relationships r",
+            "r",
+            "WHERE r.room_id = ? AND r.from_entity_id = ? AND r.to_entity_id = ? "
+            "ORDER BY r.updated_at DESC, r.relationship_id LIMIT 1",
+        )
+        row = await self.db.fetch_one(
+            sql, self._params(user_id, room_id, from_entity_id, to_entity_id)
+        )
+        return None if row is None else OntologyRepo._relationship_from_row(row)
+
+    async def latest_review(
+        self, room_id: str, user_id: str, target_id: str
+    ) -> OntologyReview | None:
+        sql = self._authorized(
+            "SELECT v.* FROM ontology_reviews v",
+            "v",
+            "WHERE v.room_id = ? AND v.target_id = ? "
+            "ORDER BY v.created_at DESC, v.review_id DESC LIMIT 1",
+        )
+        row = await self.db.fetch_one(sql, self._params(user_id, room_id, target_id))
+        return None if row is None else OntologyRepo._review_from_row(row)
+
+    async def invalidating_sequences(
+        self,
+        room_id: str,
+        user_id: str,
+        event_types: Sequence[str],
+        after_sequence: int,
+        head: int,
+    ) -> list[int]:
+        """One grouped read per invalidation class per answer, never one per claim."""
+        if not event_types:
+            return []
+        placeholders = ", ".join("?" for _ in event_types)
+        sql = self._authorized(
+            "SELECT e.sequence AS sequence FROM room_events e",
+            "e",
+            f"WHERE e.room_id = ? AND e.event_type IN ({placeholders}) "
+            "AND e.sequence > ? AND e.sequence <= ? ORDER BY e.sequence",
+        )
+        rows = await self.db.fetch_all(
+            sql, self._params(user_id, room_id, *event_types, after_sequence, head)
+        )
+        return [int(row["sequence"]) for row in rows]
+
+    async def extraction_cursors(self, room_id: str, user_id: str) -> dict[str, int]:
+        """Where each extractor resumes. A reader sees pending work; it decides nothing."""
+        sql = self._authorized(
+            "SELECT c.extractor AS extractor, c.last_sequence AS last_sequence "
+            "FROM ontology_extraction_cursors c",
+            "c",
+            "WHERE c.room_id = ?",
+        )
+        rows = await self.db.fetch_all(sql, self._params(user_id, room_id))
+        return {str(row["extractor"]): int(row["last_sequence"]) for row in rows}
 
 
 class DecisionRepo:

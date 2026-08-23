@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -837,6 +838,14 @@ class OntologyDerivationKind(StrEnum):
     AI_DERIVED = "AI_DERIVED"
 
 
+class OntologyExtractor(StrEnum):
+    """The three shipped extraction timings. There is no QUERY_TIME: reads never write."""
+
+    IMMEDIATE = "IMMEDIATE"
+    ASYNC = "ASYNC"
+    SCHEDULED = "SCHEDULED"
+
+
 class OntologyReviewStatus(StrEnum):
     UNCONFIRMED = "UNCONFIRMED"
     CONFIRMED = "CONFIRMED"
@@ -868,6 +877,12 @@ class OntologyEntity:
     evidence_ids: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
     review_status: OntologyReviewStatus = OntologyReviewStatus.UNCONFIRMED
+    extractor: OntologyExtractor = OntologyExtractor.IMMEDIATE
+    # Where in the room's total order this assertion was written. Currency is
+    # derived from it per read; nothing stamps an assertion current.
+    asserted_at_sequence: int = 0
+    evidence_event_sequences: tuple[int, ...] = ()
+    stale_at_sequence: int | None = None
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
 
@@ -884,6 +899,14 @@ class OntologyRelationship:
     evidence_ids: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
     review_status: OntologyReviewStatus = OntologyReviewStatus.UNCONFIRMED
+    # The durable row whose content states the relation — not automatically an
+    # endpoint. Without it a relationship-centric answer cannot drill down.
+    source_object_kind: str = ""
+    source_object_id: str = ""
+    extractor: OntologyExtractor = OntologyExtractor.IMMEDIATE
+    asserted_at_sequence: int = 0
+    evidence_event_sequences: tuple[int, ...] = ()
+    stale_at_sequence: int | None = None
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
 
@@ -900,6 +923,44 @@ class OntologyReview:
     reason: str
     reviewed_by: str
     created_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass(frozen=True, slots=True)
+class OntologyExtractionCursor:
+    """One extractor's resume hint for one room. It decides nothing a reader sees."""
+
+    room_id: str
+    extractor: OntologyExtractor
+    last_sequence: int
+    last_run_at: str
+
+
+# AI_DERIVED < SYSTEM_MATERIALIZED, UNCONFIRMED < CORRECTED < CONFIRMED. A derived
+# assertion is only as good as its weakest input, so these orders decide what a
+# consolidation edge over two unconfirmed entities may claim to be.
+_DERIVATION_STRENGTH: dict[OntologyDerivationKind, int] = {
+    OntologyDerivationKind.AI_DERIVED: 0,
+    OntologyDerivationKind.SYSTEM_MATERIALIZED: 1,
+}
+_REVIEW_STRENGTH: dict[OntologyReviewStatus, int] = {
+    OntologyReviewStatus.UNCONFIRMED: 0,
+    OntologyReviewStatus.CORRECTED: 1,
+    OntologyReviewStatus.CONFIRMED: 2,
+}
+
+
+def weakest_derivation_kind(
+    kinds: Iterable[OntologyDerivationKind],
+) -> OntologyDerivationKind | None:
+    """The weakest derivation among some inputs; None when there are no inputs."""
+    return min(kinds, key=lambda kind: _DERIVATION_STRENGTH[kind], default=None)
+
+
+def weakest_review_status(
+    statuses: Iterable[OntologyReviewStatus],
+) -> OntologyReviewStatus | None:
+    """The weakest review status among some inputs; None when there are no inputs."""
+    return min(statuses, key=lambda status: _REVIEW_STRENGTH[status], default=None)
 
 
 class DecisionStatus(StrEnum):

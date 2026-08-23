@@ -1766,10 +1766,22 @@ async function askMeta(preset = '') {
   evidence.innerHTML = '';
   try {
     const result = await api('GET', `/rooms/${roomId}/meta?question=${encodeURIComponent(question)}&limit=10`);
+    if (!result.decision) {
+      // The kinds answered from assertions rather than one decision brief.
+      document.getElementById('meta-scope').innerHTML = `Scope <code>${escHtml(result.scope.room_id)}</code> · ${escHtml(result.query.kind)} · ` +
+        `head ${result.freshness.authorized_head ?? '—'} · drain lag ${result.freshness.drain_lag_events ?? '—'}`;
+      answer.innerHTML = `<span class="ontology-badge">${escHtml(result.status)}</span> ${escHtml(result.summary)}`;
+      evidence.innerHTML = [...result.claims, ...result.unconfirmed].map(claim =>
+        `<article class="meta-chain"><span class="ontology-badge ${claim.review_status.toLowerCase()}">${escHtml(claim.assurance)}</span>
+          ${escHtml(claim.text)}<br>Confidence ${Number(claim.confidence).toFixed(2)} · as of ${claim.asserted_at_sequence}
+          · ${claim.current ? 'current' : `${claim.invalidating_events} later events`}
+          · source <code>${escHtml(claim.source_object_kind)}:${escHtml(claim.source_object_id)}</code></article>`).join('');
+      return;
+    }
     const counts = result.retrieval_counts;
     const freshness = result.freshness;
     document.getElementById('meta-scope').innerHTML = `Scope <code>${escHtml(result.scope.room_id)}</code> · Decision Brief v${result.scope.version_number} · ` +
-      `cursor ${freshness.room_event_cursor} · ${counts.returned_claims}/${counts.available_claims} claims retrieved`;
+      `head ${freshness.authorized_head} · drain lag ${freshness.drain_lag_events} · ${counts.returned_claims}/${counts.available_claims} claims retrieved`;
     answer.innerHTML = `<span class="ontology-badge ${result.decision.review_status.toLowerCase()}">${escHtml(metaDerivationLabel(result.decision))}</span> ` +
       `${escHtml(result.summary)}<br><span class="ontology-meta">Confidence ${Number(result.decision.confidence).toFixed(2)} · freshness ${escHtml(freshness.decision_updated_at)}</span>`;
     evidence.innerHTML = result.evidence_chains.map((chain, index) => {

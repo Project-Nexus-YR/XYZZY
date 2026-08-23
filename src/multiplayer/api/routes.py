@@ -25,6 +25,7 @@ from ..domain.models import (
     MemoryScope,
     Message,
     MessageRole,
+    OntologyExtractor,
     OntologyRelationshipKind,
     OntologyReviewAction,
     OutputDisposition,
@@ -354,6 +355,10 @@ class SynthesizeDecisionBriefRequest(BaseModel):
 class SynthesizeBranchRequest(BaseModel):
     title: str = "Authentication migration decision"
     synthesis_type: str = SynthesisType.DECISION_BRIEF.value
+
+
+class RunOntologyExtractionRequest(BaseModel):
+    extractor: str
 
 
 class ReviewOntologyEntityRequest(BaseModel):
@@ -1237,12 +1242,29 @@ async def ask_room_meta(
         return await svc.answer_decision_meta(
             room_id,
             question,
+            user_id=principal.user_id,
             version_id=version_id,
             limit=limit,
         )
     except DomainError as exc:
         status_code = 404 if "not found" in str(exc) or "not available" in str(exc) else 400
         raise HTTPException(status_code, str(exc)) from exc
+
+
+@router.post("/rooms/{room_id}/ontology/extractions")
+async def run_ontology_extraction(
+    room_id: str,
+    req: RunOntologyExtractionRequest,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    """Run one bounded extraction pass. No read path triggers this."""
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.ADMINISTER)
+    extractor = _safe_enum(req.extractor.upper(), OntologyExtractor, "ontology extractor")
+    try:
+        return await svc.run_ontology_extraction(room_id, extractor, actor_id=principal.user_id)
+    except DomainError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/rooms/{room_id}/ontology/entities/{entity_id}/reviews")
