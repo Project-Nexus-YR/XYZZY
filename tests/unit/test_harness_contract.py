@@ -6,9 +6,9 @@ The conformance suite below is what makes "one contract" a claim rather than a h
 runs unchanged against the NEXUS bridge and against a bare model provider.
 
 ``MAX_TOKENS`` is deliberately unexercised. ``OpenAIResponsesProvider._decode_response``
-hardcodes ``"action": "finish"`` and reads no truncation field, so nothing here can
-reach that state; the value stays because a truncated turn is a real terminal outcome
-and adding it later would reopen a closed state machine.
+reads the action the model chose but no truncation field, so nothing here can reach that
+state; the value stays because a truncated turn is a real terminal outcome and adding it
+later would reopen a closed state machine.
 """
 
 from __future__ import annotations
@@ -49,8 +49,9 @@ _SCHEMA: dict[str, Any] = {"type": "object", "properties": {"action": {"type": "
 
 
 class _Provider:
-    def __init__(self, action: str = "finish") -> None:
+    def __init__(self, action: str = "finish", tool: str = "") -> None:
         self.action = action
+        self.tool = tool
         self.calls = 0
 
     async def acomplete(self, prompt: str, response_schema: dict[str, Any]) -> dict[str, Any]:
@@ -58,6 +59,8 @@ class _Provider:
         self.calls += 1
         return {
             "action": self.action,
+            "tool": self.tool,
+            "input": {"limit": 5},
             "output": {"content": "assessed"},
             "provider_name": "test-model",
             "provider_model": "harness-test",
@@ -248,9 +251,11 @@ async def test_the_workflow_only_provider_satisfies_the_model_provider_harness()
     assert "SIMULATED" in seen[0].payload["content"]
 
 
+@pytest.mark.parametrize("build", list(HARNESSES.values()), ids=list(HARNESSES))
 @pytest.mark.asyncio
-async def test_a_tool_action_is_reported_as_a_tool_call_update() -> None:
-    harness, run_id = _nexus_harness(_Provider(action="tool"))
+async def test_a_tool_action_is_reported_as_a_tool_call_update(build: Any) -> None:
+    """Both harnesses hand the server the tool and its input, or the gateway sees none."""
+    harness, run_id = build(_Provider(action="tool", tool="channel.read_context"))
     handle = await harness.session_new(_run_context(run_id))
     seen: list[SessionUpdate] = []
 
@@ -259,13 +264,18 @@ async def test_a_tool_action_is_reported_as_a_tool_call_update() -> None:
 
     result = await harness.session_prompt(
         PromptRequest(
-            handle=handle, prompt="Assess it.", response_schema=_SCHEMA, offered_tools=()
+            handle=handle,
+            prompt="Assess it.",
+            response_schema=_SCHEMA,
+            offered_tools=("channel.read_context",),
         ),
         on_update,
     )
 
     assert seen[0].kind is UpdateKind.TOOL_CALL
     assert result.output["action"] == "tool"
+    assert result.output["tool"] == "channel.read_context"
+    assert result.output["input"] == {"limit": 5}
 
 
 # ── The golden test: the seeded branch run keeps its provenance ──────────────

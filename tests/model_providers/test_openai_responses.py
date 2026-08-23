@@ -23,7 +23,16 @@ from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.services.service import MultiplayerService
 
 
+def _responses_body(text: str) -> dict[str, Any]:
+    return {
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}],
+        "usage": {"total_tokens": 21},
+    }
+
+
 class _RoleAwareTransport(httpx.AsyncBaseTransport):
+    """Answers in the shape the run's step schema asked for, as a real model would."""
+
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
 
@@ -40,15 +49,7 @@ class _RoleAwareTransport(httpx.AsyncBaseTransport):
         return httpx.Response(
             200,
             request=request,
-            json={
-                "output": [
-                    {
-                        "type": "message",
-                        "content": [{"type": "output_text", "text": content}],
-                    }
-                ],
-                "usage": {"total_tokens": 21},
-            },
+            json=_responses_body(json.dumps({"action": "finish", "output": {"content": content}})),
         )
 
 

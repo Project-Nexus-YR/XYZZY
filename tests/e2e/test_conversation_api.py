@@ -327,6 +327,44 @@ def test_both_panes_attribute_an_agent_answer_through_one_renderer() -> None:
     assert "trigger.closest('.msg, .thread-item')" in ui
 
 
+def test_every_searchable_kind_has_somewhere_the_view_can_open_it() -> None:
+    """A hit used to be stamped data-message-id whatever it was, and sent to openThread.
+
+    Clicking a task, a decision or an artifact version therefore painted "message not
+    found" over a result the server had authorized and returned, and container_id — the
+    id an artifact version needs alongside its own — was sent and never read.
+    """
+    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
+
+    # The hit carries what it is and where it lives, not a message id it may not be.
+    assert 'data-object-kind="${escHtml(hit.object_kind)}"' in ui
+    assert "data-container-id=\"${escHtml(hit.container_id || '')}\"" in ui
+    assert 'data-message-id="${escHtml(hit.object_id)}"' not in ui
+
+    # Every kind the server indexes is routed, and each target is rendered with the
+    # attribute its route looks for.
+    for kind in ("MESSAGE", "TASK", "DECISION", "ARTIFACT_VERSION", "AGENT_OUTPUT"):
+        assert kind in ui, kind
+    for attribute in (
+        'data-task-id="${escHtml(t.task_id)}"',
+        'data-decision-id="${escHtml(d.decision_id)}"',
+        'data-artifact-id="${escHtml(a.artifact_id)}"',
+        'data-output-id="${escHtml(output.output_id)}"',
+    ):
+        assert attribute in ui, attribute
+    assert "await openThread(data.objectId); return;" in ui
+
+
+def test_the_composer_says_when_a_message_was_refused() -> None:
+    """A 403 used to reach console.error and nothing else, so the author saw nothing."""
+    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
+
+    assert "console.error('Failed to send message:'" not in ui
+    assert "toast(`Message was not sent: ${errorMessage(err)}`, 'error')" in ui
+    # The same shape the thread composer beside it has always used.
+    assert "toast(`Reply was not sent: ${errorMessage(err)}`, 'error')" in ui
+
+
 def test_a_search_query_of_only_punctuation_is_rejected() -> None:
     with _app() as client:
         _seed(client)

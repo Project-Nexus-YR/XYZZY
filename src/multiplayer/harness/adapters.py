@@ -122,7 +122,12 @@ class NexusHarness:
 
 
 class ModelProviderHarness:
-    """One prompt is one ``acomplete``, one ``MESSAGE_DELTA``, then ``END_TURN``."""
+    """One prompt is one ``acomplete``, one update, then ``END_TURN``.
+
+    The update is a ``TOOL_CALL`` when the provider chose a tool and a
+    ``MESSAGE_DELTA`` otherwise, and the chosen tool and its input travel in the
+    turn output, because the server dispatches the gateway from those fields.
+    """
 
     harness_id = MODEL_PROVIDER_HARNESS_ID
 
@@ -151,18 +156,28 @@ class ModelProviderHarness:
             raise HarnessError(str(exc) or "model provider failed") from exc
         raw_output = response.get("output")
         output = dict(raw_output) if isinstance(raw_output, dict) else {"content": raw_output}
+        action = str(response.get("action", "finish"))
+        tool = str(response.get("tool", ""))
+        raw_input = response.get("input")
+        requests_tool = action == "tool"
         await on_update(
             SessionUpdate(
                 run_id=request.handle.run_id,
-                kind=UpdateKind.MESSAGE_DELTA,
-                payload={"content": str(output.get("content", ""))},
+                kind=UpdateKind.TOOL_CALL if requests_tool else UpdateKind.MESSAGE_DELTA,
+                payload=(
+                    {"action": action, "tool": tool}
+                    if requests_tool
+                    else {"content": str(output.get("content", ""))}
+                ),
             )
         )
         return TurnResult(
             StopReason.END_TURN,
             {
                 "status": "ok",
-                "action": str(response.get("action", "finish")),
+                "action": action,
+                "tool": tool,
+                "input": dict(raw_input) if isinstance(raw_input, dict) else {},
                 "result": output,
             },
             {

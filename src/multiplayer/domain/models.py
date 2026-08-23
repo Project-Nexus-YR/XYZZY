@@ -391,18 +391,18 @@ class Execution:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionIntervention:
-    """One human steer, kept beside the authority that produced it.
+    """One human steer, kept beside the identity of whoever produced it.
 
-    capabilities is the intervener's effective set at the moment they steered.
-    The step that consumes this instruction runs under the run's terms
-    intersected with it, so injected text can never widen a run beyond what its
-    injector holds.
+    The row records who steered, never what they held. The step that consumes this
+    instruction re-derives that person's effective set from durable records and runs
+    under the run's terms intersected with it, so injected text can never widen a run
+    beyond what its author holds *now* — a set stored here would say what they held
+    then, and outlive being narrowed.
     """
 
     intervention_id: str
     execution_id: str
     intervened_by: str
-    capabilities: frozenset[str]
     instruction: str
     consumed_at: datetime | None = None
     created_at: datetime = field(default_factory=utcnow)

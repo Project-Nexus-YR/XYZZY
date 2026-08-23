@@ -159,7 +159,7 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
 .tray-head{display:grid;grid-template-columns:32px minmax(0,1fr) 32px;align-items:center;gap:10px;padding:12px 13px;border-bottom:1px solid var(--border)}.tray-glyph{width:32px;height:32px;border-radius:7px;background:oklch(94% .035 38);color:var(--accent);display:grid;place-items:center;font-size:16px;font-weight:750}.tray-title{font-size:12px;font-weight:750;letter-spacing:-.01em}.tray-subtitle{font-size:10px;color:var(--text2);margin-top:2px}.decision-studio{padding:13px;border:0}.studio-label{display:block;font-size:10px;font-weight:720;margin-bottom:6px}.strategy-toggle{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:13px}.strategy-toggle button{position:relative;border:1px solid var(--border);background:var(--surface);border-radius:7px;padding:9px 10px;text-align:left;min-height:58px}.strategy-toggle button:hover{background:var(--surface2);border-color:oklch(74% .02 60)}.strategy-toggle button.active{background:oklch(94% .035 38);border-color:oklch(73% .08 38);box-shadow:inset 0 0 0 1px oklch(73% .08 38/.2)}.strategy-name{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:720}.strategy-dot{width:12px;height:12px;border:1px solid var(--text2);border-radius:50%;display:grid;place-items:center}.strategy-toggle button.active .strategy-dot{border-color:var(--accent)}.strategy-toggle button.active .strategy-dot::after{content:"";width:6px;height:6px;border-radius:50%;background:var(--accent)}.strategy-help{display:block;margin-top:4px;padding-left:19px;font-size:9px;line-height:1.35;color:var(--text2)}.question-wrap{border:1px solid oklch(76% .015 60);border-radius:8px;overflow:hidden;background:var(--surface)}.question-wrap:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px oklch(94% .035 38)}.question-input{min-height:78px;max-height:130px;background:transparent;border:0!important;border-radius:0;box-shadow:none!important;padding:10px 11px;resize:vertical;font-size:12px}.question-meta{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border);padding:6px 9px;font-size:9px;color:var(--text2)}.field-label{margin:13px 0 6px}.template-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;border:0;overflow:visible}.template-option+.template-option{border:0}.template-body{border:1px solid var(--border);border-radius:7px;background:var(--surface);min-height:58px;padding:9px}.template-body:hover{background:var(--surface2);border-color:oklch(74% .02 60)}.template-option input:checked+.template-body{background:oklch(94% .03 185);border-color:oklch(72% .065 185);box-shadow:inset 0 0 0 1px oklch(72% .065 185/.18)}.template-option input:focus-visible+.template-body{outline:2px solid var(--accent);outline-offset:2px}.template-name{font-size:10px}.template-option input:checked+.template-body .template-name::after{color:var(--green)}.studio-footer{display:flex;align-items:center;gap:12px;margin:13px -13px -13px;padding:10px 13px;background:var(--surface2);border-top:1px solid var(--border)}.launch-note{flex:1;font-size:9px}.studio-footer .btn-primary{min-width:148px;padding:9px 12px}.studio-footer .btn-primary[aria-busy="true"]{display:flex;align-items:center;justify-content:center;gap:7px}
 .template-grid{grid-template-columns:1fr;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden}.template-option+.template-option{border-top:1px solid var(--border)}.template-body{display:grid;grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:9px;border:0;border-radius:0;min-height:52px;padding:8px 10px}.template-body:hover{background:var(--surface2)}.template-option input:checked+.template-body{border:0;box-shadow:none}.template-check{width:18px;height:18px;border:1px solid oklch(70% .018 60);border-radius:5px;display:grid;place-items:center;background:var(--surface);color:transparent;font-size:11px;font-weight:800}.template-option input:checked+.template-body .template-check{background:var(--green);border-color:var(--green);color:oklch(98% .004 70)}.template-copy{min-width:0}.template-name{display:block;font-size:11px}.template-name::after{display:none}.template-role{display:block;margin-top:2px;font-size:10px;white-space:normal;overflow:visible}.template-state{font-size:9px;color:var(--text2)}.template-option input:checked+.template-body .template-state{color:var(--green);font-weight:700}
 @keyframes tray-in{from{opacity:0;transform:translateY(7px) scale(.99)}to{opacity:1;transform:translateY(0) scale(1)}}
-.right-panel{width:auto;min-width:0;background:var(--bg);overflow:hidden}.context-head{height:54px;padding:8px 10px 8px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center}.context-head h2{font-size:12px}.context-head .icon-button{margin-left:auto}.context-tabs{display:flex;border-bottom:1px solid var(--border);padding:0 8px;overflow:auto}.context-tab{border:0;border-bottom:2px solid transparent;background:transparent;color:var(--text2);padding:9px 7px 7px;font-size:10px}.context-tab.active{border-bottom-color:var(--accent);color:var(--text);font-weight:700}.context-scroll{height:calc(100vh - 89px);overflow:auto}.context-view{display:none}.context-view.active{display:block}.panel-section{padding:10px 14px}.panel-title{font-size:11px;font-weight:720}.panel-copy{font-size:10px;color:var(--text2);line-height:1.45;margin-top:3px}.outputs-grid{display:block;padding:0 8px 10px}.output-card{border:0;border-bottom:1px solid var(--border);border-radius:0;background:transparent;padding:9px 6px}.output-card.included{background:oklch(94% .03 185)}.output-card.excluded{opacity:.62}.output-card-head{padding:0;border:0}.output-content{min-height:0;max-height:210px;overflow:auto;padding:0;margin:8px 0}.output-provenance{padding:0;font-size:10px}.review-state,.ontology-badge,.ontology-actions button{font-size:10px}.review-actions{display:flex;border:0;gap:5px;margin-top:8px}.review-actions button{border:1px solid var(--border)!important;border-radius:5px;padding:6px}.review-actions button.active.include{background:oklch(94% .03 185);color:var(--green)}.review-actions button.active.exclude{background:oklch(95% .03 25);color:var(--red)}.synthesis-gate{position:sticky;bottom:0;margin:0;border:0;border-top:1px solid var(--border);border-radius:0;background:var(--bg);padding:10px 14px}.ontology-panel,.meta-panel{margin:0;border:0;border-radius:0;background:transparent}.ontology-head,.meta-head{padding:11px 14px}.ontology-tree,.meta-evidence{padding:8px 14px}.ontology-node,.history-item,.meta-chain{border-left-width:1px}.ontology-meta,.history-item,.history-values,.meta-scope,.meta-chain,.meta-chain pre{font-size:10px}.meta-query{padding:9px 14px}.meta-answer{background:var(--surface2)}.records{margin:0;border:0;padding:0}.events-log{font-size:10px}.toast-region{position:fixed;right:16px;bottom:16px;z-index:200;display:grid;gap:7px}.toast{background:var(--text);color:var(--surface);padding:9px 12px;border-radius:6px;box-shadow:0 12px 30px oklch(20% .01 55/.18);max-width:340px;font-size:11px}
+.right-panel{width:auto;min-width:0;background:var(--bg);overflow:hidden}.context-head{height:54px;padding:8px 10px 8px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center}.context-head h2{font-size:12px}.context-head .icon-button{margin-left:auto}.context-tabs{display:flex;border-bottom:1px solid var(--border);padding:0 8px;overflow:auto}.context-tab{border:0;border-bottom:2px solid transparent;background:transparent;color:var(--text2);padding:9px 7px 7px;font-size:10px}.context-tab.active{border-bottom-color:var(--accent);color:var(--text);font-weight:700}.context-scroll{height:calc(100vh - 89px);overflow:auto}.context-view{display:none}.context-view.active{display:block}.panel-section{padding:10px 14px}.panel-title{font-size:11px;font-weight:720}.panel-copy{font-size:10px;color:var(--text2);line-height:1.45;margin-top:3px}.outputs-grid{display:block;padding:0 8px 10px}.output-card{border:0;border-bottom:1px solid var(--border);border-radius:0;background:transparent;padding:9px 6px}.output-card.included{background:oklch(94% .03 185)}.output-card.excluded{opacity:.62}.output-card-head{padding:0;border:0}.output-content{min-height:0;max-height:210px;overflow:auto;padding:0;margin:8px 0}.output-provenance{padding:0;font-size:10px}.review-state,.ontology-badge,.ontology-actions button{font-size:10px}.review-actions{display:flex;border:0;gap:5px;margin-top:8px}.review-actions button{border:1px solid var(--border)!important;border-radius:5px;padding:6px}.review-actions button.active.include{background:oklch(94% .03 185);color:var(--green)}.review-actions button.active.exclude{background:oklch(95% .03 25);color:var(--red)}.synthesis-gate{position:sticky;bottom:0;margin:0;border:0;border-top:1px solid var(--border);border-radius:0;background:var(--bg);padding:10px 14px}.ontology-panel,.meta-panel{margin:0;border:0;border-radius:0;background:transparent}.ontology-head,.meta-head{padding:11px 14px}.ontology-tree,.meta-evidence{padding:8px 14px}.ontology-node,.history-item,.meta-chain{border-left-width:1px}.ontology-meta,.history-item,.history-values,.meta-scope,.meta-chain,.meta-chain pre{font-size:10px}.meta-query{padding:9px 14px}.meta-answer{background:var(--surface2)}.records{margin:0;border:0;padding:0}.events-log{font-size:10px}.toast-region{position:fixed;right:16px;bottom:16px;z-index:200;display:grid;gap:7px}.toast{background:var(--text);color:var(--surface);padding:9px 12px;border-radius:6px;box-shadow:0 12px 30px oklch(20% .01 55/.18);max-width:340px;font-size:11px}.search-focus{outline:2px solid var(--accent);outline-offset:2px}
 @keyframes pulse{50%{opacity:.4}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important}}
 @media(max-width:1180px){.main{grid-template-columns:48px 200px minmax(380px,1fr) 330px}}
 @media(max-width:960px){.main{grid-template-columns:48px 200px minmax(0,1fr)!important}.right-panel{display:flex!important;position:fixed;z-index:50;right:0;top:0;bottom:0;width:min(380px,92vw);transform:translateX(105%);transition:transform .18s cubic-bezier(.16,1,.3,1);box-shadow:0 16px 42px oklch(20% .01 55/.16)}.right-panel.open{transform:translateX(0)}}
@@ -1069,7 +1069,7 @@ async function runSearch(event) {
       return;
     }
     results.innerHTML = hits.map(hit => `
-      <div class="search-hit" data-message-id="${escHtml(hit.object_id)}" data-room-id="${escHtml(hit.room_id)}" onclick="openSearchHit(this.dataset)">
+      <div class="search-hit" data-object-kind="${escHtml(hit.object_kind)}" data-object-id="${escHtml(hit.object_id)}" data-container-id="${escHtml(hit.container_id || '')}" data-room-id="${escHtml(hit.room_id)}" onclick="openSearchHit(this.dataset)">
         <div class="hit-meta">#${escHtml(hit.room_name || hit.room_id)} · ${escHtml(hit.object_kind)} · ${escHtml(hit.author_id)} · ${new Date(hit.created_at).toLocaleString()}</div>
         <div>${highlightExcerpt(hit.excerpt)}</div>
       </div>`).join('');
@@ -1077,6 +1077,17 @@ async function runSearch(event) {
     results.innerHTML = `<div class="panel-copy" style="padding:0 14px">${escHtml(errorMessage(err))}</div>`;
   }
 }
+
+// Where each searchable kind is read. object_id addresses the object; container_id
+// is the extra id its family needs, which is the whole reason the server sends it.
+// Routing every kind through openThread is what painted "message not found" over a
+// task, a decision or an artifact version.
+const SEARCH_HIT_TARGETS = {
+  TASK: data => ({view: 'members', selector: `[data-task-id="${data.objectId}"]`}),
+  DECISION: data => ({view: 'members', selector: `[data-decision-id="${data.objectId}"]`}),
+  ARTIFACT_VERSION: data => ({view: 'artifacts', selector: `[data-artifact-id="${data.containerId}"]`}),
+  AGENT_OUTPUT: data => ({view: 'branch', selector: `[data-output-id="${data.objectId}"]`}),
+};
 
 // A hit in another channel opens that channel first. Opening its thread while the
 // main pane still showed the old one is what made the result unreadable.
@@ -1090,7 +1101,26 @@ async function openSearchHit(data) {
     }
     await switchRoom(hitRoomId);
   }
-  await openThread(data.messageId);
+  if (data.objectKind === 'MESSAGE') { await openThread(data.objectId); return; }
+  const target = SEARCH_HIT_TARGETS[data.objectKind];
+  if (!target) { toast(`This view cannot open a ${data.objectKind} result.`, 'error'); return; }
+  // An output lives in one branch, and the panel shows one branch at a time.
+  if (data.objectKind === 'AGENT_OUTPUT') {
+    const output = allRoomOutputs.find(o => o.output_id === data.objectId);
+    if (output && output.branch_id && output.branch_id !== currentBranchId) {
+      await selectBranch(output.branch_id);
+    }
+  }
+  const {view, selector} = target(data);
+  openContext(view);
+  const element = document.querySelector(selector);
+  if (!element) { toast('That result is not in this channel snapshot.', 'error'); return; }
+  // Tasks and decisions live inside the collapsed Workspace records disclosure.
+  const disclosure = element.closest('details');
+  if (disclosure) disclosure.open = true;
+  element.scrollIntoView({block: 'center'});
+  element.classList.add('search-focus');
+  setTimeout(() => element.classList.remove('search-focus'), 2400);
 }
 
 // The server brackets each match; escape first, then turn the brackets into marks.
@@ -1147,7 +1177,7 @@ function renderTasks(tasks) {
   const panel = document.getElementById('tasks-panel');
   if (!tasks.length) { panel.innerHTML = '<div class="card"><div class="detail">No tasks</div></div>'; return; }
   panel.innerHTML = tasks.map(t => `
-    <div class="card">
+    <div class="card" data-task-id="${escHtml(t.task_id)}">
       <div class="title">${escHtml(t.title)} <span class="badge ${t.status.toLowerCase()}">${t.status}</span></div>
       <div class="detail">${t.assigned_agent_id ? 'Assigned: ' + t.assigned_agent_id.slice(0,12) : 'Unassigned'} | ${t.priority}</div>
     </div>
@@ -1173,7 +1203,7 @@ function renderArtifacts(arts) {
   const surface = document.getElementById('artifact-surface');
   if (!arts.length) { panel.innerHTML = '<div class="card"><div class="detail">No artifacts</div></div>'; surface.innerHTML = '<div class="empty-outputs">Synthesize reviewed outputs to publish the first Decision Brief.</div>'; return; }
   const markup = arts.map(a => `
-    <div class="card">
+    <div class="card" data-artifact-id="${escHtml(a.artifact_id)}">
       <div class="title">${escHtml(a.name)}</div>
       <div class="detail">${a.type} · version ${a.version}</div>
       ${a.content ? `<details open><summary>Read artifact</summary><article class="detail">${escHtml(a.content)}</article>
@@ -1189,7 +1219,7 @@ function renderDecisions(decs) {
   const panel = document.getElementById('decisions-panel');
   if (!decs.length) { panel.innerHTML = '<div class="card"><div class="detail">No decisions</div></div>'; return; }
   panel.innerHTML = decs.map(d => `
-    <div class="card">
+    <div class="card" data-decision-id="${escHtml(d.decision_id)}">
       <div class="title">${escHtml(d.title)} <span class="badge completed">${d.status}</span></div>
       <div class="detail">${escHtml(d.content || '').slice(0,100)}</div>
     </div>
@@ -1672,7 +1702,7 @@ function renderOutputs(outputs, runs) {
     const cardClass = selection ? ` ${selection}` : '';
     const stateLabel = selection || 'not reviewed';
     return `
-      <article class="output-card${cardClass}">
+      <article class="output-card${cardClass}" data-output-id="${escHtml(output.output_id)}">
         <div class="output-card-head">
           <div><div class="output-author">${escHtml(agent ? agent.name : 'Specialist')}</div>
           <div class="output-role">${escHtml(agent ? agent.role : output.agent_id)}</div></div>
@@ -1877,8 +1907,11 @@ async function sendMessage() {
     }, { idempotencyKey: idempotencyKey() });
     reportUnrecognizedMentions(sent);
   } catch(err) {
-    console.error('Failed to send message:', err);
+    // A refusal the console swallowed is a refusal the author never saw: their
+    // text came back and nothing said why. The thread composer beside this one
+    // has always said, and both say it the same way.
     input.value = text;
+    toast(`Message was not sent: ${errorMessage(err)}`, 'error');
   }
 }
 

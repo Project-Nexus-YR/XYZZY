@@ -890,8 +890,17 @@ class AgentRepo:
         return None if row is None else self._instance_from_row(row)
 
     async def list_instances_by_room(self, room_id: str) -> list[AgentInstance]:
+        """The roster: the agents whose membership of this room is still live.
+
+        A removed agent keeps its instance row, because its runs, outputs and events
+        still name it. It leaves this list, because a roster is who is in the room —
+        and reading agent_instances alone is what let a removed agent stay on it.
+        """
         rows = await self.db.fetch_all(
-            "SELECT * FROM agent_instances WHERE room_id = ? ORDER BY created_at", (room_id,)
+            "SELECT a.* FROM agent_instances a "
+            "JOIN agent_room_memberships m ON m.agent_id = a.agent_id AND m.room_id = a.room_id "
+            "WHERE a.room_id = ? AND m.removed_at IS NULL ORDER BY a.created_at",
+            (room_id,),
         )
         return [self._instance_from_row(r) for r in rows]
 
@@ -1689,7 +1698,7 @@ class ExecutionRepo:
 
 
 class ExecutionInterventionRepo:
-    """Human steers, each stored with the capability set that produced it."""
+    """Human steers, each stored with the identity of whoever produced it."""
 
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -1697,12 +1706,11 @@ class ExecutionInterventionRepo:
     async def create(self, intervention: ExecutionIntervention) -> ExecutionIntervention:
         await self.db.execute(
             "INSERT INTO execution_interventions(intervention_id, execution_id, intervened_by, "
-            "capabilities, instruction, created_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "instruction, created_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 intervention.intervention_id,
                 intervention.execution_id,
                 intervention.intervened_by,
-                json.dumps(sorted(intervention.capabilities)),
                 intervention.instruction,
                 serialize_datetime(intervention.created_at),
                 serialize_datetime(intervention.consumed_at),
@@ -1733,15 +1741,10 @@ class ExecutionInterventionRepo:
         await self.db.commit()
 
     def _from_row(self, row: dict[str, Any]) -> ExecutionIntervention:
-        try:
-            capabilities = json.loads(row["capabilities"])
-        except (json.JSONDecodeError, TypeError):
-            capabilities = []
         return ExecutionIntervention(
             intervention_id=row["intervention_id"],
             execution_id=row["execution_id"],
             intervened_by=row["intervened_by"],
-            capabilities=frozenset(str(item) for item in capabilities),
             instruction=row["instruction"],
             consumed_at=datetime.fromisoformat(row["consumed_at"])
             if row.get("consumed_at")
@@ -2612,7 +2615,28 @@ class RoomParticipantHandleRepo:
             "  ON h.room_id = a.room_id AND h.participant_type = 'AGENT' "
             "  AND h.participant_id = a.agent_id "
             "WHERE h.handle IS NULL "
+            # A removed agent has no handle by design. Without this it would look
+            # like one that predates handles, and the backfill would re-address it.
+            "  AND EXISTS (SELECT 1 FROM agent_room_memberships m "
+            "    WHERE m.agent_id = a.agent_id AND m.room_id = a.room_id "
+            "      AND m.removed_at IS NULL) "
             "ORDER BY room_id, participant_type, participant_id"
+        )
+
+    async def release_in_transaction(
+        self, room_id: str, participant_type: ParticipantType, participant_id: str
+    ) -> None:
+        """Give the handle back to the room when its holder leaves.
+
+        A handle is durable while it is held, which is why the table refuses to
+        repoint one. Releasing it is the other half of that: a participant who is no
+        longer in the room holds no address in it, and past mentions still name the
+        participant by id rather than by the handle they typed.
+        """
+        await self.db.execute(
+            "DELETE FROM room_participant_handles WHERE room_id = ? AND participant_type = ? "
+            "AND participant_id = ?",
+            (room_id, participant_type.value, participant_id),
         )
 
     async def list_by_room(self, room_id: str) -> list[RoomParticipantHandle]:

@@ -1,16 +1,19 @@
-"""Regression: a steer is bounded by the authority that produced it, durably.
+"""Regression: a steer is bounded by the authority of whoever produced it, now.
 
-Two ways the bound went missing. intervene_execution computed the intervener's
+Three ways the bound went missing. intervene_execution computed the intervener's
 terms, kept only "is it non-empty", and dropped the set; the instruction then
 reached the provider prompt verbatim and the next step ran under the run's own,
-wider terms. And the agent-scoped door checked nothing whatever when the bridge's
-in-memory map held no live run for the agent, which is its state after a restart
-and for a run another process is dispatching.
+wider terms. The fix for that persisted the set beside the instruction, on an
+immutable row — so narrowing the intervener afterwards, or removing her from the
+room, left the frozen set bounding the step instead. And the agent-scoped door
+checked nothing whatever when the bridge's in-memory map held no live run for the
+agent, which is its state after a restart and for a run another process is
+dispatching.
 
-The invariant these hold: the intervener and their intersected capability set are
-written down beside the instruction, the step that consumes it runs under the
-run's terms intersected with every unconsumed steer, and the absence of a live run
-is never the absence of authorization.
+The invariant these hold: the row records who steered and never what they held,
+the step that consumes an instruction re-derives that person's effective set from
+durable records and runs under the run's terms intersected with it, and the
+absence of a live run is never the absence of authorization.
 """
 
 from __future__ import annotations
@@ -80,6 +83,11 @@ def _offered_tools(svc: MultiplayerService) -> list[str]:
     return list(tool["enum"]) if tool else []
 
 
+async def _intervention_columns(svc: MultiplayerService) -> set[str]:
+    rows = await svc.db.fetch_all("SELECT name FROM pragma_table_info('execution_interventions')")
+    return {str(row["name"]) for row in rows}
+
+
 @pytest.mark.asyncio
 async def test_a_narrow_intervener_narrows_the_step_that_consumes_her_steer(
     service: MultiplayerService,
@@ -97,10 +105,11 @@ async def test_a_narrow_intervener_narrows_the_step_that_consumes_her_steer(
         run.execution_id, "narrow", "Read the channel and quote it back", require_member=True
     )
 
-    # The bound is a row, written with the steer, not a value the caller may drop.
+    # The steer is a row naming its author, not a value the caller may drop — and
+    # not a capability set either, because a stored one would be read back stale.
     steer = (await svc.repos.interventions.list_unconsumed(run.execution_id))[0]
     assert steer.intervened_by == "narrow"
-    assert steer.capabilities == frozenset({"analysis"})
+    assert "capabilities" not in await _intervention_columns(svc)
 
     result = await svc.execute_agent_step(run.execution_id, "Assess the deploy.", "owner")
 
@@ -174,6 +183,91 @@ async def test_redirecting_an_agent_the_bridge_has_no_live_run_for_is_still_chec
 
 
 @pytest.mark.asyncio
+async def test_narrowing_the_intervener_after_she_steered_binds_the_step_that_spends_it(
+    service: MultiplayerService,
+) -> None:
+    """A stored set says what she held then. The step needs what she holds now.
+
+    She steers while she still holds retrieval, and is narrowed to nothing before the
+    step runs. A capability set frozen on the immutable intervention row could not
+    follow that narrowing, so the tool came back EXECUTED under an authority nobody
+    still had.
+    """
+    svc = service
+    room_id = await _room(svc)
+    agent_id = await _researcher(svc, room_id)
+    await svc.invite_room_member(room_id, "narrow", "editor", "owner")
+    session = await svc.start_agent_session(room_id, agent_id)
+    run = await svc.start_execution(session.session_id, "owner")
+
+    await svc.intervene_execution(
+        run.execution_id, "narrow", "Read the channel and quote it back", require_member=True
+    )
+    await svc.set_member_capabilities(room_id, "narrow", [], "owner")
+
+    result = await svc.execute_agent_step(run.execution_id, "Assess the deploy.", "owner")
+
+    assert _offered_tools(svc) == []
+    assert result["tool_request"]["status"] == "REJECTED"
+    assert result["tool_request"]["effective"] == []
+    types = [e.event_type.value for e in await svc.get_room_events(room_id)]
+    assert "tool.call_completed" not in types
+
+
+@pytest.mark.asyncio
+async def test_removing_the_intervener_from_the_room_binds_the_step_that_spends_it(
+    service: MultiplayerService,
+) -> None:
+    """The other way her grant ends: she is not in the channel at all any more."""
+    svc = service
+    room_id = await _room(svc)
+    agent_id = await _researcher(svc, room_id)
+    await svc.invite_room_member(room_id, "narrow", "editor", "owner")
+    session = await svc.start_agent_session(room_id, agent_id)
+    run = await svc.start_execution(session.session_id, "owner")
+
+    await svc.intervene_execution(
+        run.execution_id, "narrow", "Read the channel and quote it back", require_member=True
+    )
+    await svc.remove_room_member(room_id, "narrow", "owner")
+
+    result = await svc.execute_agent_step(run.execution_id, "Assess the deploy.", "owner")
+
+    assert _offered_tools(svc) == []
+    assert result["tool_request"]["status"] == "REJECTED"
+    assert result["tool_request"]["effective"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_turn_does_not_spend_a_steer_it_never_delivered(
+    service: MultiplayerService,
+) -> None:
+    """The bridge returns before draining its queue, so the prompt never carried it."""
+    svc = service
+    room_id = await _room(svc)
+    agent_id = await _researcher(svc, room_id)
+    await svc.invite_room_member(room_id, "narrow", "editor", "owner")
+    await svc.set_member_capabilities(room_id, "narrow", ["analysis"], "owner")
+    session = await svc.start_agent_session(room_id, agent_id)
+    run = await svc.start_execution(session.session_id, "owner")
+    # One delivered turn first, so the bridge holds a live run to cancel.
+    await svc.execute_agent_step(run.execution_id, "Assess the deploy.", "owner")
+    await svc.intervene_execution(
+        run.execution_id, "narrow", "Read the channel and quote it back", require_member=True
+    )
+
+    run_id = await svc.nexus.get_run_id_for_execution(run.execution_id)
+    assert run_id is not None
+    await svc.nexus.request_cancellation(run_id)
+    cancelled = await svc.execute_agent_step(run.execution_id, "Assess the deploy.", "owner")
+
+    assert cancelled["status"] == "cancelled"
+    # Unspent, so it still bounds whichever step does carry it into a prompt.
+    steers = await svc.repos.interventions.list_unconsumed(run.execution_id)
+    assert [steer.intervened_by for steer in steers] == ["narrow"]
+
+
+@pytest.mark.asyncio
 async def test_the_agent_scoped_door_records_the_same_bound_as_the_run_scoped_one(
     service: MultiplayerService,
 ) -> None:
@@ -190,7 +284,6 @@ async def test_the_agent_scoped_door_records_the_same_bound_as_the_run_scoped_on
 
     steer = (await svc.repos.interventions.list_unconsumed(run.execution_id))[0]
     assert steer.intervened_by == "narrow"
-    assert steer.capabilities == frozenset({"analysis"})
 
     result = await svc.execute_agent_step(run.execution_id, "Assess the deploy.", "owner")
 

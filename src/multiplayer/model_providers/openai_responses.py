@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -17,11 +19,49 @@ class ModelProviderError(RuntimeError):
     """A safe, user-visible model failure that never contains credentials."""
 
 
+@dataclass(frozen=True, slots=True)
+class _Step:
+    """One decoded turn: what the model chose, and the text that came with it."""
+
+    action: str
+    tool: str
+    tool_input: dict[str, Any]
+    content: str
+
+
+def _string_enum(schema: Mapping[str, Any], field: str) -> tuple[str, ...]:
+    """The closed set this schema offers for one property, empty when it offers none."""
+    properties = schema.get("properties")
+    if not isinstance(properties, Mapping):
+        return ()
+    entry = properties.get(field)
+    if not isinstance(entry, Mapping):
+        return ()
+    values = entry.get("enum")
+    if not isinstance(values, list):
+        return ()
+    return tuple(value for value in values if isinstance(value, str))
+
+
+def _step_content(decoded: Mapping[str, Any], fallback: str) -> str:
+    """The readable half of a decoded step; the raw answer when it carries none."""
+    output = decoded.get("output")
+    if isinstance(output, Mapping):
+        text = output.get("content")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return fallback
+
+
 class WorkflowOnlyModelProvider:
     """Credential-free fallback for exercising workflow mechanics.
 
     The payload is intentionally conspicuous: it must never be mistaken for a real model
     analysis, even though it finishes the local workflow for development and tests.
+
+    It always finishes, and that is correct rather than the same defect: no model
+    chose anything here, so a tool request from this provider would put a call
+    nobody made through the gateway and into the audit log.
     """
 
     _CONTENT = (
@@ -78,14 +118,24 @@ class OpenAIResponsesProvider:
     def _request_payload(self, prompt: str, response_schema: dict[str, Any]) -> dict[str, Any]:
         text: dict[str, Any] = {"verbosity": "medium"}
         properties = response_schema.get("properties")
-        # Specialist execution still uses the optional NEXUS action schema,
-        # which is not a strict Structured Outputs contract. Synthesis owns a
-        # complete closed schema and is the only call that opts into JSON mode.
+        # Synthesis owns a complete closed schema and is the only call that can opt
+        # into strict Structured Outputs.
         if isinstance(properties, Mapping) and "claims" in properties:
             text["format"] = {
                 "type": "json_schema",
                 "name": "multiai_response",
                 "strict": True,
+                "schema": response_schema,
+            }
+        elif _string_enum(response_schema, "action"):
+            # A step schema leaves output and input free-form, so it cannot satisfy
+            # strict mode's closed-object requirement. Sending it unstrict is still
+            # what turns the answer into an action the run can read back, instead of
+            # prose the decoder would have to guess a choice from.
+            text["format"] = {
+                "type": "json_schema",
+                "name": "multiai_step",
+                "strict": False,
                 "schema": response_schema,
             }
         return {
@@ -112,7 +162,7 @@ class OpenAIResponsesProvider:
                     headers=self._headers(),
                     json=self._request_payload(prompt, response_schema),
                 )
-            return self._decode_response(response)
+            return self._decode_response(response, response_schema)
         except httpx.TimeoutException as exc:
             raise ModelProviderError(
                 f"model request timed out after {self.timeout_seconds:g} seconds"
@@ -132,7 +182,7 @@ class OpenAIResponsesProvider:
                     headers=self._headers(),
                     json=self._request_payload(prompt, response_schema),
                 )
-            return self._decode_response(response)
+            return self._decode_response(response, response_schema)
         except httpx.TimeoutException as exc:
             raise ModelProviderError(
                 f"model request timed out after {self.timeout_seconds:g} seconds"
@@ -140,7 +190,9 @@ class OpenAIResponsesProvider:
         except httpx.HTTPError as exc:
             raise ModelProviderError("model provider request failed") from exc
 
-    def _decode_response(self, response: httpx.Response) -> dict[str, Any]:
+    def _decode_response(
+        self, response: httpx.Response, response_schema: dict[str, Any]
+    ) -> dict[str, Any]:
         if not response.is_success:
             # Deliberately omit the body: an upstream error may echo sensitive request data.
             raise ModelProviderError(f"model provider returned HTTP {response.status_code}")
@@ -153,12 +205,15 @@ class OpenAIResponsesProvider:
         content = self._extract_output_text(payload)
         if not content:
             raise ModelProviderError("model provider returned no text output")
+        step = self._decode_step(response_schema, content)
         usage = payload.get("usage")
         token_usage = usage.get("total_tokens", 0) if isinstance(usage, Mapping) else 0
         return {
-            "action": "finish",
+            "action": step.action,
+            "tool": step.tool,
+            "input": step.tool_input,
             "output": {
-                "content": content,
+                "content": step.content,
                 "provider": "openai",
                 "model": self.model,
                 "simulated": False,
@@ -169,8 +224,41 @@ class OpenAIResponsesProvider:
             "provider_response_id": (
                 str(payload["id"]) if isinstance(payload.get("id"), str) else ""
             ),
-            "provider_evidence": content,
+            "provider_evidence": step.content,
         }
+
+    @staticmethod
+    def _decode_step(response_schema: dict[str, Any], content: str) -> _Step:
+        """The action the model chose, refusing anything the run did not offer.
+
+        A schema with no action enum asked for no choice, so its text is the whole
+        answer and the step finishes. Where a choice was offered, an answer that does
+        not decode into one is an error rather than an invented ``finish``: a
+        fabricated action is indistinguishable from one the model made, and this is
+        the seam where the tool gateway learns what was actually asked for.
+        """
+        actions = _string_enum(response_schema, "action")
+        if not actions:
+            return _Step("finish", "", {}, content)
+        try:
+            decoded = json.loads(content)
+        except ValueError as exc:
+            raise ModelProviderError("model provider returned no decodable action") from exc
+        if not isinstance(decoded, Mapping):
+            raise ModelProviderError("model provider returned no decodable action")
+        action = decoded.get("action")
+        if not isinstance(action, str) or action not in actions:
+            raise ModelProviderError("model provider chose an action this run did not offer")
+        text = _step_content(decoded, content)
+        if action != "tool":
+            return _Step(action, "", {}, text)
+        tool = decoded.get("tool")
+        if not isinstance(tool, str) or tool not in _string_enum(response_schema, "tool"):
+            raise ModelProviderError("model provider requested a tool this run was not offered")
+        tool_input = decoded.get("input")
+        return _Step(
+            action, tool, dict(tool_input) if isinstance(tool_input, Mapping) else {}, text
+        )
 
     @staticmethod
     def _extract_output_text(payload: Mapping[str, Any]) -> str:

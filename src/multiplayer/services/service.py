@@ -295,7 +295,8 @@ class AgentLaunchRefused(AuthorizationError):
     """A launch the workspace refused before any run row existed.
 
     The reason is one of a closed set so the refusal event says which door closed:
-    no_identity, revoked, challenge_failed, unknown_harness, not_addressable.
+    not_a_member, no_identity, revoked, challenge_failed, unknown_harness,
+    not_addressable.
     """
 
     def __init__(self, agent_id: str, room_id: str, reason: str, detail: str) -> None:
@@ -1252,10 +1253,21 @@ class MultiplayerService:
     ) -> AgentRun:
         """Every gate that must close before a run row exists, in order.
 
-        The identity and challenge legs are repeated by BEFORE INSERT triggers on
-        agent_runs, so a future code path that forgets this method still cannot launch
-        an anonymous agent. Running them here first only makes the refusal describable.
+        The membership, identity and challenge legs are repeated by BEFORE INSERT
+        triggers on agent_runs, so a future code path that forgets this method still
+        cannot launch an anonymous or a removed agent. Running them here first only
+        makes the refusal describable.
         """
+        # Removal is a gate, exactly as revocation below is one. Stamping
+        # agent_room_memberships.removed_at and checking it nowhere is what let a
+        # removed agent answer the next mention as if it had never left.
+        if not await self.repos.agents.has_room_membership(agent.agent_id, room_id):
+            raise AgentLaunchRefused(
+                agent.agent_id,
+                room_id,
+                "not_a_member",
+                f"agent {agent.agent_id} is not in room {room_id}",
+            )
         identity = await self.repos.agent_identities.get_for_agent(agent.agent_id)
         if identity is None:
             raise AgentLaunchRefused(
@@ -1438,6 +1450,12 @@ class MultiplayerService:
                 )
             await self.repos.agents.remove_room_membership_in_transaction(
                 agent_id, room_id, utcnow()
+            )
+            # The handle is the address, so it goes back to the room with the
+            # membership: a later @mention of a removed agent resolves to nobody
+            # rather than opening a fresh run for it.
+            await self.repos.handles.release_in_transaction(
+                room_id, ParticipantType.AGENT, agent_id
             )
             for run in await self.repos.agent_runs.list_open_by_agent_room(agent_id, room_id):
                 execution = await self.repos.executions.get(run.execution_id)
@@ -2178,7 +2196,15 @@ class MultiplayerService:
         construction; a re-check finding the authorizing human gone, the caller
         narrowed, or either holding a role that no longer yields the capability,
         rolls the write back and settles the run AUTHORITY_REVOKED.
+
+        A settled run is refused the same way and in the same place. Settlement is
+        terminal, so no capability makes it writable again, and an approval granted
+        before it settled is not a door back in: complete_execution already refuses a
+        settled run's output, and this is the same refusal for the tool writers.
         """
+        run = await self.repos.agent_runs.get(authorization.run_id)
+        if run is None or run.harness_state is HarnessState.SETTLED:
+            raise RunAuthorityRevoked(authorization, stage)
         agent = await self.repos.agents.get_instance(authorization.agent_id)
         if agent is None:
             raise RunAuthorityRevoked(authorization, stage)
@@ -2248,17 +2274,18 @@ class MultiplayerService:
         delegated = await self._require_delegated_authority(execution, acting_as)
         if delegated is not None:
             terms = delegated
-        # And so is every steer the run is still carrying. The intervener's set is
-        # read back from the intervention rows rather than held in a local variable
-        # at the moment the text was accepted, so the text this step is about to
-        # incorporate cannot reach past what its author held.
+        # And so is every steer the run is still carrying. The intervention row says
+        # who steered; what she may lend is re-derived here, from the records as they
+        # stand at the moment this step spends her text. A set persisted when the text
+        # was accepted would be an authorization input frozen at write time: narrowing
+        # her, or removing her from the room, would leave the stale set bounding this
+        # step, which is the asymmetry the run principal's own re-derivation avoids.
         steers = await self.repos.interventions.list_unconsumed(execution_id)
         steer_bound: frozenset[str] | None = None
         for steer in steers:
-            terms = terms.bounded_by(steer.capabilities)
-            steer_bound = (
-                steer.capabilities if steer_bound is None else steer_bound & steer.capabilities
-            )
+            authority = (await self._delegated_terms(execution, steer.intervened_by)).effective
+            terms = terms.bounded_by(authority)
+            steer_bound = authority if steer_bound is None else steer_bound & authority
 
         source_prompt = prompt
         provider_prompt = prompt
@@ -2322,12 +2349,17 @@ class MultiplayerService:
             result: dict[str, Any] = {"status": "error", "error": str(exc)}
         else:
             result = dict(turn.output)
-            # The prompt carried the queued steers, so they are spent here.
-            await self.repos.interventions.mark_consumed(
-                [steer.intervention_id for steer in steers]
-            )
             if turn.stop_reason is StopReason.CANCELLED:
+                # A cancelled turn returns before the harness drains its queue, so
+                # the prompt never carried these steers. Leaving them unconsumed
+                # bounds the next step rather than spending a delivery that did
+                # not happen.
                 result["status"] = "cancelled"
+            else:
+                # The prompt carried the queued steers, so they are spent here.
+                await self.repos.interventions.mark_consumed(
+                    [steer.intervention_id for steer in steers]
+                )
         if result.get("status") == "error":
             error = str(result.get("error", ""))
             persisted_events = await self.repos.executions.terminalize_without_output(
@@ -2596,21 +2628,22 @@ class MultiplayerService:
         await self._broadcast_persisted_events(events)
         return True
 
-    async def _intervention_for(
-        self, execution: Execution, intervened_by: str, instruction: str
+    @staticmethod
+    def _intervention_for(
+        execution: Execution, intervened_by: str, instruction: str
     ) -> ExecutionIntervention:
-        """The steer to persist, carrying the authority that produced it.
+        """The steer to persist: who steered and what they said, never what they held.
 
-        The capability set is the intervener's own, intersected with the run's, and
-        it is written down because a set computed and dropped is a bound nobody can
-        enforce later. The step that consumes this instruction reads it back.
+        A capability set written here would be an authorization input frozen at the
+        moment the text was accepted, and the row is immutable, so narrowing that
+        person afterwards could not reach it. The step that spends this instruction
+        re-derives her grant instead, which is how every other authority in this
+        service is read.
         """
-        terms = await self._delegated_terms(execution, intervened_by)
         return ExecutionIntervention(
             intervention_id=new_id("interv"),
             execution_id=execution.execution_id,
             intervened_by=intervened_by,
-            capabilities=terms.effective,
             instruction=instruction,
         )
 
@@ -2626,7 +2659,7 @@ class MultiplayerService:
         agent = await self.get_agent(execution.agent_id)
         if require_member:
             await self._require_delegated_authority(execution, user_id)
-        intervention = await self._intervention_for(execution, user_id, instruction)
+        intervention = self._intervention_for(execution, user_id, instruction)
         async with self.db.transaction():
             if require_member:
                 await self._require_mutate_in_transaction(agent.room_id, user_id)
@@ -4613,6 +4646,16 @@ class MultiplayerService:
                 # closed; the re-stamped effective set is an audit record, never an
                 # input, because the writer re-derives again inside its own.
                 decision, effective = await self._current_tool_decision(pending, reviewer_id)
+                run = await self.repos.agent_runs.get_by_execution(pending.execution_id)
+                if run is not None and run.harness_state is HarnessState.SETTLED:
+                    # The run this call belongs to ended while the reviewer was
+                    # deciding. Releasing the approval now would let output arrive
+                    # after the settlement, through the one door that outlives it.
+                    decision = replace(
+                        decision,
+                        allowed=False,
+                        reason=f"run {run.run_id} is settled ({run.settlement})",
+                    )
                 stamped = json.dumps(sorted(effective))
                 await self.repos.tool_requests.set_effective(pending.request_id, stamped)
                 pending = replace(pending, effective_json=stamped)
@@ -4848,9 +4891,7 @@ class MultiplayerService:
         # run-scoped one, so it persists the same bound.
         execution = await self._agent_run_to_steer(agent_id)
         intervention = (
-            None
-            if execution is None
-            else await self._intervention_for(execution, user_id, instruction)
+            None if execution is None else self._intervention_for(execution, user_id, instruction)
         )
         async with self.db.transaction():
             if require_member:

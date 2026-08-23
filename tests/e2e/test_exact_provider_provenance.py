@@ -31,12 +31,17 @@ class _ProvenanceTransport(httpx.AsyncBaseTransport):
         payload = json.loads(request.content)
         self.requests.append(payload)
         index = len(self.requests)
+        text = f"Evidence-backed specialist recommendation {index}"
+        # A specialist step is asked for one of the actions the run offered, so it
+        # answers in that shape; synthesis is asked for prose and answers with prose.
+        if payload.get("text", {}).get("format", {}).get("name") == "multiai_step":
+            text = json.dumps({"action": "finish", "output": {"content": text}})
         return httpx.Response(
             200,
             request=request,
             json={
                 "id": f"resp_exact_{index}",
-                "output_text": f"Evidence-backed specialist recommendation {index}",
+                "output_text": text,
                 "usage": {"total_tokens": 25 + index},
             },
         )

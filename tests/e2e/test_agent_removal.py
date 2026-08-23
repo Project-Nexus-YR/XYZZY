@@ -224,21 +224,37 @@ async def test_a_late_session_update_is_rejected(service: MultiplayerService) ->
 
 @pytest.mark.asyncio
 async def test_a_removed_agent_cannot_be_addressed_again(service: MultiplayerService) -> None:
+    """Removal takes the roster place, the handle, and the ability to open a run.
+
+    Only the last of the three used to be tested, and only because the addressing
+    mode was set to NOBODY first. Removal itself did nothing: the agent stayed on the
+    roster as IDLE, kept @Synthesizer, and the next mention opened a fresh run.
+    """
     svc = service
     room_id, agent_id = await _room_with_synthesizer(svc)
+    session = await svc.start_agent_session(room_id, agent_id)
     await svc.remove_agent_from_room(agent_id, room_id, "owner", require_member=True)
     before = len(await svc.repos.executions.list_by_room(room_id))
 
-    await svc.set_agent_addressing(agent_id, AddressingMode.NOBODY, "owner")
+    assert [a.agent_id for a in await svc.list_room_agents(room_id)] == []
+    assert await svc.unrecognized_mention_handles(room_id, "@Synthesizer once more") == [
+        "Synthesizer"
+    ]
 
-    with pytest.raises(AuthorizationError):
-        await svc.send_message(
-            room_id,
-            MessageRole.HUMAN,
-            "owner",
-            "@Synthesizer once more",
-            invoke_mentioned_agents=True,
-        )
+    # The handle addresses nobody, so the mention opens nothing at all.
+    await svc.send_message(
+        room_id,
+        MessageRole.HUMAN,
+        "owner",
+        "@Synthesizer once more",
+        invoke_mentioned_agents=True,
+    )
+    assert len(await svc.repos.executions.list_by_room(room_id)) == before
+
+    # And the doors that do not go through a handle are shut on the same fact.
+    with pytest.raises(AuthorizationError, match="not in room"):
+        await svc.start_execution(session.session_id, "owner")
+    await svc.set_agent_addressing(agent_id, AddressingMode.NOBODY, "owner")
     assert len(await svc.repos.executions.list_by_room(room_id)) == before
 
 
