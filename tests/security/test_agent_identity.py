@@ -457,3 +457,217 @@ async def test_a_settled_row_must_carry_a_settlement(service: MultiplayerService
         await svc.db.execute(
             "UPDATE agent_runs SET harness_state = 'SETTLED' WHERE run_id = ?", (run.run_id,)
         )
+
+
+# ── The rewrites that reopened a settled run ─────────────────────────────────
+
+_RUN_COLUMNS = (
+    "run_id, execution_id, agent_id, identity_id, room_id, authorized_by, acting_user_id, "
+    "harness_id, credential_hash, harness_state, settlement, lease_expires_at, created_at"
+)
+_RUN_PLACEHOLDERS = ", ".join("?" * 13)
+
+
+async def _architect(svc: MultiplayerService, room_id: str) -> str:
+    templates = await svc.list_agent_templates()
+    agent = await svc.spawn_agent(
+        room_id,
+        next(t.template_id for t in templates if t.name == "Architect"),
+        name="Architect",
+        requested_by="owner",
+    )
+    return agent.agent_id
+
+
+async def _settled_run(svc: MultiplayerService, room_id: str) -> dict[str, Any]:
+    await svc.send_message(
+        room_id, MessageRole.HUMAN, "owner", "@Researcher assess", invoke_mentioned_agents=True
+    )
+    run = (await svc.db.fetch_all("SELECT * FROM agent_runs"))[0]
+    assert run["harness_state"] == HarnessState.SETTLED.value
+    return run
+
+
+@pytest.mark.asyncio
+async def test_a_settled_run_cannot_be_reopened_by_replacing_it(
+    service: MultiplayerService,
+) -> None:
+    """INSERT OR REPLACE removes the conflicting row without firing the delete
+    trigger, because recursive_triggers is off, so the settled run reopened as
+    STREAMING under another agent. Refusing the duplicate insert is what sees it —
+    the guard migration 018 already added to executions for this same bypass.
+    """
+    svc = service
+    room_id = await _room(svc)
+    agent_id = await _researcher(svc, room_id)
+    run = await _settled_run(svc, room_id)
+    other_id = await _architect(svc, room_id)
+    other_identity = await svc.get_agent_identity(other_id)
+
+    # The identity belongs to the agent it names, so the live-identity guard is
+    # satisfied and the refusals below are the duplicate-insert guard, not that one.
+    reopened = (
+        run["run_id"],
+        run["execution_id"],
+        other_id,
+        other_identity.identity_id,
+        room_id,
+        "owner",
+        "mallory",
+        "nexus",
+        "x",
+        HarnessState.STREAMING.value,
+        None,
+        "2099-01-01T00:00:00+00:00",
+        "2026-01-01T00:00:00+00:00",
+    )
+    for verb in ("INSERT OR REPLACE INTO", "REPLACE INTO"):
+        with pytest.raises(sqlite3.IntegrityError, match="never rewritten"):
+            await svc.db.execute(
+                f"{verb} agent_runs({_RUN_COLUMNS}) VALUES ({_RUN_PLACEHOLDERS})", reopened
+            )
+    # A fresh run_id aimed at the settled run's execution launders it just as well.
+    with pytest.raises(sqlite3.IntegrityError, match="never rewritten"):
+        await svc.db.execute(
+            f"INSERT OR REPLACE INTO agent_runs({_RUN_COLUMNS}) VALUES ({_RUN_PLACEHOLDERS})",
+            (new_id("arun"), *reopened[1:]),
+        )
+
+    settled = await svc.repos.agent_runs.get(run["run_id"])
+    assert settled is not None
+    assert settled.harness_state is HarnessState.SETTLED
+    assert settled.settlement is RunSettlement.END_TURN
+    assert settled.agent_id == agent_id
+    assert len(await svc.db.fetch_all("SELECT run_id FROM agent_runs")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_settled_run_cannot_be_replaced_out_from_under_an_update(
+    service: MultiplayerService,
+) -> None:
+    """UPDATE OR REPLACE resolves its conflict the same silent way, and its UPDATE
+    triggers fire on the open row being moved rather than on the settled row it
+    displaces. A run's own two keys are frozen so nothing can be aimed at them.
+    """
+    svc = service
+    room_id = await _room(svc)
+    await _researcher(svc, room_id)
+    settled = await _settled_run(svc, room_id)
+    other_id = await _architect(svc, room_id)
+    session = await svc.start_agent_session(room_id, other_id)
+    execution = await svc.start_execution(session.session_id, "owner")
+    open_run = await svc.repos.agent_runs.get_by_execution(execution.execution_id)
+    assert open_run is not None
+    assert open_run.harness_state is not HarnessState.SETTLED
+
+    with pytest.raises(sqlite3.IntegrityError, match="never rewritten"):
+        await svc.db.execute(
+            "UPDATE OR REPLACE agent_runs SET execution_id = ? WHERE run_id = ?",
+            (settled["execution_id"], open_run.run_id),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="never rewritten"):
+        await svc.db.execute(
+            "UPDATE OR REPLACE agent_runs SET run_id = ? WHERE run_id = ?",
+            (settled["run_id"], open_run.run_id),
+        )
+
+    still = await svc.repos.agent_runs.get(settled["run_id"])
+    assert still is not None
+    assert still.harness_state is HarnessState.SETTLED
+    assert still.settlement is RunSettlement.END_TURN
+    assert still.execution_id == settled["execution_id"]
+
+
+# ── The identity row, immutable in the direction that matters ────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_identity_is_never_restored(service: MultiplayerService) -> None:
+    """A plain UPDATE cleared revoked_at and the agent launched again. Clearing it,
+    moving it, deleting the row, replacing the row, and dropping the instance so the
+    CASCADE takes the row without firing its trigger are all the same laundering.
+    """
+    svc = service
+    room_id = await _room(svc)
+    agent_id = await _researcher(svc, room_id)
+    await svc.revoke_agent_identity(agent_id, "owner")
+    identity = await svc.get_agent_identity(agent_id)
+    assert identity.revoked_at is not None
+    # This agent never ran, so the refusals below are the new guards rather than the
+    # ON DELETE RESTRICT that an existing run would contribute.
+    assert await svc.db.fetch_all("SELECT run_id FROM agent_runs") == []
+
+    with pytest.raises(sqlite3.IntegrityError, match="never restored"):
+        await svc.db.execute(
+            "UPDATE agent_identities SET revoked_at = NULL WHERE agent_id = ?", (agent_id,)
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="never restored"):
+        await svc.db.execute(
+            "UPDATE agent_identities SET revoked_at = ? WHERE agent_id = ?",
+            ("2020-01-01T00:00:00+00:00", agent_id),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="never deleted"):
+        await svc.db.execute("DELETE FROM agent_identities WHERE agent_id = ?", (agent_id,))
+    with pytest.raises(sqlite3.IntegrityError, match="settled when it is written"):
+        await svc.db.execute(
+            "INSERT OR REPLACE INTO agent_identities(identity_id, created_at, revoked_at, "
+            "proof_mode, agent_id) VALUES (?, ?, NULL, 'IN_PROCESS', ?)",
+            (identity.identity_id, "2026-01-01T00:00:00+00:00", agent_id),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="never deleted"):
+        await svc.db.execute("DELETE FROM agent_instances WHERE agent_id = ?", (agent_id,))
+
+    assert (await svc.get_agent_identity(agent_id)).revoked_at == identity.revoked_at
+    with pytest.raises(AuthorizationError):
+        await svc.send_message(
+            room_id,
+            MessageRole.HUMAN,
+            "owner",
+            "@Researcher again",
+            invoke_mentioned_agents=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_signed_identity_may_not_be_downgraded_or_re_pointed(
+    service: MultiplayerService,
+) -> None:
+    """The proof mode and the key are what a signed launch is checked against. An
+    UPDATE that lowered the mode, swapped the key, or moved the row to another
+    instance turned a launch the service had just refused into a permitted one.
+    """
+    svc = service
+    room_id = await _room(svc)
+    agent_id = await _researcher(svc, room_id)
+    public_key, _ = _signed_challenge_fixture()
+    await _make_signed(svc, agent_id, public_key)
+    identity = await svc.get_agent_identity(agent_id)
+    assert identity.proof_mode is ProofMode.SIGNED_CHALLENGE
+
+    downgrades = (
+        "UPDATE agent_identities SET proof_mode = 'IN_PROCESS', public_key = NULL, "
+        "key_fingerprint = NULL WHERE agent_id = ?",
+        "UPDATE agent_identities SET public_key = 'another-key' WHERE agent_id = ?",
+        "UPDATE agent_identities SET key_fingerprint = 'another-print' WHERE agent_id = ?",
+        "UPDATE agent_identities SET agent_id = 'agent_elsewhere' WHERE agent_id = ?",
+        "UPDATE agent_identities SET identity_id = 'ident_elsewhere' WHERE agent_id = ?",
+    )
+    for statement in downgrades:
+        with pytest.raises(sqlite3.IntegrityError, match="settled when it is written"):
+            await svc.db.execute(statement, (agent_id,))
+
+    with pytest.raises(sqlite3.IntegrityError, match="settled when it is written"):
+        await svc.db.execute(
+            "INSERT OR REPLACE INTO agent_identities(identity_id, created_at, proof_mode, "
+            "agent_id) VALUES (?, ?, 'IN_PROCESS', ?)",
+            (new_id("ident"), "2026-01-01T00:00:00+00:00", agent_id),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="never deleted"):
+        await svc.db.execute("DELETE FROM agent_identities WHERE agent_id = ?", (agent_id,))
+    with pytest.raises(sqlite3.IntegrityError, match="never deleted"):
+        await svc.db.execute("DELETE FROM agent_instances WHERE agent_id = ?", (agent_id,))
+
+    unchanged = await svc.get_agent_identity(agent_id)
+    assert unchanged.proof_mode is ProofMode.SIGNED_CHALLENGE
+    assert unchanged.public_key == public_key
+    assert unchanged.identity_id == identity.identity_id
