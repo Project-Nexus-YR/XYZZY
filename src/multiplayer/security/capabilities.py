@@ -9,7 +9,7 @@ rejected. Everything here is a pure function of durable records.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 CAPABILITIES: frozenset[str] = frozenset(
     {
@@ -60,6 +60,14 @@ class CapabilityTerms:
     @property
     def effective(self) -> frozenset[str]:
         return self.user & self.agent & self.skill & self.channel & self.workspace
+
+    def bounded_by(self, authority: frozenset[str]) -> CapabilityTerms:
+        """These terms narrowed by a second principal's authority over the same run.
+
+        The user term is the principal-side ceiling, so a delegate or an intervener
+        lands there: whoever steers a run can only ever lower it.
+        """
+        return replace(self, user=self.user & authority)
 
     def as_dict(self) -> dict[str, list[str]]:
         return {

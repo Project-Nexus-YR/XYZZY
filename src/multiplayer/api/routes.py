@@ -1589,7 +1589,7 @@ async def send_message(
     except DomainError as e:
         status = 409 if "turn is locked" in str(e) else 400
         raise HTTPException(status, str(e)) from e
-    return await _message_response(msg)
+    return await _message_response(msg, invocation_requested=req.invoke_mentioned_agents)
 
 
 @router.get("/rooms/{room_id}/messages")
@@ -1626,13 +1626,19 @@ def _message_summary(message: Message) -> dict[str, Any]:
     }
 
 
-async def _message_response(message: Message) -> dict[str, Any]:
+async def _message_response(
+    message: Message, *, invocation_requested: bool = False
+) -> dict[str, Any]:
     """A written message, the mentions the server derived, and the ones it could not.
 
     unrecognized_mentions is the difference between a mention that reached somebody
     and one that reached nobody. Without it an author who misspells a handle gets
     the same 200 and the same empty mention list as an author who wrote no mention
     at all, and waits for an answer that was never going to arrive.
+
+    uninvocable_mentions is the third case, and it was the silent one: the handle
+    reached somebody who is not an agent, so a request to invoke opened no run and
+    named no failure. It is reported only when a turn was actually asked for.
     """
     svc = _svc_or_404()
     mentions = await svc.list_message_mentions(message.message_id)
@@ -1649,6 +1655,11 @@ async def _message_response(message: Message) -> dict[str, Any]:
         ],
         "unrecognized_mentions": await svc.unrecognized_mention_handles(
             message.room_id, message.content
+        ),
+        "uninvocable_mentions": (
+            await svc.uninvocable_mention_handles(message.message_id)
+            if invocation_requested
+            else []
         ),
     }
 
@@ -1689,7 +1700,7 @@ async def reply_to_message(
     except DomainError as e:
         status = 409 if "turn is locked" in str(e) else 400
         raise HTTPException(status, str(e)) from e
-    return await _message_response(reply)
+    return await _message_response(reply, invocation_requested=req.invoke_mentioned_agents)
 
 
 @router.get("/messages/{message_id}/thread")

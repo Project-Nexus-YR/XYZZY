@@ -39,6 +39,7 @@ from ..domain.models import (
     DecisionStatus,
     DomainError,
     Execution,
+    ExecutionIntervention,
     ExecutionStatus,
     HarnessState,
     IdempotencyRecord,
@@ -119,6 +120,7 @@ class Repos:
         self.branches = BranchRepo(db)
         self.sessions = SessionRepo(db)
         self.executions = ExecutionRepo(db)
+        self.interventions = ExecutionInterventionRepo(db)
         self.agent_outputs = AgentOutputRepo(db)
         self.output_selections = OutputSelectionRepo(db)
         self.branch_syntheses = BranchSynthesisRepo(db)
@@ -1626,6 +1628,25 @@ class ExecutionRepo:
         )
         return [self._from_row(r) for r in rows]
 
+    async def latest_open_for_agent(self, agent_id: str) -> Execution | None:
+        """The newest unfinished run this agent is serving, from the records alone.
+
+        The bridge's live map is in-memory, so it is empty after a restart and for
+        a run another process dispatched. A steer addressed to the agent still
+        reaches that run, so the run that bounds the steer is read from here.
+        """
+        row = await self.db.fetch_one(
+            "SELECT * FROM executions WHERE agent_id = ? AND status IN (?, ?, ?) "
+            "ORDER BY started_at DESC, execution_id DESC LIMIT 1",
+            (
+                agent_id,
+                ExecutionStatus.PENDING.value,
+                ExecutionStatus.RUNNING.value,
+                ExecutionStatus.PAUSED.value,
+            ),
+        )
+        return None if row is None else self._from_row(row)
+
     async def list_by_branch(self, branch_id: str) -> list[Execution]:
         rows = await self.db.fetch_all(
             "SELECT * FROM executions WHERE branch_id = ? ORDER BY started_at, execution_id",
@@ -1658,6 +1679,68 @@ class ExecutionRepo:
             completed_at=datetime.fromisoformat(row["completed_at"])
             if row.get("completed_at")
             else None,
+        )
+
+
+class ExecutionInterventionRepo:
+    """Human steers, each stored with the capability set that produced it."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create(self, intervention: ExecutionIntervention) -> ExecutionIntervention:
+        await self.db.execute(
+            "INSERT INTO execution_interventions(intervention_id, execution_id, intervened_by, "
+            "capabilities, instruction, created_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                intervention.intervention_id,
+                intervention.execution_id,
+                intervention.intervened_by,
+                json.dumps(sorted(intervention.capabilities)),
+                intervention.instruction,
+                serialize_datetime(intervention.created_at),
+                serialize_datetime(intervention.consumed_at),
+            ),
+        )
+        await self.db.commit()
+        return intervention
+
+    async def list_unconsumed(self, execution_id: str) -> list[ExecutionIntervention]:
+        """Every steer this run is still carrying, oldest first."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM execution_interventions WHERE execution_id = ? AND consumed_at IS NULL "
+            "ORDER BY created_at, intervention_id",
+            (execution_id,),
+        )
+        return [self._from_row(row) for row in rows]
+
+    async def mark_consumed(self, intervention_ids: list[str]) -> None:
+        """Retire the steers a step has just taken into its prompt."""
+        if not intervention_ids:
+            return
+        placeholders = ", ".join("?" for _ in intervention_ids)
+        await self.db.execute(
+            "UPDATE execution_interventions SET consumed_at = ? WHERE consumed_at IS NULL "
+            f"AND intervention_id IN ({placeholders})",
+            (utcnow().isoformat(), *intervention_ids),
+        )
+        await self.db.commit()
+
+    def _from_row(self, row: dict[str, Any]) -> ExecutionIntervention:
+        try:
+            capabilities = json.loads(row["capabilities"])
+        except (json.JSONDecodeError, TypeError):
+            capabilities = []
+        return ExecutionIntervention(
+            intervention_id=row["intervention_id"],
+            execution_id=row["execution_id"],
+            intervened_by=row["intervened_by"],
+            capabilities=frozenset(str(item) for item in capabilities),
+            instruction=row["instruction"],
+            consumed_at=datetime.fromisoformat(row["consumed_at"])
+            if row.get("consumed_at")
+            else None,
+            created_at=datetime.fromisoformat(row["created_at"]),
         )
 
 

@@ -44,6 +44,7 @@ from ..domain.models import (
     Decision,
     DomainError,
     Execution,
+    ExecutionIntervention,
     ExecutionStatus,
     HarnessState,
     IdempotencyConflict,
@@ -1864,6 +1865,16 @@ class MultiplayerService:
         agent = await self.get_agent(agent_id)
         return await self._capability_terms(agent, agent.room_id, requested_by)
 
+    async def _delegated_terms(self, execution: Execution, acting_as: str) -> CapabilityTerms:
+        """This run's terms as they stand for a caller who is not its principal."""
+        session = await self.repos.sessions.get(execution.session_id)
+        if session is None:
+            raise DomainError("session not found")
+        agent = await self.get_agent(execution.agent_id)
+        return await self._capability_terms(
+            agent, session.room_id, execution.authorized_by, acting_as
+        )
+
     async def _require_delegated_authority(
         self, execution: Execution, acting_as: str
     ) -> CapabilityTerms | None:
@@ -1891,9 +1902,7 @@ class MultiplayerService:
             raise
         if acting_as == execution.authorized_by:
             return None
-        terms = await self._capability_terms(
-            agent, session.room_id, execution.authorized_by, acting_as
-        )
+        terms = await self._delegated_terms(execution, acting_as)
         if not terms.effective:
             raise AuthorizationError(
                 f"{acting_as} may not act on run {execution.execution_id}: no effective capability"
@@ -1907,16 +1916,24 @@ class MultiplayerService:
         agent: AgentInstance,
         acting_as: str,
         result: dict[str, Any],
+        steer_bound: frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """Permission check, policy check, approval gate, execution, audit event.
 
         The terms are re-derived here rather than carried in from the step that
         offered the tool: a provider call sits between the two, and a grant withdrawn
         while the model was thinking must not still be spendable when it answers.
+
+        Re-deriving is not the same as unbinding. A steer that shaped this step
+        still bounds what the step may spend, so the freshly derived terms are
+        bounded again here; otherwise a narrow intervener's text could reach a
+        tool through the re-derivation that her own grant never permitted.
         """
         terms = await self._capability_terms(
             agent, session.room_id, execution.authorized_by, acting_as
         )
+        if steer_bound is not None:
+            terms = terms.bounded_by(steer_bound)
         effective = terms.effective
         tool = str(result.get("tool", ""))
         raw_input = result.get("input")
@@ -2211,6 +2228,17 @@ class MultiplayerService:
         delegated = await self._require_delegated_authority(execution, acting_as)
         if delegated is not None:
             terms = delegated
+        # And so is every steer the run is still carrying. The intervener's set is
+        # read back from the intervention rows rather than held in a local variable
+        # at the moment the text was accepted, so the text this step is about to
+        # incorporate cannot reach past what its author held.
+        steers = await self.repos.interventions.list_unconsumed(execution_id)
+        steer_bound: frozenset[str] | None = None
+        for steer in steers:
+            terms = terms.bounded_by(steer.capabilities)
+            steer_bound = (
+                steer.capabilities if steer_bound is None else steer_bound & steer.capabilities
+            )
 
         source_prompt = prompt
         provider_prompt = prompt
@@ -2268,9 +2296,16 @@ class MultiplayerService:
                 self._renew_run_lease,
             )
         except HarnessError as exc:
+            # The steers stay unconsumed: a prompt that never reached the harness
+            # did not spend them, and leaving them bounds the next step rather
+            # than unbinding it.
             result: dict[str, Any] = {"status": "error", "error": str(exc)}
         else:
             result = dict(turn.output)
+            # The prompt carried the queued steers, so they are spent here.
+            await self.repos.interventions.mark_consumed(
+                [steer.intervention_id for steer in steers]
+            )
             if turn.stop_reason is StopReason.CANCELLED:
                 result["status"] = "cancelled"
         if result.get("status") == "error":
@@ -2298,7 +2333,9 @@ class MultiplayerService:
             await self._set_agent_status_safe(execution.agent_id, AgentStatus.FAILED)
             return result
         if result.get("action") == "tool":
-            return await self._handle_tool_request(execution, session, agent, acting_as, result)
+            return await self._handle_tool_request(
+                execution, session, agent, acting_as, result, steer_bound
+            )
         if result.get("action") == "finish":
             raw_output = result.get("result")
             output_data = raw_output if isinstance(raw_output, dict) else {"result": raw_output}
@@ -2539,6 +2576,24 @@ class MultiplayerService:
         await self._broadcast_persisted_events(events)
         return True
 
+    async def _intervention_for(
+        self, execution: Execution, intervened_by: str, instruction: str
+    ) -> ExecutionIntervention:
+        """The steer to persist, carrying the authority that produced it.
+
+        The capability set is the intervener's own, intersected with the run's, and
+        it is written down because a set computed and dropped is a bound nobody can
+        enforce later. The step that consumes this instruction reads it back.
+        """
+        terms = await self._delegated_terms(execution, intervened_by)
+        return ExecutionIntervention(
+            intervention_id=new_id("interv"),
+            execution_id=execution.execution_id,
+            intervened_by=intervened_by,
+            capabilities=terms.effective,
+            instruction=instruction,
+        )
+
     async def intervene_execution(
         self, execution_id: str, user_id: str, instruction: str, *, require_member: bool = False
     ) -> None:
@@ -2551,9 +2606,13 @@ class MultiplayerService:
         agent = await self.get_agent(execution.agent_id)
         if require_member:
             await self._require_delegated_authority(execution, user_id)
+        intervention = await self._intervention_for(execution, user_id, instruction)
         async with self.db.transaction():
             if require_member:
                 await self._require_mutate_in_transaction(agent.room_id, user_id)
+            # The bound commits with the event that records the steer, before the
+            # text is queued for a prompt: nothing reaches a provider unbounded.
+            await self.repos.interventions.create(intervention)
             event = await self.repos.events.append_with_next_sequence_in_transaction(
                 RoomEvent(
                     room_id=agent.room_id,
@@ -3671,6 +3730,22 @@ class MultiplayerService:
         _, unresolved = await self._read_addressed_handles(room_id, content)
         return unresolved
 
+    async def uninvocable_mention_handles(self, message_id: str) -> list[str]:
+        """The handles this message addressed that no agent turn can ever answer.
+
+        Members and agents share one handle namespace, which is correct: @finance
+        has to mean exactly one participant in a room. It also means a person can
+        hold the handle an agent would otherwise have taken, and then a request to
+        invoke the mentioned agents opens no run at all. The handle resolved, so it
+        is not unrecognized; it resolved to somebody who cannot be invoked, and an
+        author who asked for a turn has to be told which of the two happened.
+        """
+        return [
+            mention.handle
+            for mention in await self.repos.mentions.list_for_message(message_id)
+            if mention.target_type is not MentionTargetType.AGENT
+        ]
+
     async def _invoke_mentioned_agent_in_transaction(
         self, room_id: str, agent_id: str, requested_by: str, message_id: str
     ) -> tuple[Execution, RoomEvent]:
@@ -4673,13 +4748,37 @@ class MultiplayerService:
 
     # ── Human Intervention ───────────────────────────────────────────────────
 
-    async def _require_agent_run_authority(self, agent_id: str, acting_as: str) -> None:
-        """The agent-scoped doors reach whatever run the agent is serving, so the
-        run's own authorization bounds them exactly as the run-scoped doors."""
+    async def _agent_run_to_steer(self, agent_id: str) -> Execution | None:
+        """The run an agent-scoped steer reaches: the live one, else the recorded one.
+
+        The bridge's map of agent to run is in-memory. It is empty after a restart
+        and for a run another process is dispatching, so absence there says nothing
+        about whether a run exists — the records do.
+        """
         execution_id = await self.nexus.get_execution_for_agent(agent_id)
         execution = await self.repos.executions.get(execution_id) if execution_id else None
         if execution is not None:
+            return execution
+        return await self.repos.executions.latest_open_for_agent(agent_id)
+
+    async def _require_agent_run_authority(self, agent_id: str, acting_as: str) -> None:
+        """The agent-scoped doors reach whatever run the agent is serving, so the
+        run's own authorization bounds them exactly as the run-scoped doors.
+
+        With no run to bound them, they used to check nothing at all. An absent run
+        is not an absent caller: steering an agent is making it act, so the caller
+        still has to hold what it takes to make this agent act here.
+        """
+        execution = await self._agent_run_to_steer(agent_id)
+        if execution is not None:
             await self._require_delegated_authority(execution, acting_as)
+            return
+        agent = await self.get_agent(agent_id)
+        terms = await self._capability_terms(agent, agent.room_id, acting_as)
+        if not terms.effective:
+            raise AuthorizationError(
+                f"{acting_as} may not steer agent {agent_id}: no effective capability"
+            )
 
     async def interrupt_agent(
         self, agent_id: str, user_id: str, reason: str = "", *, require_member: bool = False
@@ -4712,9 +4811,19 @@ class MultiplayerService:
         agent = await self.get_agent(agent_id)
         if require_member:
             await self._require_agent_run_authority(agent_id, user_id)
+        # The agent-scoped door queues the same text into the same prompt as the
+        # run-scoped one, so it persists the same bound.
+        execution = await self._agent_run_to_steer(agent_id)
+        intervention = (
+            None
+            if execution is None
+            else await self._intervention_for(execution, user_id, instruction)
+        )
         async with self.db.transaction():
             if require_member:
                 await self._require_mutate_in_transaction(agent.room_id, user_id)
+            if intervention is not None:
+                await self.repos.interventions.create(intervention)
             event = await self.repos.events.append_with_next_sequence_in_transaction(
                 RoomEvent(
                     room_id=agent.room_id,
@@ -4725,9 +4834,8 @@ class MultiplayerService:
                     actor_type="user",
                 )
             )
-        execution_id = await self.nexus.get_execution_for_agent(agent_id)
-        if execution_id:
-            await self.nexus.add_execution_intervention(execution_id, instruction)
+        if intervention is not None:
+            await self.nexus.add_execution_intervention(intervention.execution_id, instruction)
         await self._broadcast_persisted_events([event])
 
     # ── Notifications ────────────────────────────────────────────────────────

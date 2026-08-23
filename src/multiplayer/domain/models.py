@@ -389,6 +389,25 @@ class Execution:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionIntervention:
+    """One human steer, kept beside the authority that produced it.
+
+    capabilities is the intervener's effective set at the moment they steered.
+    The step that consumes this instruction runs under the run's terms
+    intersected with it, so injected text can never widen a run beyond what its
+    injector holds.
+    """
+
+    intervention_id: str
+    execution_id: str
+    intervened_by: str
+    capabilities: frozenset[str]
+    instruction: str
+    consumed_at: datetime | None = None
+    created_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass(frozen=True, slots=True)
 class AgentOutput:
     """An immutable, inspectable result produced by one agent execution."""
 

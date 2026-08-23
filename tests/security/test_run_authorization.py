@@ -138,6 +138,53 @@ async def test_the_authorizing_principal_is_immutable_once_written(
 
 
 @pytest.mark.asyncio
+async def test_the_authorizing_principal_survives_replace_delete_and_whitespace(
+    service: MultiplayerService,
+) -> None:
+    """The 014 guards named an UPDATE and an empty string, and both had a way round.
+
+    INSERT OR REPLACE never issues an UPDATE, DELETE-then-INSERT never issues one
+    either, and a principal made of spaces is not empty. All three rewrote or forged
+    the record of whose authority a run carries.
+    """
+    svc = service
+    room_id = await _room(svc)
+    agent_id = await _researcher(svc, room_id)
+    # A run with no output yet, so nothing else's immutability guard stands in for
+    # this one: what holds the record together here is the execution's own.
+    session = await svc.start_agent_session(room_id, agent_id)
+    run = await svc.start_execution(session.session_id, "owner")
+    columns = (
+        "INSERT{clause} INTO executions(execution_id, session_id, agent_id, authorized_by, "
+        "branch_id, triggered_by, status, input_data, output_data, error, started_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    row = (
+        run.session_id,
+        run.agent_id,
+        "mallory",
+        run.branch_id,
+        run.triggered_by.value,
+        run.status.value,
+        "{}",
+        "{}",
+        "",
+        run.started_at.isoformat(),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        await svc.db.execute(columns.format(clause=" OR REPLACE"), (run.execution_id, *row))
+    with pytest.raises(sqlite3.IntegrityError):
+        await svc.db.execute("DELETE FROM executions WHERE execution_id = ?", (run.execution_id,))
+    with pytest.raises(sqlite3.IntegrityError):
+        await svc.db.execute(columns.format(clause=""), ("exec_blank", *row[:2], "   ", *row[3:]))
+
+    unchanged = await svc.repos.executions.get(run.execution_id)
+    assert unchanged is not None and unchanged.authorized_by == "owner"
+    assert await svc.repos.executions.get("exec_blank") is None
+
+
+@pytest.mark.asyncio
 async def test_a_narrowed_mentioner_narrows_the_run_they_authorize(
     service: MultiplayerService,
 ) -> None:
