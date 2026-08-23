@@ -8,6 +8,7 @@ import json
 import logging
 import re
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +17,13 @@ from ..db.repositories import Repos
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
     MAX_THREAD_DEPTH,
+    AddressingMode,
+    AgentAddressing,
+    AgentIdentity,
     AgentInstance,
     AgentOutput,
     AgentRoomMembership,
+    AgentRun,
     AgentStatus,
     AgentTemplate,
     AgentTrigger,
@@ -40,6 +45,7 @@ from ..domain.models import (
     DomainError,
     Execution,
     ExecutionStatus,
+    HarnessState,
     IdempotencyConflict,
     IdempotencyRecord,
     Memory,
@@ -62,10 +68,12 @@ from ..domain.models import (
     OutputDisposition,
     OutputSelection,
     ParticipantType,
+    ProofMode,
     ReadCursor,
     Room,
     RoomMember,
     RoomParticipantHandle,
+    RunSettlement,
     SearchHit,
     Session,
     SessionStatus,
@@ -94,6 +102,21 @@ from ..domain.synthesis import (
 from ..domain.synthesis import (
     render as render_synthesis,
 )
+from ..harness import (
+    KNOWN_HARNESS_IDS,
+    NEXUS_HARNESS_ID,
+    AgentHarness,
+    HarnessError,
+    ModelProviderHarness,
+    NexusHarness,
+    NexusLaunch,
+    PromptRequest,
+    RunContext,
+    SessionHandle,
+    SessionUpdate,
+    StopReason,
+)
+from ..harness.adapters import MODEL_PROVIDER_HARNESS_ID
 from ..model_providers import ModelProviderError
 from ..nexus_bridge.agent_bridge import NexusAgentBridge
 from ..realtime.hub import RealtimeHub
@@ -106,10 +129,19 @@ from ..security.authorization import (
 from ..security.capabilities import (
     CapabilityTerms,
     GatewayDecision,
+    RunAuthorization,
     allowed_tools,
     decide,
+    may_address,
     policy_capabilities,
     user_capabilities,
+)
+from ..security.identity import (
+    credential_hash,
+    credential_matches,
+    new_launch_challenge,
+    new_run_credential,
+    verify_challenge_answer,
 )
 from ..services.presence import PresenceService
 
@@ -128,6 +160,16 @@ _MAX_HANDLE_ATTEMPTS = 100
 _AGENT_MESSAGE_EXCERPT_CHARS = 280
 # FTS5 reads its own query syntax, so user input becomes quoted phrases instead.
 _SEARCH_TERM_PATTERN = re.compile(r"\w+")
+# Every non-settled run holds a heartbeat lease. No state is exempt: an exemption is
+# not a longer deadline but no deadline, and manufactures the fourth case the
+# guarantee denies � a run is settled, holds a live lease, or is swept. A reviewer may
+# take hours, so AWAITING_APPROVAL gets a long lease rather than none.
+_STREAMING_LEASE = timedelta(minutes=15)
+_APPROVAL_LEASE = timedelta(hours=12)
+# How many times a run may be picked up before it is parked instead of swept again.
+# Without it a run whose dispatcher keeps dying is re-orphaned forever and never
+# reaches a state a reader can describe.
+_RUN_MAX_ATTEMPTS = 3
 
 # ── State machine transition tables ──────────────────────────────────────────
 
@@ -230,6 +272,38 @@ def _policy_list(raw: str | None) -> list[str] | None:
     return [str(item) for item in parsed] if isinstance(parsed, list) else None
 
 
+class AgentLaunchRefused(AuthorizationError):
+    """A launch the workspace refused before any run row existed.
+
+    The reason is one of a closed set so the refusal event says which door closed:
+    no_identity, revoked, challenge_failed, unknown_harness, not_addressable.
+    """
+
+    def __init__(self, agent_id: str, room_id: str, reason: str, detail: str) -> None:
+        super().__init__(detail)
+        self.agent_id = agent_id
+        self.room_id = room_id
+        self.reason = reason
+
+
+class RunAuthorityRevoked(AuthorizationError):
+    """A re-check inside the writing transaction found the authority gone.
+
+    Raised from inside a tool writer's own transaction, so the write it guards rolls
+    back with it. The run is settled AUTHORITY_REVOKED by whoever catches it, after
+    that rollback, because a settlement written inside the doomed transaction would
+    roll back too.
+    """
+
+    def __init__(self, authorization: RunAuthorization, stage: str) -> None:
+        super().__init__(
+            f"run {authorization.run_id} may no longer "
+            f"{authorization.required_capability} at {stage}"
+        )
+        self.authorization = authorization
+        self.stage = stage
+
+
 class MultiplayerService:
     def __init__(
         self, db: Database, hub: RealtimeHub, known_users: frozenset[str] | None = None
@@ -244,6 +318,10 @@ class MultiplayerService:
         # or a user row that bootstrapping already created.
         self.known_users = known_users or frozenset()
         self._running_executions: dict[str, asyncio.Task[None]] = {}
+        # Per-run bearer credentials in plaintext, held only until the harness that
+        # will use them is opened. The durable row keeps a SHA-256 hash and nothing
+        # else, so a credential never outlives the process that issued it.
+        self._run_credentials: dict[str, str] = {}
         # Identifies this dispatcher's claims on runs, so another process can tell
         # a run somebody is dispatching from one nobody ever picked up.
         self._dispatch_claim = new_id("dispatch")
@@ -270,6 +348,7 @@ class MultiplayerService:
         await self.repos.search.backfill()
         await self._seed_default_templates()
         await self._settle_orphaned_mention_runs()
+        await self.sweep_expired_run_leases()
 
     async def _settle_orphaned_mention_runs(self) -> None:
         """Settle mention runs whose dispatcher died before it could claim them.
@@ -920,10 +999,14 @@ class MultiplayerService:
         *,
         requested_by: str = "",
         require_member: bool = False,
+        harness_id: str = NEXUS_HARNESS_ID,
+        addressing_mode: AddressingMode = AddressingMode.ANYONE,
     ) -> AgentInstance:
         template = await self.repos.agents.get_template(template_id)
         if not template:
             raise DomainError(f"agent template not found: {template_id}")
+        if harness_id not in KNOWN_HARNESS_IDS:
+            raise DomainError(f"no harness is registered as {harness_id!r}")
         agent = AgentInstance(
             agent_id=new_id("agent"),
             template_id=template_id,
@@ -934,6 +1017,23 @@ class MultiplayerService:
             capabilities=template.capabilities,
             model_provider=model_provider,
             model_name=model_name,
+            harness_id=harness_id,
+        )
+        room = await self.repos.rooms.get(room_id)
+        identity = AgentIdentity(
+            identity_id=new_id("ident"),
+            agent_id=agent.agent_id,
+            proof_mode=ProofMode.IN_PROCESS,
+        )
+        # An agent spawned into a shared channel answers that channel; narrowing it is
+        # an explicit ADMINISTER act. The room membership and the capability
+        # intersection still bound what any of them can make it do.
+        addressing = AgentAddressing(
+            agent_id=agent.agent_id,
+            room_id=room_id,
+            mode=addressing_mode,
+            owner_user_id=requested_by or (room.created_by if room is not None else ""),
+            updated_by=requested_by or "system",
         )
         async with self.db.transaction():
             if require_member:
@@ -942,25 +1042,44 @@ class MultiplayerService:
             await self.repos.agents.add_room_membership(
                 AgentRoomMembership(agent_id=agent.agent_id, room_id=room_id)
             )
+            await self.repos.agent_identities.create_in_transaction(identity)
+            await self.repos.agent_addressing.upsert_in_transaction(addressing)
             handle = await self._issue_handle(
                 room_id, ParticipantType.AGENT, agent.agent_id, agent.name
             )
-            event = await self.repos.events.append_with_next_sequence_in_transaction(
-                RoomEvent(
-                    room_id=room_id,
-                    sequence=0,
-                    event_type=EventType.AGENT_JOINED_ROOM,
-                    payload={
-                        "agent_id": agent.agent_id,
-                        "name": agent.name,
-                        "handle": handle,
-                        "role": agent.role,
-                    },
-                    actor_id=agent.agent_id,
-                    actor_type="agent",
-                )
-            )
-        await self._broadcast_persisted_events([event])
+            events = [
+                await self.repos.events.append_with_next_sequence_in_transaction(
+                    RoomEvent(
+                        room_id=room_id,
+                        sequence=0,
+                        event_type=EventType.AGENT_JOINED_ROOM,
+                        payload={
+                            "agent_id": agent.agent_id,
+                            "name": agent.name,
+                            "handle": handle,
+                            "role": agent.role,
+                        },
+                        actor_id=agent.agent_id,
+                        actor_type="agent",
+                    )
+                ),
+                await self.repos.events.append_with_next_sequence_in_transaction(
+                    RoomEvent(
+                        room_id=room_id,
+                        sequence=0,
+                        event_type=EventType.AGENT_IDENTITY_REGISTERED,
+                        payload={
+                            "agent_id": agent.agent_id,
+                            "identity_id": identity.identity_id,
+                            "proof_mode": identity.proof_mode.value,
+                            "harness_id": harness_id,
+                        },
+                        actor_id=agent.agent_id,
+                        actor_type="agent",
+                    )
+                ),
+            ]
+        await self._broadcast_persisted_events(events)
         return agent
 
     async def get_agent(self, agent_id: str) -> AgentInstance:
@@ -983,6 +1102,401 @@ class MultiplayerService:
             agent_id,
             "agent",
         )
+
+    # ── Agent identity, addressing, and the run envelope ─────────────────────
+
+    def _harness(self, harness_id: str) -> AgentHarness:
+        """The harness that runs this agent's turns. An unknown id has none."""
+        if harness_id == NEXUS_HARNESS_ID:
+            return NexusHarness(self.nexus, self._resolve_nexus_launch)
+        if harness_id == MODEL_PROVIDER_HARNESS_ID:
+            return ModelProviderHarness(self.nexus.model_provider)
+        raise KeyError(harness_id)
+
+    async def _resolve_nexus_launch(self, run_id: str) -> NexusLaunch:
+        """The durable records a bridge run is opened from, read by run id."""
+        run = await self.repos.agent_runs.get(run_id)
+        # A run written before this envelope existed is addressed by its execution id.
+        execution_id = run.execution_id if run is not None else run_id
+        execution = await self.repos.executions.get(execution_id)
+        if execution is None:
+            raise DomainError(f"agent run {run_id} names no execution")
+        session = await self.repos.sessions.get(execution.session_id)
+        if session is None:
+            raise DomainError("session not found")
+        return NexusLaunch(await self.get_agent(execution.agent_id), session, execution)
+
+    async def get_agent_identity(self, agent_id: str) -> AgentIdentity:
+        identity = await self.repos.agent_identities.get_for_agent(agent_id)
+        if identity is None:
+            raise DomainError(f"agent identity not found: {agent_id}")
+        return identity
+
+    async def get_agent_addressing(self, agent_id: str) -> AgentAddressing:
+        addressing = await self.repos.agent_addressing.get(agent_id)
+        if addressing is None:
+            raise DomainError(f"agent addressing not found: {agent_id}")
+        return addressing
+
+    async def set_agent_addressing(
+        self,
+        agent_id: str,
+        mode: AddressingMode,
+        updated_by: str,
+        *,
+        owner_user_id: str | None = None,
+        allowlist: frozenset[str] = frozenset(),
+        require_member: bool = False,
+    ) -> AgentAddressing:
+        """Who may point this agent. Room ADMINISTER, because it is a grant."""
+        agent = await self.get_agent(agent_id)
+        current = await self.repos.agent_addressing.get(agent_id)
+        addressing = AgentAddressing(
+            agent_id=agent_id,
+            room_id=agent.room_id,
+            mode=mode,
+            owner_user_id=owner_user_id
+            or (current.owner_user_id if current is not None else updated_by),
+            allowlist=allowlist,
+            updated_by=updated_by,
+        )
+        async with self.db.transaction():
+            if require_member:
+                await self._require_capability_in_transaction(
+                    agent.room_id, updated_by, RoomCapability.ADMINISTER
+                )
+            await self.repos.agent_addressing.upsert_in_transaction(addressing)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=agent.room_id,
+                    sequence=0,
+                    event_type=EventType.AGENT_ADDRESSING_UPDATED,
+                    payload={
+                        "agent_id": agent_id,
+                        "mode": mode.value,
+                        "owner_user_id": addressing.owner_user_id,
+                        "allowlist": sorted(allowlist),
+                    },
+                    actor_id=updated_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
+        return addressing
+
+    async def revoke_agent_identity(
+        self, agent_id: str, revoked_by: str, *, require_member: bool = False
+    ) -> None:
+        """Revoke once, not per run: no later run of this agent may launch."""
+        agent = await self.get_agent(agent_id)
+        if require_member:
+            await self.authorization.require(agent.room_id, revoked_by, RoomCapability.ADMINISTER)
+        if not await self.repos.agent_identities.revoke(agent_id, utcnow()):
+            return
+        await self._append_room_event(
+            agent.room_id,
+            EventType.AGENT_IDENTITY_REVOKED,
+            {"agent_id": agent_id, "revoked_by": revoked_by},
+            revoked_by,
+            "user",
+        )
+
+    async def _require_addressable(self, agent: AgentInstance, room_id: str, user_id: str) -> None:
+        """Addressing gates who may point an agent, not what it does.
+
+        A missing record grants nothing: the record is the grant, so an agent the
+        workspace has no addressing row for is addressable by nobody.
+        """
+        addressing = await self.repos.agent_addressing.get(agent.agent_id)
+        allowed = addressing is not None and may_address(
+            addressing.mode.value, addressing.owner_user_id, addressing.allowlist, user_id
+        )
+        if not allowed:
+            raise AgentLaunchRefused(
+                agent.agent_id,
+                room_id,
+                "not_addressable",
+                f"{user_id or 'an unknown principal'} may not address agent {agent.agent_id}",
+            )
+
+    async def _prepare_agent_run(
+        self,
+        agent: AgentInstance,
+        room_id: str,
+        authorized_by: str,
+        acting_user_id: str = "",
+        *,
+        resumed_from_run_id: str | None = None,
+        attempts: int = 1,
+    ) -> AgentRun:
+        """Every gate that must close before a run row exists, in order.
+
+        The identity and challenge legs are repeated by BEFORE INSERT triggers on
+        agent_runs, so a future code path that forgets this method still cannot launch
+        an anonymous agent. Running them here first only makes the refusal describable.
+        """
+        identity = await self.repos.agent_identities.get_for_agent(agent.agent_id)
+        if identity is None:
+            raise AgentLaunchRefused(
+                agent.agent_id, room_id, "no_identity", f"agent {agent.agent_id} has no identity"
+            )
+        if identity.revoked_at is not None:
+            raise AgentLaunchRefused(
+                agent.agent_id, room_id, "revoked", f"identity {identity.identity_id} is revoked"
+            )
+        if agent.harness_id not in KNOWN_HARNESS_IDS:
+            raise AgentLaunchRefused(
+                agent.agent_id,
+                room_id,
+                "unknown_harness",
+                f"no harness is registered as {agent.harness_id!r}",
+            )
+        harness = self._harness(agent.harness_id)
+        challenge = (
+            new_launch_challenge() if identity.proof_mode is ProofMode.SIGNED_CHALLENGE else None
+        )
+        _, answer = await harness.initialize(challenge)
+        verified_at: datetime | None = None
+        if challenge is not None:
+            if not verify_challenge_answer(identity.public_key or "", challenge, answer):
+                raise AgentLaunchRefused(
+                    agent.agent_id,
+                    room_id,
+                    "challenge_failed",
+                    f"agent {agent.agent_id} did not answer its launch challenge",
+                )
+            verified_at = utcnow()
+        credential = new_run_credential()
+        run = AgentRun(
+            run_id=new_id("arun"),
+            execution_id="",
+            agent_id=agent.agent_id,
+            identity_id=identity.identity_id,
+            room_id=room_id,
+            authorized_by=authorized_by,
+            acting_user_id=acting_user_id or authorized_by,
+            harness_id=agent.harness_id,
+            credential_hash=credential_hash(credential),
+            lease_expires_at=utcnow() + _STREAMING_LEASE,
+            challenge_verified_at=verified_at,
+            resumed_from_run_id=resumed_from_run_id,
+            attempts=attempts,
+            max_attempts=_RUN_MAX_ATTEMPTS,
+        )
+        # The workspace stores only the hash. The plaintext lives here until the
+        # harness is handed it at session_new, and nowhere else, ever.
+        self._run_credentials[run.run_id] = credential
+        return run
+
+    async def _record_launch_refusal(self, refusal: AgentLaunchRefused) -> None:
+        """Append the refusal after the rollback that discarded the launch."""
+        event_type = (
+            EventType.AGENT_ADDRESSING_REFUSED
+            if refusal.reason == "not_addressable"
+            else EventType.AGENT_LAUNCH_REFUSED
+        )
+        await self._append_room_event(
+            refusal.room_id,
+            event_type,
+            {"agent_id": refusal.agent_id, "reason": refusal.reason},
+            refusal.agent_id,
+            "agent",
+        )
+
+    async def _renew_run_lease(self, update: SessionUpdate) -> None:
+        """The streaming callback is the run's heartbeat: every update renews its lease."""
+        run = await self.repos.agent_runs.get(update.run_id)
+        if run is None or run.harness_state is HarnessState.SETTLED:
+            return
+        await self.repos.agent_runs.advance(
+            run.run_id, run.harness_state, utcnow() + _STREAMING_LEASE, run.acting_user_id
+        )
+
+    async def _advance_run_for_execution(
+        self, execution_id: str, state: HarnessState, acting_user_id: str, lease: timedelta
+    ) -> None:
+        """Move the envelope and renew its lease. A settled run never moves."""
+        run = await self.repos.agent_runs.get_by_execution(execution_id)
+        if run is None or run.harness_state is HarnessState.SETTLED:
+            return
+        await self.repos.agent_runs.advance(
+            run.run_id, state, utcnow() + lease, acting_user_id or run.acting_user_id
+        )
+
+    async def _settle_run(
+        self, run: AgentRun, settlement: RunSettlement, decided_by: str, error: str
+    ) -> bool:
+        """Bring one run and the execution it envelopes to a terminal state together."""
+        execution = await self.repos.executions.get(run.execution_id)
+        if execution is None:
+            return False
+        terminal = {
+            ExecutionStatus.COMPLETED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }
+        try:
+            if execution.status in terminal:
+                async with self.db.transaction():
+                    events = [
+                        await self.repos.events.append_with_next_sequence_in_transaction(event)
+                        for event in await self.repos.agent_runs.settle_in_transaction(
+                            run.execution_id, settlement, decided_by
+                        )
+                    ]
+            else:
+                cancelled = settlement in {RunSettlement.CANCELLED, RunSettlement.AGENT_REMOVED}
+                status = ExecutionStatus.CANCELLED if cancelled else ExecutionStatus.FAILED
+                events = await self.repos.executions.terminalize_without_output(
+                    execution,
+                    status,
+                    error,
+                    [
+                        RoomEvent(
+                            room_id=run.room_id,
+                            sequence=0,
+                            event_type=EventType.EXECUTION_CANCELLED
+                            if cancelled
+                            else EventType.EXECUTION_FAILED,
+                            payload={
+                                "execution_id": run.execution_id,
+                                "agent_id": run.agent_id,
+                                "error": error,
+                            },
+                            actor_id=decided_by or run.agent_id,
+                            actor_type="system",
+                        )
+                    ],
+                    settlement,
+                    decided_by,
+                )
+        except DomainError:
+            # The run moved on between the read and this write. Settling a run somebody
+            # else is advancing is the damage this guard exists to prevent.
+            log.info("Run %s advanced while being settled; leaving it alone", run.run_id)
+            return False
+        await self._broadcast_persisted_events(events)
+        return True
+
+    async def sweep_expired_run_leases(self) -> int:
+        """Settle every run whose lease ran out, so none sits unclaimed by anything.
+
+        A run picked up its full allowance of attempts that died every time is PARKED
+        rather than ORPHANED. Both are terminal; the difference is what a reader is
+        told about why nothing is coming, which is the whole point of settling it.
+        """
+        settled = 0
+        for run in await self.repos.agent_runs.list_expired(utcnow()):
+            settlement = (
+                RunSettlement.PARKED if run.attempts >= run.max_attempts else RunSettlement.ORPHANED
+            )
+            if await self._settle_run(
+                run, settlement, "system", f"lease expired after {run.attempts} attempt(s)"
+            ):
+                settled += 1
+        return settled
+
+    async def remove_agent_from_room(
+        self, agent_id: str, room_id: str, removed_by: str, *, require_member: bool = False
+    ) -> None:
+        """Take an agent out of a room and settle everything it had in flight.
+
+        Settlement is decided here and telling the harness is best-effort, so an
+        in-flight turn can still land. What stops it writing is the settled-run refusal
+        inside complete_execution, not the credential.
+        """
+        agent = await self.get_agent(agent_id)
+        if agent.room_id != room_id:
+            raise DomainError("agent is not in this room")
+        events: list[RoomEvent] = []
+        settled: list[AgentRun] = []
+        async with self.db.transaction():
+            if require_member:
+                await self._require_capability_in_transaction(
+                    room_id, removed_by, RoomCapability.ADMINISTER
+                )
+            await self.repos.agents.remove_room_membership_in_transaction(
+                agent_id, room_id, utcnow()
+            )
+            for run in await self.repos.agent_runs.list_open_by_agent_room(agent_id, room_id):
+                execution = await self.repos.executions.get(run.execution_id)
+                if execution is None:
+                    continue
+                # Through CANCEL_REQUESTED to SETTLED: the settlement is decided before
+                # the harness is told, and the record says so even if it is never told.
+                await self.repos.agent_runs.advance(
+                    run.run_id, HarnessState.CANCEL_REQUESTED, utcnow(), removed_by
+                )
+                if execution.status in {
+                    ExecutionStatus.COMPLETED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }:
+                    for event in await self.repos.agent_runs.settle_in_transaction(
+                        run.execution_id, RunSettlement.AGENT_REMOVED, removed_by
+                    ):
+                        events.append(
+                            await self.repos.events.append_with_next_sequence_in_transaction(event)
+                        )
+                    settled.append(run)
+                    continue
+                events.extend(
+                    await self.repos.executions.terminalize_without_output_in_transaction(
+                        execution,
+                        ExecutionStatus.CANCELLED,
+                        "agent removed from room",
+                        [],
+                        RunSettlement.AGENT_REMOVED,
+                        removed_by,
+                    )
+                )
+                settled.append(run)
+            events.append(
+                await self.repos.events.append_with_next_sequence_in_transaction(
+                    RoomEvent(
+                        room_id=room_id,
+                        sequence=0,
+                        event_type=EventType.AGENT_LEFT_ROOM,
+                        payload={
+                            "agent_id": agent_id,
+                            "removed_by": removed_by,
+                            "settled_run_ids": [run.run_id for run in settled],
+                        },
+                        actor_id=removed_by,
+                        actor_type="user",
+                    )
+                )
+            )
+        await self._broadcast_persisted_events(events)
+        harness = self._harness(agent.harness_id) if agent.harness_id in KNOWN_HARNESS_IDS else None
+        for run in settled:
+            if harness is None:
+                continue
+            try:
+                await harness.session_cancel(
+                    SessionHandle(run_id=run.run_id, harness_session_id=run.execution_id),
+                    "agent removed from room",
+                )
+            except Exception:
+                log.exception("Could not tell the harness that run %s was settled", run.run_id)
+
+    async def record_session_update(
+        self, run_id: str, credential: str, update: SessionUpdate
+    ) -> None:
+        """Accept one harness-originated update, or refuse it.
+
+        The per-run credential is compared as an opaque token, and a settled run is
+        refused whatever it presents: the turn it belonged to is over.
+        """
+        run = await self.repos.agent_runs.get(run_id)
+        if run is None or not credential_matches(credential, run.credential_hash):
+            raise AuthorizationError("run credential rejected")
+        if run.harness_state is HarnessState.SETTLED:
+            raise DomainError(f"run {run_id} is settled ({run.settlement}) and accepts no updates")
+        await self.repos.agent_runs.advance(
+            run.run_id, HarnessState.STREAMING, utcnow() + _STREAMING_LEASE, run.acting_user_id
+        )
+        del update
 
     # ── Branch ───────────────────────────────────────────────────────────────
 
@@ -1011,6 +1525,18 @@ class MultiplayerService:
         agents = [await self.get_agent(agent_id) for agent_id in agent_ids]
         if any(agent.room_id != room_id for agent in agents):
             raise DomainError("every branch agent must belong to the room")
+        # Addressing and identity are gates that close before a run row exists. The
+        # BEFORE INSERT triggers below repeat the identity leg, so a revocation racing
+        # this preparation is still refused at the write.
+        prepared: dict[str, AgentRun] = {}
+        for agent in agents:
+            try:
+                await self._require_addressable(agent, room_id, initiated_by)
+                prepared_run = await self._prepare_agent_run(agent, room_id, initiated_by)
+            except AgentLaunchRefused as refusal:
+                await self._record_launch_refusal(refusal)
+                raise
+            prepared[agent.agent_id] = prepared_run
 
         persisted_events: list[RoomEvent] = []
         executions: list[Execution] = []
@@ -1119,6 +1645,9 @@ class MultiplayerService:
                 )
                 await self.repos.sessions.create(session)
                 await self.repos.executions.create(execution)
+                await self.repos.agent_runs.create_in_transaction(
+                    replace(prepared[agent.agent_id], execution_id=execution.execution_id)
+                )
                 executions.append(execution)
             events_to_persist = [
                 RoomEvent(
@@ -1245,6 +1774,13 @@ class MultiplayerService:
         _validate_transition(
             session.status, SessionStatus.ACTIVE, VALID_SESSION_TRANSITIONS, "session"
         )
+        agent = await self.get_agent(session.agent_id)
+        try:
+            await self._require_addressable(agent, session.room_id, authorized_by)
+            run = await self._prepare_agent_run(agent, session.room_id, authorized_by)
+        except AgentLaunchRefused as refusal:
+            await self._record_launch_refusal(refusal)
+            raise
         execution = Execution(
             execution_id=new_id("exec"),
             session_id=session_id,
@@ -1266,6 +1802,7 @@ class MultiplayerService:
                 actor_id=session.agent_id,
                 actor_type="agent",
             ),
+            run,
         )
         await self._broadcast_persisted_events([event])
         await self._set_agent_status_safe(session.agent_id, AgentStatus.WORKING)
@@ -1338,12 +1875,22 @@ class MultiplayerService:
         the intersection: refused when it is empty, and bounded by it when it is
         not. Returns the narrowed terms, or None when no delegation applies.
         """
-        if not acting_as or acting_as == execution.authorized_by:
+        if not acting_as:
             return None
         session = await self.repos.sessions.get(execution.session_id)
         if session is None:
             raise DomainError("session not found")
         agent = await self.get_agent(execution.agent_id)
+        # Interrupt, cancel and resume re-run the addressing check as well as the
+        # authority one, so a caller who may not point this agent may not steer it
+        # either — including the principal the run already names.
+        try:
+            await self._require_addressable(agent, session.room_id, acting_as)
+        except AgentLaunchRefused as refusal:
+            await self._record_launch_refusal(refusal)
+            raise
+        if acting_as == execution.authorized_by:
+            return None
         terms = await self._capability_terms(
             agent, session.room_id, execution.authorized_by, acting_as
         )
@@ -1358,10 +1905,18 @@ class MultiplayerService:
         execution: Execution,
         session: Session,
         agent: AgentInstance,
-        terms: CapabilityTerms,
+        acting_as: str,
         result: dict[str, Any],
     ) -> dict[str, Any]:
-        """Permission check, policy check, approval gate, execution, audit event."""
+        """Permission check, policy check, approval gate, execution, audit event.
+
+        The terms are re-derived here rather than carried in from the step that
+        offered the tool: a provider call sits between the two, and a grant withdrawn
+        while the model was thinking must not still be spendable when it answers.
+        """
+        terms = await self._capability_terms(
+            agent, session.room_id, execution.authorized_by, acting_as
+        )
         effective = terms.effective
         tool = str(result.get("tool", ""))
         raw_input = result.get("input")
@@ -1372,7 +1927,9 @@ class MultiplayerService:
             room_id=session.room_id,
             execution_id=execution.execution_id,
             agent_id=agent.agent_id,
+            # requested_by is the actor; authorized_by is the authority it acts under.
             requested_by=agent.agent_id,
+            authorized_by=execution.authorized_by,
             tool=tool,
             input_json=json.dumps(tool_input, default=str),
             required_capability=decision.required_capability,
@@ -1405,9 +1962,18 @@ class MultiplayerService:
                 execution.execution_id,
                 agent.agent_id,
                 f"{tool}: {decision.required_capability}",
+                authorized_by=execution.authorized_by,
             )
             request = replace(request, approval_id=approval.approval_id)
             await self.repos.tool_requests.create(request)
+            # No harness work is in flight while a reviewer thinks, so the lease is a
+            # long one. It is still a lease: an exemption is no deadline at all.
+            await self._advance_run_for_execution(
+                execution.execution_id,
+                HarnessState.AWAITING_APPROVAL,
+                execution.authorized_by,
+                _APPROVAL_LEASE,
+            )
             return self._tool_response(request)
         await self.repos.tool_requests.create(request)
         return self._tool_response(await self._execute_tool_request(request))
@@ -1434,6 +2000,46 @@ class MultiplayerService:
         )
         try:
             output = await self._run_tool(request)
+        except RunAuthorityRevoked as revoked:
+            # The write already rolled back with the raise; the settlement is written
+            # here, outside the transaction that could not have kept it.
+            await self.repos.tool_requests.resolve(
+                request.request_id, "REJECTED", str(revoked), "{}"
+            )
+            await self._append_room_event(
+                request.room_id,
+                EventType.AGENT_RUN_AUTHORITY_REVOKED,
+                {
+                    "run_id": revoked.authorization.run_id,
+                    "authorized_by": revoked.authorization.authorized_by,
+                    "acting_user_id": revoked.authorization.acting_user_id,
+                    "stage": revoked.stage,
+                    "missing_capability": revoked.authorization.required_capability,
+                },
+                request.agent_id,
+                "agent",
+            )
+            await self._append_room_event(
+                request.room_id,
+                EventType.TOOL_CALL_REJECTED,
+                {
+                    "request_id": request.request_id,
+                    "tool": request.tool,
+                    "required_capability": request.required_capability,
+                    "reason": str(revoked),
+                },
+                request.agent_id,
+                "agent",
+            )
+            run = await self.repos.agent_runs.get_by_execution(request.execution_id)
+            if run is not None:
+                await self._settle_run(
+                    run,
+                    RunSettlement.AUTHORITY_REVOKED,
+                    revoked.authorization.acting_user_id,
+                    str(revoked),
+                )
+            return replace(request, status="REJECTED", reason=str(revoked))
         except DomainError as exc:
             await self.repos.tool_requests.resolve(request.request_id, "FAILED", str(exc), "{}")
             await self._append_room_event(
@@ -1468,6 +2074,11 @@ class MultiplayerService:
                     for m in messages
                 ]
             }
+        # The authority re-check belongs inside each writer's own transaction, not
+        # wrapped around this dispatch: these calls open their own transactions, and
+        # Database.transaction() refuses to nest, so a check here would sit outside
+        # the write and relocate check-then-use rather than end it.
+        authorization = await self._run_authorization(request)
         if request.tool == "message.react":
             # The channel the run belongs to is the boundary, checked here rather
             # than left to the agent-membership check inside the reaction: that one
@@ -1477,7 +2088,10 @@ class MultiplayerService:
             if message.room_id != request.room_id:
                 raise DomainError("message is not in this channel")
             reaction = await self.add_agent_reaction(
-                message.message_id, request.agent_id, str(tool_input.get("emoji", ""))
+                message.message_id,
+                request.agent_id,
+                str(tool_input.get("emoji", "")),
+                authorization=authorization,
             )
             return {"message_id": message.message_id, "emoji": reaction.emoji}
         if request.tool == "task.create":
@@ -1486,6 +2100,7 @@ class MultiplayerService:
                 str(tool_input.get("title", "")),
                 str(tool_input.get("description", "")),
                 created_by=request.agent_id,
+                authorization=authorization,
             )
             return {"task_id": task.task_id}
         if request.tool == "artifact.write":
@@ -1495,9 +2110,49 @@ class MultiplayerService:
                 ArtifactType.DOCUMENT,
                 str(tool_input.get("description", "")),
                 created_by=request.agent_id,
+                authorization=authorization,
             )
             return {"artifact_id": artifact.artifact_id}
         raise DomainError(f"tool not executable: {request.tool}")
+
+    async def _run_authorization(self, request: ToolRequest) -> RunAuthorization:
+        """What the writer re-derives its terms from, read from durable records."""
+        run = await self.repos.agent_runs.get_by_execution(request.execution_id)
+        execution = await self.repos.executions.get(request.execution_id)
+        authorized_by = request.authorized_by or (
+            execution.authorized_by if execution is not None else ""
+        )
+        return RunAuthorization(
+            run_id=run.run_id if run is not None else request.execution_id,
+            agent_id=request.agent_id,
+            room_id=request.room_id,
+            authorized_by=authorized_by,
+            acting_user_id=run.acting_user_id if run is not None else authorized_by,
+            required_capability=request.required_capability or "",
+        )
+
+    async def _require_run_authority_in_transaction(
+        self, authorization: RunAuthorization, stage: str
+    ) -> None:
+        """Re-derive the effective terms inside the transaction that writes.
+
+        No capability set is ever an input to a later decision. Reading them here,
+        beside the write, makes the check and the write one transaction by
+        construction; a re-check finding the authorizing human gone, the caller
+        narrowed, or either holding a role that no longer yields the capability,
+        rolls the write back and settles the run AUTHORITY_REVOKED.
+        """
+        agent = await self.repos.agents.get_instance(authorization.agent_id)
+        if agent is None:
+            raise RunAuthorityRevoked(authorization, stage)
+        terms = await self._capability_terms(
+            agent,
+            authorization.room_id,
+            authorization.authorized_by,
+            authorization.acting_user_id,
+        )
+        if authorization.required_capability not in terms.effective:
+            raise RunAuthorityRevoked(authorization, stage)
 
     @staticmethod
     def _tool_response(request: ToolRequest) -> dict[str, Any]:
@@ -1565,8 +2220,34 @@ class MultiplayerService:
             source_prompt = branch.initiating_prompt
             provider_prompt = self._branch_execution_prompt(branch)
 
+        if agent.harness_id not in KNOWN_HARNESS_IDS:
+            raise DomainError(f"no harness is registered as {agent.harness_id!r}")
+        harness = self._harness(agent.harness_id)
+        agent_run = await self.repos.agent_runs.get_by_execution(execution_id)
+        handle = SessionHandle(
+            run_id=agent_run.run_id if agent_run is not None else execution_id,
+            harness_session_id=execution_id,
+        )
+        # The turn is in flight from here, on a lease the sweep can expire if the
+        # process driving it dies.
+        await self._advance_run_for_execution(
+            execution_id, HarnessState.STREAMING, acting_as, _STREAMING_LEASE
+        )
         if not execution.run_id:
-            await self.nexus.create_execution(agent, session, provider_prompt, execution)
+            if agent_run is not None:
+                await harness.session_new(
+                    RunContext(
+                        run_id=agent_run.run_id,
+                        agent_id=agent_run.agent_id,
+                        identity_id=agent_run.identity_id,
+                        room_id=agent_run.room_id,
+                        run_credential=self._run_credentials.pop(agent_run.run_id, ""),
+                        authorized_by=agent_run.authorized_by,
+                        acting_user_id=acting_as or agent_run.acting_user_id,
+                    )
+                )
+            else:
+                await self.nexus.create_execution(agent, session, provider_prompt, execution)
             run_id = f"run_{execution.execution_id}"
             # replace(), not a rebuild: a rebuild silently reset triggered_by to
             # DIRECT, losing why the run was opened at the moment it starts.
@@ -1576,9 +2257,22 @@ class MultiplayerService:
             execution = replace(execution, run_id=run_id, status=ExecutionStatus.RUNNING)
 
         effective = terms.effective
-        result = await self.nexus.execute_step(
-            execution_id, provider_prompt, self._step_schema(effective)
-        )
+        try:
+            turn = await harness.session_prompt(
+                PromptRequest(
+                    handle=handle,
+                    prompt=provider_prompt,
+                    response_schema=self._step_schema(effective),
+                    offered_tools=tuple(allowed_tools(effective)),
+                ),
+                self._renew_run_lease,
+            )
+        except HarnessError as exc:
+            result: dict[str, Any] = {"status": "error", "error": str(exc)}
+        else:
+            result = dict(turn.output)
+            if turn.stop_reason is StopReason.CANCELLED:
+                result["status"] = "cancelled"
         if result.get("status") == "error":
             error = str(result.get("error", ""))
             persisted_events = await self.repos.executions.terminalize_without_output(
@@ -1604,7 +2298,7 @@ class MultiplayerService:
             await self._set_agent_status_safe(execution.agent_id, AgentStatus.FAILED)
             return result
         if result.get("action") == "tool":
-            return await self._handle_tool_request(execution, session, agent, terms, result)
+            return await self._handle_tool_request(execution, session, agent, acting_as, result)
         if result.get("action") == "finish":
             raw_output = result.get("result")
             output_data = raw_output if isinstance(raw_output, dict) else {"result": raw_output}
@@ -1724,6 +2418,77 @@ class MultiplayerService:
             execution_id, ExecutionStatus.RUNNING, execution.status
         )
         return True
+
+    async def resume_agent_run(
+        self, run_id: str, resumed_by: str, *, require_member: bool = False
+    ) -> Execution:
+        """Continue a settled run as a new one, with the same identity and fresh authority.
+
+        A settled run is never resumed in place: re-adopting a state nobody observed is
+        exactly the ambiguity settling it removed. A parked run is not resumed at all —
+        it has already used every attempt it was allowed.
+        """
+        previous = await self.repos.agent_runs.get(run_id)
+        if previous is None:
+            raise DomainError(f"agent run not found: {run_id}")
+        if previous.harness_state is not HarnessState.SETTLED:
+            raise DomainError(f"agent run {run_id} is still open")
+        if previous.settlement is RunSettlement.PARKED:
+            raise DomainError(f"agent run {run_id} is parked after {previous.attempts} attempts")
+        agent = await self.get_agent(previous.agent_id)
+        earlier = await self.repos.executions.get(previous.execution_id)
+        try:
+            await self._require_addressable(agent, previous.room_id, resumed_by)
+            run = await self._prepare_agent_run(
+                agent,
+                previous.room_id,
+                resumed_by,
+                resumed_from_run_id=previous.run_id,
+                attempts=previous.attempts + 1,
+            )
+        except AgentLaunchRefused as refusal:
+            await self._record_launch_refusal(refusal)
+            raise
+        session = Session(
+            session_id=new_id("sess"),
+            room_id=previous.room_id,
+            agent_id=agent.agent_id,
+            status=SessionStatus.ACTIVE,
+        )
+        execution = Execution(
+            execution_id=new_id("exec"),
+            session_id=session.session_id,
+            agent_id=agent.agent_id,
+            authorized_by=resumed_by,
+            triggered_by=earlier.triggered_by if earlier is not None else AgentTrigger.DIRECT,
+            input_data=dict(earlier.input_data) if earlier is not None else {},
+        )
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(previous.room_id, resumed_by)
+            await self.repos.sessions.create(session)
+            execution = await self.repos.executions.create(execution)
+            await self.repos.agent_runs.create_in_transaction(
+                replace(run, execution_id=execution.execution_id)
+            )
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=previous.room_id,
+                    sequence=0,
+                    event_type=EventType.AGENT_RUN_STARTED,
+                    payload={
+                        "execution_id": execution.execution_id,
+                        "session_id": session.session_id,
+                        "agent_id": agent.agent_id,
+                        "resumed_from_run_id": previous.run_id,
+                        "attempt": run.attempts,
+                    },
+                    actor_id=resumed_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
+        return execution
 
     async def cancel_execution(
         self, execution_id: str, cancelled_by: str, *, require_member: bool = False
@@ -2575,6 +3340,7 @@ class MultiplayerService:
         parent_task_id: str | None = None,
         *,
         require_member: bool = False,
+        authorization: RunAuthorization | None = None,
     ) -> Task:
         title = self._validate_non_empty(title, "task title")
         task = Task(
@@ -2589,6 +3355,8 @@ class MultiplayerService:
         async with self.db.transaction():
             if require_member:
                 await self._require_mutate_in_transaction(room_id, created_by)
+            if authorization is not None:
+                await self._require_run_authority_in_transaction(authorization, "task.create")
             await self.repos.tasks.create(task)
             event = await self.repos.events.append_with_next_sequence_in_transaction(
                 RoomEvent(
@@ -2924,6 +3692,8 @@ class MultiplayerService:
             raise AuthorizationError(
                 f"{requested_by} may not invoke agent {agent_id}: no effective capability"
             )
+        await self._require_addressable(agent, room_id, requested_by)
+        run = await self._prepare_agent_run(agent, room_id, requested_by)
         session = Session(
             session_id=new_id("sess"),
             room_id=room_id,
@@ -2940,6 +3710,9 @@ class MultiplayerService:
         )
         await self.repos.sessions.create(session)
         execution = await self.repos.executions.create(execution)
+        await self.repos.agent_runs.create_in_transaction(
+            replace(run, execution_id=execution.execution_id)
+        )
         event = await self.repos.events.append_with_next_sequence_in_transaction(
             RoomEvent(
                 room_id=room_id,
@@ -3241,6 +4014,11 @@ class MultiplayerService:
                         request,
                         msg.message_id,
                     )
+        except AgentLaunchRefused as refusal:
+            # The message and the turn it asked for roll back together; the refusal is
+            # appended after that rollback, or it would roll back with them.
+            await self._record_launch_refusal(refusal)
+            raise
         except DomainError:
             raise
         except ValueError as exc:
@@ -3311,11 +4089,14 @@ class MultiplayerService:
         *,
         removed: bool,
         actor_type: ParticipantType = ParticipantType.USER,
+        authorization: RunAuthorization | None = None,
     ) -> MessageReaction:
         emoji = self._validate_emoji(emoji)
         message = await self.get_message(message_id)
         async with self.db.transaction():
             await self._require_reaction_actor_in_transaction(message.room_id, actor_id, actor_type)
+            if authorization is not None:
+                await self._require_run_authority_in_transaction(authorization, "message.react")
             existing = await self.repos.reactions.get(message_id, actor_id, emoji)
             if existing is not None and (existing.removed_at is not None) == removed:
                 # Repeating an add or a remove is a no-op, so a retry appends no event.
@@ -3360,7 +4141,12 @@ class MultiplayerService:
         return await self._set_reaction(message_id, actor_id, emoji, removed=True)
 
     async def add_agent_reaction(
-        self, message_id: str, agent_id: str, emoji: str
+        self,
+        message_id: str,
+        agent_id: str,
+        emoji: str,
+        *,
+        authorization: RunAuthorization | None = None,
     ) -> MessageReaction:
         """An agent reacts as itself, on its own membership of the room.
 
@@ -3370,7 +4156,12 @@ class MultiplayerService:
         human ask for one would let a human sign an agent's name.
         """
         return await self._set_reaction(
-            message_id, agent_id, emoji, removed=False, actor_type=ParticipantType.AGENT
+            message_id,
+            agent_id,
+            emoji,
+            removed=False,
+            actor_type=ParticipantType.AGENT,
+            authorization=authorization,
         )
 
     async def remove_agent_reaction(
@@ -3446,6 +4237,7 @@ class MultiplayerService:
         content: str = "",
         *,
         require_member: bool = False,
+        authorization: RunAuthorization | None = None,
     ) -> Artifact:
         name = self._validate_non_empty(name, "artifact name")
         if name in RESERVED_ARTIFACT_NAMES:
@@ -3476,6 +4268,8 @@ class MultiplayerService:
         async with self.db.transaction():
             if require_member:
                 await self._require_mutate_in_transaction(room_id, created_by)
+            if authorization is not None:
+                await self._require_run_authority_in_transaction(authorization, "artifact.write")
             await self.repos.artifacts.create(artifact)
             if version is not None:
                 await self.repos.artifacts.create_version_in_transaction(version)
@@ -3641,6 +4435,7 @@ class MultiplayerService:
         action_description: str,
         *,
         requested_by: str = "",
+        authorized_by: str = "",
         require_member: bool = False,
     ) -> Approval:
         approval = Approval(
@@ -3649,6 +4444,7 @@ class MultiplayerService:
             execution_id=execution_id,
             agent_id=agent_id,
             action_description=action_description,
+            authorized_by=authorized_by,
         )
         async with self.db.transaction():
             if require_member:
@@ -3693,6 +4489,7 @@ class MultiplayerService:
                 execution_id=approval.execution_id,
                 agent_id=approval.agent_id,
                 action_description=approval.action_description,
+                authorized_by=approval.authorized_by,
                 status=ApprovalStatus.APPROVED,
                 reviewer_id=reviewer_id,
                 review_comment=comment,
@@ -3700,6 +4497,19 @@ class MultiplayerService:
                 reviewed_at=utcnow(),
             )
             await self.repos.approvals.update(approval)
+            pending = await self.repos.tool_requests.get_by_approval(approval_id)
+            if pending is not None and pending.status == "PENDING_APPROVAL":
+                # The reviewer grants from their own capabilities, never above them:
+                # an approval is not a way to lend what the reviewer does not hold.
+                # Re-derived inside the transaction that grants rather than after it
+                # closed; the re-stamped effective set is an audit record, never an
+                # input, because the writer re-derives again inside its own.
+                decision, effective = await self._current_tool_decision(pending, reviewer_id)
+                stamped = json.dumps(sorted(effective))
+                await self.repos.tool_requests.set_effective(pending.request_id, stamped)
+                pending = replace(pending, effective_json=stamped)
+            else:
+                pending = None
             event = await self.repos.events.append_with_next_sequence_in_transaction(
                 RoomEvent(
                     room_id=approval.room_id,
@@ -3712,15 +4522,11 @@ class MultiplayerService:
             )
         await self._set_agent_status_safe(approval.agent_id, AgentStatus.WORKING)
         await self._broadcast_persisted_events([event])
-        pending = await self.repos.tool_requests.get_by_approval(approval_id)
-        if pending is not None and pending.status == "PENDING_APPROVAL":
-            # The reviewer grants from their own capabilities, never above them:
-            # an approval is not a way to lend what the reviewer does not hold.
-            decision, effective = await self._current_tool_decision(pending, reviewer_id)
-            stamped = json.dumps(sorted(effective))
-            await self.repos.tool_requests.set_effective(pending.request_id, stamped)
-            pending = replace(pending, effective_json=stamped)
+        if pending is not None:
             if decision.allowed:
+                await self._advance_run_for_execution(
+                    pending.execution_id, HarnessState.STREAMING, reviewer_id, _STREAMING_LEASE
+                )
                 await self._execute_tool_request(pending)
             else:
                 # The capability was withdrawn between the request and the grant; a
@@ -3744,8 +4550,24 @@ class MultiplayerService:
         return approval
 
     async def reject_action(
-        self, approval_id: str, reviewer_id: str, comment: str = "", *, require_member: bool = False
+        self,
+        approval_id: str,
+        reviewer_id: str,
+        comment: str = "",
+        *,
+        require_member: bool = False,
+        continue_turn: bool = False,
     ) -> Approval:
+        """Refuse one gated tool call, and say what becomes of the run.
+
+        Rejection used to resolve the request and stop, leaving the run
+        AWAITING_APPROVAL: not settled, not leased, and unsweepable. It now ends in one
+        of two named places inside the transaction that writes it — settled
+        APPROVAL_REFUSED, or returned to STREAMING on a fresh lease when the reviewer
+        refuses the tool but wants the turn continued. No third path leaves the run
+        where it found it.
+        """
+        events: list[RoomEvent] = []
         async with self.db.transaction():
             approval = await self.repos.approvals.get(approval_id)
             if not approval:
@@ -3764,6 +4586,7 @@ class MultiplayerService:
                 execution_id=approval.execution_id,
                 agent_id=approval.agent_id,
                 action_description=approval.action_description,
+                authorized_by=approval.authorized_by,
                 status=ApprovalStatus.REJECTED,
                 reviewer_id=reviewer_id,
                 review_comment=comment,
@@ -3771,34 +4594,79 @@ class MultiplayerService:
                 reviewed_at=utcnow(),
             )
             await self.repos.approvals.update(approval)
-            event = await self.repos.events.append_with_next_sequence_in_transaction(
-                RoomEvent(
-                    room_id=approval.room_id,
-                    sequence=0,
-                    event_type=EventType.APPROVAL_REJECTED,
-                    payload={"approval_id": approval_id, "reviewer_id": reviewer_id},
-                    actor_id=reviewer_id,
-                    actor_type="user",
+            events.append(
+                await self.repos.events.append_with_next_sequence_in_transaction(
+                    RoomEvent(
+                        room_id=approval.room_id,
+                        sequence=0,
+                        event_type=EventType.APPROVAL_REJECTED,
+                        payload={"approval_id": approval_id, "reviewer_id": reviewer_id},
+                        actor_id=reviewer_id,
+                        actor_type="user",
+                    )
                 )
             )
-        await self._broadcast_persisted_events([event])
-        pending = await self.repos.tool_requests.get_by_approval(approval_id)
-        if pending is not None and pending.status == "PENDING_APPROVAL":
-            await self.repos.tool_requests.resolve(
-                pending.request_id, "REJECTED", "approval rejected", "{}"
+            pending = await self.repos.tool_requests.get_by_approval(approval_id)
+            if pending is not None and pending.status == "PENDING_APPROVAL":
+                await self.repos.tool_requests.resolve(
+                    pending.request_id, "REJECTED", "approval rejected", "{}"
+                )
+                events.append(
+                    await self.repos.events.append_with_next_sequence_in_transaction(
+                        RoomEvent(
+                            room_id=pending.room_id,
+                            sequence=0,
+                            event_type=EventType.TOOL_CALL_REJECTED,
+                            payload={
+                                "request_id": pending.request_id,
+                                "tool": pending.tool,
+                                "reason": "approval rejected",
+                            },
+                            actor_id=pending.agent_id,
+                            actor_type="agent",
+                        )
+                    )
+                )
+            events.extend(
+                await self._end_refused_approval_in_transaction(
+                    approval.execution_id, reviewer_id, continue_turn
+                )
             )
-            await self._append_room_event(
-                pending.room_id,
-                EventType.TOOL_CALL_REJECTED,
-                {
-                    "request_id": pending.request_id,
-                    "tool": pending.tool,
-                    "reason": "approval rejected",
-                },
-                pending.agent_id,
-                "agent",
-            )
+        await self._broadcast_persisted_events(events)
         return approval
+
+    async def _end_refused_approval_in_transaction(
+        self, execution_id: str, reviewer_id: str, continue_turn: bool
+    ) -> list[RoomEvent]:
+        """Settle the run, or put it back on a fresh lease. Never neither."""
+        run = await self.repos.agent_runs.get_by_execution(execution_id)
+        if run is None or run.harness_state is HarnessState.SETTLED:
+            return []
+        if continue_turn:
+            await self.repos.agent_runs.advance(
+                run.run_id, HarnessState.STREAMING, utcnow() + _STREAMING_LEASE, reviewer_id
+            )
+            return []
+        execution = await self.repos.executions.get(execution_id)
+        if execution is not None and execution.status not in {
+            ExecutionStatus.COMPLETED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
+            return await self.repos.executions.terminalize_without_output_in_transaction(
+                execution,
+                ExecutionStatus.CANCELLED,
+                "approval refused",
+                [],
+                RunSettlement.APPROVAL_REFUSED,
+                reviewer_id,
+            )
+        return [
+            await self.repos.events.append_with_next_sequence_in_transaction(event)
+            for event in await self.repos.agent_runs.settle_in_transaction(
+                execution_id, RunSettlement.APPROVAL_REFUSED, reviewer_id
+            )
+        ]
 
     async def list_pending_approvals(self, room_id: str) -> list[Approval]:
         return await self.repos.approvals.list_pending_by_room(room_id)

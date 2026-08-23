@@ -15,7 +15,14 @@ import pytest
 
 import multiplayer.nexus_bridge.agent_bridge as bridge_module
 from multiplayer.db.connection import Database
-from multiplayer.domain.models import BranchMode, DomainError, MessageRole, ParticipantType
+from multiplayer.domain.models import (
+    AddressingMode,
+    BranchMode,
+    DomainError,
+    MessageRole,
+    ParticipantType,
+    RoomMember,
+)
 from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
 from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.security.capabilities import (
@@ -463,6 +470,55 @@ async def test_a_mangled_tool_name_is_not_the_tool(
     assert result["tool_request"]["status"] == "REJECTED"
     assert result["tool_request"]["reason"] == "unknown tool"
     assert not await svc.repos.tasks.list_by_room(room_id)
+
+
+# ── Identity is a gate, never a term ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_valid_owner_addressed_identity_still_cannot_write_for_a_viewer(
+    service: MultiplayerService,
+) -> None:
+    """Identity says who acted. It can refuse earlier; it can never widen the set.
+
+    A sixth term would break the invariant that effective capabilities are the
+    intersection of user, agent, skill, channel and workspace, so the run below has
+    everything identity can give it — live, unrevoked, and addressed by its own owner —
+    and still gets nothing the viewer does not hold. The signed-challenge variant of
+    the same gate lives in tests/security/test_agent_identity.py.
+    """
+    svc = service
+    room_id, _ = await _room(svc)
+    await svc.repos.room_members.add(
+        RoomMember(room_id=room_id, user_id="viewer_member", role="viewer")
+    )
+    provider = _ToolRequestingProvider("artifact.write", {"name": "Rollout plan"})
+    svc.nexus = NexusAgentBridge(model_provider=provider)
+    agent = await svc.spawn_agent(
+        room_id, await _template_id(svc, "Synthesizer"), name="Synthesizer", requested_by="owner"
+    )
+    await svc.set_agent_addressing(
+        agent.agent_id, AddressingMode.OWNER_ONLY, "owner", owner_user_id="viewer_member"
+    )
+    identity = await svc.get_agent_identity(agent.agent_id)
+    assert identity.revoked_at is None
+    assert (await svc.get_agent_addressing(agent.agent_id)).owner_user_id == "viewer_member"
+
+    with_identity = (await svc.agent_capability_terms(agent.agent_id, "viewer_member")).effective
+    session = await svc.start_agent_session(room_id, agent.agent_id)
+    execution = await svc.start_execution(session.session_id, "viewer_member")
+    await svc.execute_agent_step(execution.execution_id, "Draft the rollout plan.")
+
+    statuses = [row["status"] for row in await svc.db.fetch_all("SELECT status FROM tool_requests")]
+    assert statuses == ["REJECTED"]
+    assert await svc.repos.artifacts.list_by_room(room_id) == []
+
+    # Revoking the identity refuses the next launch and changes no term at all: a
+    # gate can close the door earlier, and it contributes nothing to the set inside.
+    await svc.revoke_agent_identity(agent.agent_id, "owner")
+    without_identity = (await svc.agent_capability_terms(agent.agent_id, "viewer_member")).effective
+    assert with_identity == without_identity
+    assert "writing" not in with_identity
 
 
 # ── The API surface ──────────────────────────────────────────────────────────

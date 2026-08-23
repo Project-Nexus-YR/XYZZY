@@ -56,6 +56,16 @@ class EventType(StrEnum):
     EXECUTION_PAUSED = "execution.paused"
     EXECUTION_CANCELLED = "execution.cancelled"
 
+    # Agent identity, addressing, and the run envelope.
+    AGENT_IDENTITY_REGISTERED = "agent.identity.registered"
+    AGENT_IDENTITY_REVOKED = "agent.identity.revoked"
+    AGENT_LAUNCH_REFUSED = "agent.launch.refused"
+    AGENT_ADDRESSING_UPDATED = "agent.addressing.updated"
+    AGENT_ADDRESSING_REFUSED = "agent.addressing.refused"
+    AGENT_RUN_SETTLED = "agent.run.settled"
+    AGENT_RUN_ORPHANED = "agent.run.orphaned"
+    AGENT_RUN_AUTHORITY_REVOKED = "agent.run.authority_revoked"
+
     # Canonical agent run/output events used by reconnect and provenance.
     AGENT_RUN_STARTED = "agent.run.started"
     AGENT_OUTPUT_CREATED = "agent.output.created"

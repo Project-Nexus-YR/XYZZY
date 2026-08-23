@@ -25,6 +25,10 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.6",
     "mypy>=1.11",
+    # Only the SIGNED_CHALLENGE proof mode needs Ed25519, and no production path
+    # builds one of those yet. Without it that mode refuses to launch, which is the
+    # direction a missing verifier should fail in.
+    "cryptography>=42",
 ]
 nexus = []
 

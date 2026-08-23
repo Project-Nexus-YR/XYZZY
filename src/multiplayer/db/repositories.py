@@ -12,8 +12,12 @@ from typing import Any
 
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
+    AddressingMode,
+    AgentAddressing,
+    AgentIdentity,
     AgentInstance,
     AgentOutput,
+    AgentRun,
     AgentStatus,
     AgentTemplate,
     AgentTrigger,
@@ -36,6 +40,7 @@ from ..domain.models import (
     DomainError,
     Execution,
     ExecutionStatus,
+    HarnessState,
     IdempotencyRecord,
     Memory,
     MemoryScope,
@@ -61,11 +66,13 @@ from ..domain.models import (
     OutputSelection,
     ParticipantType,
     Presence,
+    ProofMode,
     ReadCursor,
     Room,
     RoomMember,
     RoomParticipantHandle,
     RoomStatus,
+    RunSettlement,
     SearchHit,
     SearchObjectKind,
     Session,
@@ -106,6 +113,9 @@ class Repos:
         self.rooms = RoomRepo(db)
         self.room_members = RoomMemberRepo(db)
         self.agents = AgentRepo(db)
+        self.agent_identities = AgentIdentityRepo(db)
+        self.agent_addressing = AgentAddressingRepo(db)
+        self.agent_runs = AgentRunRepo(db)
         self.branches = BranchRepo(db)
         self.sessions = SessionRepo(db)
         self.executions = ExecutionRepo(db)
@@ -150,6 +160,77 @@ def _require_execution_transition(
             f"execution {execution_id} is no longer {expected.value}: "
             f"the transition to {target.value} was not applied"
         )
+
+
+async def _require_open_agent_run(db: Database, execution_id: str) -> None:
+    """A settled run may not write. This refusal, not the credential, is what stops it.
+
+    Settlement is decided by the database and telling the harness is best-effort, so an
+    in-flight turn can still land after its run was settled. The write path it lands on
+    is complete_execution, which consulted neither agent_runs nor any credential.
+    """
+    row = await db.fetch_one(
+        "SELECT harness_state, settlement FROM agent_runs WHERE execution_id = ?", (execution_id,)
+    )
+    if row is not None and row["harness_state"] == HarnessState.SETTLED.value:
+        raise DomainError(
+            f"run for execution {execution_id} is settled ({row['settlement']}) "
+            "and may not write an output"
+        )
+
+
+async def _settle_agent_run_in_transaction(
+    db: Database,
+    execution_id: str,
+    settlement: RunSettlement,
+    decided_by: str,
+) -> list[RoomEvent]:
+    """Settle the envelope around one execution, if it has one and is still open."""
+    row = await db.fetch_one(
+        "SELECT run_id, room_id, harness_state FROM agent_runs WHERE execution_id = ?",
+        (execution_id,),
+    )
+    if row is None or row["harness_state"] == HarnessState.SETTLED.value:
+        return []
+    settled_at = serialize_datetime(utcnow())
+    await db.execute(
+        "UPDATE agent_runs SET harness_state = ?, settlement = ?, settled_at = ? "
+        "WHERE run_id = ? AND harness_state <> ?",
+        (
+            HarnessState.SETTLED.value,
+            settlement.value,
+            settled_at,
+            row["run_id"],
+            HarnessState.SETTLED.value,
+        ),
+    )
+    events = [
+        RoomEvent(
+            room_id=str(row["room_id"]),
+            sequence=0,
+            event_type=EventType.AGENT_RUN_SETTLED,
+            payload={
+                "run_id": str(row["run_id"]),
+                "execution_id": execution_id,
+                "settlement": settlement.value,
+                "decided_by": decided_by,
+            },
+            actor_id=decided_by or "system",
+            actor_type="system",
+        )
+    ]
+    if settlement is RunSettlement.ORPHANED:
+        events.append(
+            RoomEvent(
+                room_id=str(row["room_id"]),
+                sequence=0,
+                event_type=EventType.AGENT_RUN_ORPHANED,
+                payload={"run_id": str(row["run_id"]), "execution_id": execution_id},
+                actor_id=decided_by or "system",
+                actor_type="system",
+            )
+        )
+    return events
 
 
 async def _finish_managed_branch_if_terminal(
@@ -516,15 +597,16 @@ class ToolRequestRepo:
     async def create(self, request: ToolRequest) -> ToolRequest:
         await self.db.execute(
             "INSERT INTO tool_requests(request_id, room_id, execution_id, agent_id, "
-            "requested_by, tool, input_json, required_capability, effective_json, status, "
-            "reason, approval_id, result_json, created_at, resolved_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "requested_by, authorized_by, tool, input_json, required_capability, effective_json, "
+            "status, reason, approval_id, result_json, created_at, resolved_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 request.request_id,
                 request.room_id,
                 request.execution_id,
                 request.agent_id,
                 request.requested_by,
+                request.authorized_by,
                 request.tool,
                 request.input_json,
                 request.required_capability,
@@ -575,6 +657,7 @@ class ToolRequestRepo:
             execution_id=row["execution_id"],
             agent_id=row["agent_id"],
             requested_by=row["requested_by"],
+            authorized_by=row.get("authorized_by") or "",
             tool=row["tool"],
             input_json=row["input_json"],
             required_capability=row["required_capability"],
@@ -772,8 +855,8 @@ class AgentRepo:
     async def create_instance(self, agent: AgentInstance) -> AgentInstance:
         await self.db.execute(
             "INSERT INTO agent_instances(agent_id, template_id, room_id, name, role, status, "
-            "system_prompt, capabilities, model_provider, model_name, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "system_prompt, capabilities, model_provider, model_name, harness_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 agent.agent_id,
                 agent.template_id,
@@ -785,6 +868,7 @@ class AgentRepo:
                 json.dumps(sorted(agent.capabilities)),
                 agent.model_provider,
                 agent.model_name,
+                agent.harness_id,
                 serialize_datetime(agent.created_at),
             ),
         )
@@ -814,7 +898,7 @@ class AgentRepo:
         row = await self.db.fetch_one(
             "SELECT 1 AS present FROM agent_room_memberships m "
             "JOIN agent_instances a ON a.agent_id = m.agent_id AND a.room_id = m.room_id "
-            "WHERE m.agent_id = ? AND m.room_id = ?",
+            "WHERE m.agent_id = ? AND m.room_id = ? AND m.removed_at IS NULL",
             (agent_id, room_id),
         )
         return row is not None
@@ -833,6 +917,18 @@ class AgentRepo:
             (membership.agent_id, membership.room_id, serialize_datetime(membership.joined_at)),
         )
         await self.db.commit()
+
+    async def remove_room_membership_in_transaction(
+        self, agent_id: str, room_id: str, removed_at: datetime
+    ) -> bool:
+        """Stamp the membership removed. Removing twice is not an error, but only the
+        first removal reports that it removed anything."""
+        cursor = await self.db.execute(
+            "UPDATE agent_room_memberships SET removed_at = ? "
+            "WHERE agent_id = ? AND room_id = ? AND removed_at IS NULL",
+            (serialize_datetime(removed_at), agent_id, room_id),
+        )
+        return cursor.rowcount == 1
 
     def _template_from_row(self, row: dict[str, Any]) -> AgentTemplate:
         return AgentTemplate(
@@ -859,7 +955,236 @@ class AgentRepo:
             capabilities=frozenset(json.loads(row["capabilities"])),
             model_provider=row["model_provider"],
             model_name=row["model_name"],
+            harness_id=row.get("harness_id") or "nexus",
             created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+
+class AgentIdentityRepo:
+    """One immutable identity row per agent instance."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create_in_transaction(self, identity: AgentIdentity) -> AgentIdentity:
+        await self.db.execute(
+            "INSERT INTO agent_identities(identity_id, created_at, revoked_at, proof_mode, "
+            "public_key, key_fingerprint, agent_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                identity.identity_id,
+                serialize_datetime(identity.created_at),
+                serialize_datetime(identity.revoked_at),
+                identity.proof_mode.value,
+                identity.public_key,
+                identity.key_fingerprint,
+                identity.agent_id,
+            ),
+        )
+        return identity
+
+    async def get_for_agent(self, agent_id: str) -> AgentIdentity | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM agent_identities WHERE agent_id = ?", (agent_id,)
+        )
+        return None if row is None else self._from_row(row)
+
+    async def revoke(self, agent_id: str, revoked_at: datetime) -> bool:
+        """Revoking is idempotent, and the first revocation is the one that stands."""
+        cursor = await self.db.execute(
+            "UPDATE agent_identities SET revoked_at = ? WHERE agent_id = ? AND revoked_at IS NULL",
+            (serialize_datetime(revoked_at), agent_id),
+        )
+        await self.db.commit()
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def _from_row(row: dict[str, Any]) -> AgentIdentity:
+        revoked = row.get("revoked_at")
+        return AgentIdentity(
+            identity_id=row["identity_id"],
+            agent_id=row["agent_id"],
+            proof_mode=ProofMode(row["proof_mode"]),
+            public_key=row.get("public_key"),
+            key_fingerprint=row.get("key_fingerprint"),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            revoked_at=datetime.fromisoformat(revoked) if revoked else None,
+        )
+
+
+class AgentAddressingRepo:
+    """Who may point an agent, stored here rather than in harness configuration."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def upsert_in_transaction(self, addressing: AgentAddressing) -> None:
+        await self.db.execute(
+            "INSERT INTO agent_addressing(agent_id, room_id, mode, owner_user_id, updated_at, "
+            "updated_by) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(agent_id) DO UPDATE SET "
+            "mode = excluded.mode, owner_user_id = excluded.owner_user_id, "
+            "updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+            (
+                addressing.agent_id,
+                addressing.room_id,
+                addressing.mode.value,
+                addressing.owner_user_id,
+                serialize_datetime(addressing.updated_at),
+                addressing.updated_by,
+            ),
+        )
+        await self.db.execute(
+            "DELETE FROM agent_address_allowlist WHERE agent_id = ?", (addressing.agent_id,)
+        )
+        for user_id in sorted(addressing.allowlist):
+            await self.db.execute(
+                "INSERT INTO agent_address_allowlist(agent_id, user_id, added_by, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    addressing.agent_id,
+                    user_id,
+                    addressing.updated_by,
+                    serialize_datetime(addressing.updated_at),
+                ),
+            )
+
+    async def get(self, agent_id: str) -> AgentAddressing | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM agent_addressing WHERE agent_id = ?", (agent_id,)
+        )
+        if row is None:
+            return None
+        allowed = await self.db.fetch_all(
+            "SELECT user_id FROM agent_address_allowlist WHERE agent_id = ?", (agent_id,)
+        )
+        return AgentAddressing(
+            agent_id=row["agent_id"],
+            room_id=row["room_id"],
+            mode=AddressingMode(row["mode"]),
+            owner_user_id=row["owner_user_id"],
+            allowlist=frozenset(str(item["user_id"]) for item in allowed),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+            updated_by=row["updated_by"],
+        )
+
+
+class AgentRunRepo:
+    """The identity-and-authority envelope around one executions row."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create_in_transaction(self, run: AgentRun) -> AgentRun:
+        """The launch guards live in the database, so a refusal here is an
+        sqlite3.IntegrityError from a trigger rather than a service-level check."""
+        await self.db.execute(
+            "INSERT INTO agent_runs(run_id, execution_id, agent_id, identity_id, room_id, "
+            "authorized_by, acting_user_id, harness_id, credential_hash, challenge_verified_at, "
+            "harness_state, settlement, resumed_from_run_id, lease_expires_at, created_at, "
+            "settled_at, attempts, max_attempts) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run.run_id,
+                run.execution_id,
+                run.agent_id,
+                run.identity_id,
+                run.room_id,
+                run.authorized_by,
+                run.acting_user_id,
+                run.harness_id,
+                run.credential_hash,
+                serialize_datetime(run.challenge_verified_at),
+                run.harness_state.value,
+                run.settlement.value if run.settlement else None,
+                run.resumed_from_run_id,
+                serialize_datetime(run.lease_expires_at),
+                serialize_datetime(run.created_at),
+                serialize_datetime(run.settled_at),
+                run.attempts,
+                run.max_attempts,
+            ),
+        )
+        return run
+
+    async def get(self, run_id: str) -> AgentRun | None:
+        row = await self.db.fetch_one("SELECT * FROM agent_runs WHERE run_id = ?", (run_id,))
+        return None if row is None else self._from_row(row)
+
+    async def get_by_execution(self, execution_id: str) -> AgentRun | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM agent_runs WHERE execution_id = ?", (execution_id,)
+        )
+        return None if row is None else self._from_row(row)
+
+    async def list_open_by_agent_room(self, agent_id: str, room_id: str) -> list[AgentRun]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM agent_runs WHERE agent_id = ? AND room_id = ? AND harness_state <> ? "
+            "ORDER BY created_at, run_id",
+            (agent_id, room_id, HarnessState.SETTLED.value),
+        )
+        return [self._from_row(row) for row in rows]
+
+    async def list_expired(self, now: datetime) -> list[AgentRun]:
+        """Every non-settled run whose lease has run out. No state is exempt: an
+        exemption is not a longer deadline but no deadline."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM agent_runs WHERE harness_state <> ? AND lease_expires_at <= ? "
+            "ORDER BY lease_expires_at, run_id",
+            (HarnessState.SETTLED.value, serialize_datetime(now)),
+        )
+        return [self._from_row(row) for row in rows]
+
+    async def settle_in_transaction(
+        self, execution_id: str, settlement: RunSettlement, decided_by: str
+    ) -> list[RoomEvent]:
+        """Settle the envelope around one execution and return its unsequenced events."""
+        return await _settle_agent_run_in_transaction(self.db, execution_id, settlement, decided_by)
+
+    async def advance(
+        self,
+        run_id: str,
+        state: HarnessState,
+        lease_expires_at: datetime,
+        acting_user_id: str,
+    ) -> bool:
+        """Move an open run and renew its lease. A settled run never moves."""
+        cursor = await self.db.execute(
+            "UPDATE agent_runs SET harness_state = ?, lease_expires_at = ?, acting_user_id = ? "
+            "WHERE run_id = ? AND harness_state <> ?",
+            (
+                state.value,
+                serialize_datetime(lease_expires_at),
+                acting_user_id,
+                run_id,
+                HarnessState.SETTLED.value,
+            ),
+        )
+        await self.db.commit()
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def _from_row(row: dict[str, Any]) -> AgentRun:
+        settlement = row.get("settlement")
+        verified = row.get("challenge_verified_at")
+        settled = row.get("settled_at")
+        return AgentRun(
+            run_id=row["run_id"],
+            execution_id=row["execution_id"],
+            agent_id=row["agent_id"],
+            identity_id=row["identity_id"],
+            room_id=row["room_id"],
+            authorized_by=row["authorized_by"],
+            acting_user_id=row["acting_user_id"],
+            harness_id=row["harness_id"],
+            credential_hash=row["credential_hash"],
+            lease_expires_at=datetime.fromisoformat(row["lease_expires_at"]),
+            harness_state=HarnessState(row["harness_state"]),
+            settlement=RunSettlement(settlement) if settlement else None,
+            resumed_from_run_id=row.get("resumed_from_run_id"),
+            challenge_verified_at=datetime.fromisoformat(verified) if verified else None,
+            attempts=int(row["attempts"]),
+            max_attempts=int(row["max_attempts"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            settled_at=datetime.fromisoformat(settled) if settled else None,
         )
 
 
@@ -1085,8 +1410,13 @@ class ExecutionRepo:
         self,
         execution: Execution,
         event: RoomEvent,
+        agent_run: AgentRun | None = None,
     ) -> RoomEvent:
-        """Atomically activate a session, create its execution, and append the run event."""
+        """Atomically activate a session, create its execution, and append the run event.
+
+        The run envelope is written in the same transaction, so the fail-closed launch
+        triggers refuse the whole start rather than leaving an execution with no run.
+        """
         async with self.db.transaction():
             session = await SessionRepo(self.db).get(execution.session_id)
             if session is None:
@@ -1125,6 +1455,10 @@ class ExecutionRepo:
                     serialize_datetime(execution.completed_at),
                 ),
             )
+            if agent_run is not None:
+                await AgentRunRepo(self.db).create_in_transaction(
+                    replace(agent_run, execution_id=execution.execution_id)
+                )
             cursor = await self.db.execute(
                 "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
                 "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
@@ -1206,10 +1540,12 @@ class ExecutionRepo:
         status: ExecutionStatus,
         error: str,
         events: list[RoomEvent],
+        settlement: RunSettlement | None = None,
+        decided_by: str = "",
     ) -> list[RoomEvent]:
         async with self.db.transaction():
             return await self.terminalize_without_output_in_transaction(
-                execution, status, error, events
+                execution, status, error, events, settlement, decided_by
             )
 
     async def terminalize_without_output_in_transaction(
@@ -1218,13 +1554,25 @@ class ExecutionRepo:
         status: ExecutionStatus,
         error: str,
         events: list[RoomEvent],
+        settlement: RunSettlement | None = None,
+        decided_by: str = "",
     ) -> list[RoomEvent]:
         """Body of :meth:`terminalize_without_output` for a caller that already owns the
-        write transaction, so a membership re-check can share that same transaction."""
+        write transaction, so a membership re-check can share that same transaction.
+
+        The run envelope settles in the same transaction as the domain status, so a run
+        is never terminal in one of the two records and open in the other.
+        """
         if status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             raise ValueError("terminal execution status must be FAILED or CANCELLED")
         if not self.db.owns_current_transaction:
             raise RuntimeError("terminalize_without_output_in_transaction requires ownership")
+        if settlement is None:
+            settlement = (
+                RunSettlement.CANCELLED
+                if status is ExecutionStatus.CANCELLED
+                else RunSettlement.FAILED
+            )
         persisted_events: list[RoomEvent] = []
         completed_at = serialize_datetime(utcnow())
         cursor = await self.db.execute(
@@ -1240,10 +1588,13 @@ class ExecutionRepo:
         session = await SessionRepo(self.db).get(execution.session_id)
         if session is None:
             raise ValueError("execution session not found")
+        settle_events = await _settle_agent_run_in_transaction(
+            self.db, execution.execution_id, settlement, decided_by or execution.agent_id
+        )
         branch_events = await _finish_managed_branch_if_terminal(
             self.db, execution.branch_id, session.room_id, execution.agent_id
         )
-        for event in [*events, *branch_events]:
+        for event in [*events, *settle_events, *branch_events]:
             persisted_events.append(
                 await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
             )
@@ -1367,6 +1718,10 @@ class AgentOutputRepo:
         """
         persisted_events: list[RoomEvent] = []
         async with self.db.transaction():
+            # Re-read the run inside the transaction that writes: a run settled while
+            # this turn was in flight gets no output, no terminal status, and keeps the
+            # settlement it already has.
+            await _require_open_agent_run(self.db, output.execution_id)
             await self.db.execute(
                 "INSERT INTO agent_outputs(output_id, room_id, session_id, execution_id, "
                 "agent_id, content, output_data, source_prompt, provider_input, provider_name, "
@@ -1427,10 +1782,13 @@ class AgentOutputRepo:
                 "UPDATE sessions SET status = ?, ended_at = ? WHERE session_id = ?",
                 (SessionStatus.COMPLETED.value, completed_at, output.session_id),
             )
+            settle_events = await _settle_agent_run_in_transaction(
+                self.db, output.execution_id, RunSettlement.END_TURN, output.agent_id
+            )
             branch_events = await _finish_managed_branch_if_terminal(
                 self.db, output.branch_id, output.room_id, output.agent_id
             )
-            for event in [*events, *branch_events]:
+            for event in [*events, *settle_events, *branch_events]:
                 cursor = await self.db.execute(
                     "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
                     "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
@@ -3488,14 +3846,16 @@ class ApprovalRepo:
     async def create(self, approval: Approval) -> Approval:
         await self.db.execute(
             "INSERT INTO approvals(approval_id, room_id, execution_id, agent_id, "
-            "action_description, status, reviewer_id, review_comment, requested_at, reviewed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "action_description, authorized_by, status, reviewer_id, review_comment, "
+            "requested_at, reviewed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 approval.approval_id,
                 approval.room_id,
                 approval.execution_id,
                 approval.agent_id,
                 approval.action_description,
+                approval.authorized_by,
                 approval.status.value,
                 approval.reviewer_id,
                 approval.review_comment,
@@ -3542,6 +3902,7 @@ class ApprovalRepo:
             execution_id=row["execution_id"],
             agent_id=row["agent_id"],
             action_description=row["action_description"],
+            authorized_by=row.get("authorized_by") or "",
             status=ApprovalStatus(row["status"]),
             reviewer_id=row.get("reviewer_id"),
             review_comment=row["review_comment"],

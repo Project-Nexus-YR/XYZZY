@@ -128,6 +128,9 @@ class ToolRequest:
     agent_id: str
     requested_by: str
     tool: str
+    # requested_by holds the agent id — the actor. authorized_by names the human
+    # under whose authority the request acts; '' means authority was not recorded.
+    authorized_by: str = ""
     input_json: str = "{}"
     required_capability: str | None = None
     effective_json: str = "[]"
@@ -182,6 +185,8 @@ class AgentInstance:
     capabilities: frozenset[str] = frozenset()
     model_provider: str = ""
     model_name: str = ""
+    # Which harness runs this agent's turns. An unknown id refuses to launch.
+    harness_id: str = "nexus"
     created_at: datetime = field(default_factory=utcnow)
 
 
@@ -190,6 +195,102 @@ class AgentRoomMembership:
     agent_id: str
     room_id: str
     joined_at: datetime = field(default_factory=utcnow)
+    removed_at: datetime | None = None
+
+
+# ── Agent identity, addressing, and the run envelope ─────────────────────────
+
+
+class ProofMode(StrEnum):
+    """How an agent instance proves it is the one the identity row names.
+
+    A key exists exactly when there is an untrusted transport to prove authorship
+    across. An in-process harness has none, so it holds no key.
+    """
+
+    IN_PROCESS = "IN_PROCESS"
+    SIGNED_CHALLENGE = "SIGNED_CHALLENGE"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentIdentity:
+    """One immutable identity per agent instance, revoked once rather than per run."""
+
+    identity_id: str
+    agent_id: str
+    proof_mode: ProofMode = ProofMode.IN_PROCESS
+    public_key: str | None = None
+    key_fingerprint: str | None = None
+    created_at: datetime = field(default_factory=utcnow)
+    revoked_at: datetime | None = None
+
+
+class AddressingMode(StrEnum):
+    OWNER_ONLY = "OWNER_ONLY"
+    ALLOWLIST = "ALLOWLIST"
+    ANYONE = "ANYONE"
+    NOBODY = "NOBODY"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentAddressing:
+    """Who may point this agent, stored here so a harness cannot widen its audience."""
+
+    agent_id: str
+    room_id: str
+    mode: AddressingMode
+    owner_user_id: str
+    allowlist: frozenset[str] = frozenset()
+    updated_at: datetime = field(default_factory=utcnow)
+    updated_by: str = ""
+
+
+class HarnessState(StrEnum):
+    """Transport state of one turn. The domain state stays on executions.status."""
+
+    STARTING = "STARTING"
+    STREAMING = "STREAMING"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    CANCEL_REQUESTED = "CANCEL_REQUESTED"
+    SETTLED = "SETTLED"
+
+
+class RunSettlement(StrEnum):
+    END_TURN = "END_TURN"
+    CANCELLED = "CANCELLED"
+    MAX_TOKENS = "MAX_TOKENS"
+    FAILED = "FAILED"
+    ORPHANED = "ORPHANED"
+    AUTHORITY_REVOKED = "AUTHORITY_REVOKED"
+    AGENT_REMOVED = "AGENT_REMOVED"
+    APPROVAL_REFUSED = "APPROVAL_REFUSED"
+    # A run picked up max_attempts times that died every time. Parking it is what
+    # keeps a stuck run from being swept forever without ever being describable.
+    PARKED = "PARKED"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRun:
+    """The identity-and-authority envelope around one executions row."""
+
+    run_id: str
+    execution_id: str
+    agent_id: str
+    identity_id: str
+    room_id: str
+    authorized_by: str
+    acting_user_id: str
+    harness_id: str
+    credential_hash: str
+    lease_expires_at: datetime
+    harness_state: HarnessState = HarnessState.STARTING
+    settlement: RunSettlement | None = None
+    resumed_from_run_id: str | None = None
+    challenge_verified_at: datetime | None = None
+    attempts: int = 1
+    max_attempts: int = 3
+    created_at: datetime = field(default_factory=utcnow)
+    settled_at: datetime | None = None
 
 
 # ── Branch ───────────────────────────────────────────────────────────────────
@@ -845,6 +946,7 @@ class Approval:
     execution_id: str
     agent_id: str
     action_description: str
+    authorized_by: str = ""
     status: ApprovalStatus = ApprovalStatus.PENDING
     reviewer_id: str | None = None
     review_comment: str = ""

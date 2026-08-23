@@ -72,6 +72,45 @@ class CapabilityTerms:
 
 
 @dataclass(frozen=True, slots=True)
+class RunAuthorization:
+    """What a tool writer re-derives its terms from, inside its own transaction.
+
+    Identity and addressing are gates that already refused earlier; this carries only
+    the authority a write still has to be checked against. A human caller passes
+    ``None`` instead and is guarded by the room membership check beside it.
+    """
+
+    run_id: str
+    agent_id: str
+    room_id: str
+    authorized_by: str
+    acting_user_id: str
+    required_capability: str
+
+
+def may_address(
+    mode: str,
+    owner_user_id: str,
+    allowlist: frozenset[str],
+    user_id: str,
+) -> bool:
+    """Whether this human may point this agent. Deny by default.
+
+    Addressing gates who may point an agent, not what it does: a wider mode never
+    adds a capability, and NOBODY parks the agent with its history still readable.
+    """
+    if not user_id:
+        return False
+    if mode == "ANYONE":
+        return True
+    if mode == "OWNER_ONLY":
+        return user_id == owner_user_id
+    if mode == "ALLOWLIST":
+        return user_id == owner_user_id or user_id in allowlist
+    return False
+
+
+@dataclass(frozen=True, slots=True)
 class ToolSpec:
     name: str
     required_capability: str

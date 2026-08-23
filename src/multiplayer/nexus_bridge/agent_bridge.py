@@ -117,6 +117,11 @@ class NexusAgentBridge:
         self._fallback_states: dict[str, str] = {}
         self._specialist_contexts: dict[str, _SpecialistContext] = {}
 
+    @property
+    def model_provider(self) -> Any:
+        """The configured provider, for a harness that talks to it directly."""
+        return self._model
+
     def create_nexus_agent(self, agent_instance: AgentInstance) -> Agent:
         """Convert a multiplayer AgentInstance to a NEXUS Agent."""
         if not _HAS_NEXUS:

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import sys
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket
@@ -23,6 +24,10 @@ from .security import AuthorizationError, TokenAuthenticator
 from .services.service import MultiplayerService
 
 log = logging.getLogger(__name__)
+
+# How often the run-lease sweep runs while the process is up. Long enough that it is
+# not a poll loop, short enough that a dead harness is described the same shift.
+RUN_LEASE_SWEEP_SECONDS = 60.0
 
 
 def create_app(
@@ -44,13 +49,28 @@ def create_app(
     authenticator = TokenAuthenticator(auth_tokens)
     svc = MultiplayerService(db, hub, known_users=frozenset(auth_tokens.values()))
 
+    async def sweep_run_leases() -> None:
+        """A run is settled, holds a live lease, or is swept. Startup is not enough:
+        a process that stays up long enough to outlive its own leases has to sweep
+        them, or a run whose harness died mid-shift waits for the next restart."""
+        while True:
+            await asyncio.sleep(RUN_LEASE_SWEEP_SECONDS)
+            try:
+                await svc.sweep_expired_run_leases()
+            except Exception:
+                log.exception("Run lease sweep failed")
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await db.connect()
         await svc.initialize()
         set_service(svc)
         set_authenticator(authenticator)
+        sweeper = asyncio.create_task(sweep_run_leases())
         yield
+        sweeper.cancel()
+        with suppress(asyncio.CancelledError):
+            await sweeper
         set_authenticator(None)
         set_service(None)
         await db.close()

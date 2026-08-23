@@ -10,6 +10,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from ..domain.models import (
+    AddressingMode,
+    AgentAddressing,
     AgentInstance,
     Approval,
     Artifact,
@@ -326,6 +328,19 @@ class InterruptAgentRequest(BaseModel):
 
 class ApproveActionRequest(BaseModel):
     comment: str = ""
+
+
+class RejectActionRequest(BaseModel):
+    comment: str = ""
+    # A refused tool may still leave a useful turn. Either way the run does not stay
+    # where it was: false settles it, true puts it back on a fresh lease.
+    continue_turn: bool = False
+
+
+class SetAddressingRequest(BaseModel):
+    mode: str
+    owner_user_id: str | None = None
+    allowlist: list[str] = []
 
 
 class SelectOutputRequest(BaseModel):
@@ -863,6 +878,18 @@ async def list_agent_templates(
     ]
 
 
+def _addressing_record(addressing: AgentAddressing) -> dict[str, Any]:
+    return {
+        "agent_id": addressing.agent_id,
+        "room_id": addressing.room_id,
+        "mode": addressing.mode.value,
+        "owner_user_id": addressing.owner_user_id,
+        "allowlist": sorted(addressing.allowlist),
+        "updated_by": addressing.updated_by,
+        "updated_at": addressing.updated_at.isoformat(),
+    }
+
+
 @router.post("/rooms/{room_id}/agents")
 async def spawn_agent(
     room_id: str,
@@ -890,6 +917,83 @@ async def spawn_agent(
         "role": agent.role,
         "status": agent.status.value,
     }
+
+
+@router.get("/rooms/{room_id}/agents/{agent_id}/addressing")
+async def get_agent_addressing(
+    room_id: str,
+    agent_id: str,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.READ)
+    try:
+        addressing = await svc.get_agent_addressing(agent_id)
+    except DomainError as e:
+        raise HTTPException(404, str(e)) from e
+    if addressing.room_id != room_id:
+        raise HTTPException(404, "agent not found in room")
+    return _addressing_record(addressing)
+
+
+@router.patch("/rooms/{room_id}/agents/{agent_id}/addressing")
+async def set_agent_addressing(
+    room_id: str,
+    agent_id: str,
+    req: SetAddressingRequest,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    """Who may point this agent. A grant, so it needs room ADMINISTER."""
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.ADMINISTER)
+    try:
+        mode = AddressingMode(req.mode)
+    except ValueError as e:
+        raise HTTPException(400, f"unknown addressing mode: {req.mode}") from e
+    try:
+        addressing = await svc.set_agent_addressing(
+            agent_id,
+            mode,
+            principal.user_id,
+            owner_user_id=req.owner_user_id,
+            allowlist=frozenset(req.allowlist),
+            require_member=True,
+        )
+    except DomainError as e:
+        raise HTTPException(400, str(e)) from e
+    return _addressing_record(addressing)
+
+
+@router.post("/rooms/{room_id}/agents/{agent_id}/identity/revocations")
+async def revoke_agent_identity(
+    room_id: str,
+    agent_id: str,
+    principal: CurrentUser,
+) -> dict[str, str]:
+    """Revoke once, not per run: no later run of this agent may launch."""
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.ADMINISTER)
+    try:
+        await svc.revoke_agent_identity(agent_id, principal.user_id, require_member=True)
+    except DomainError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"status": "revoked"}
+
+
+@router.delete("/rooms/{room_id}/agents/{agent_id}")
+async def remove_agent_from_room(
+    room_id: str,
+    agent_id: str,
+    principal: CurrentUser,
+) -> dict[str, str]:
+    """Take the agent out and settle everything it had in flight, deterministically."""
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.ADMINISTER)
+    try:
+        await svc.remove_agent_from_room(agent_id, room_id, principal.user_id, require_member=True)
+    except DomainError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"status": "removed"}
 
 
 @router.get("/rooms/{room_id}/agents")
@@ -1988,13 +2092,19 @@ async def approve_action(
 @router.post("/approvals/{approval_id}/reject")
 async def reject_action(
     approval_id: str,
-    req: ApproveActionRequest,
+    req: RejectActionRequest,
     principal: CurrentUser,
 ) -> dict[str, str]:
     svc = _svc_or_404()
     await _authorized_approval(approval_id, principal, RoomCapability.ADMINISTER)
     try:
-        await svc.reject_action(approval_id, principal.user_id, req.comment, require_member=True)
+        await svc.reject_action(
+            approval_id,
+            principal.user_id,
+            req.comment,
+            require_member=True,
+            continue_turn=req.continue_turn,
+        )
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"status": "rejected"}
