@@ -311,7 +311,7 @@ async def test_ontology_failure_rolls_back_artifact_provenance_and_events() -> N
         ):
             agent = await service.spawn_agent(room.room_id, template.template_id)
             session = await service.start_agent_session(room.room_id, agent.agent_id)
-            execution = await service.start_execution(session.session_id)
+            execution = await service.start_execution(session.session_id, "owner")
             result = await service.execute_agent_step(execution.execution_id, prompt)
             output_ids.append(str(result["output_id"]))
         for output_id, disposition in zip(

@@ -129,6 +129,25 @@ class Repos:
         self.ontology = OntologyRepo(db)
 
 
+def _require_execution_transition(
+    cursor: Any,
+    execution_id: str,
+    expected: ExecutionStatus,
+    target: ExecutionStatus,
+) -> None:
+    """Every execution status write is conditional on the status the caller read.
+
+    A write that no longer matches touches zero rows, which means another process
+    moved the run on. Raising here surfaces that instead of letting the later
+    writer silently win, and rolls back anything written beside it.
+    """
+    if cursor.rowcount != 1:
+        raise DomainError(
+            f"execution {execution_id} is no longer {expected.value}: "
+            f"the transition to {target.value} was not applied"
+        )
+
+
 async def _finish_managed_branch_if_terminal(
     db: Database,
     branch_id: str,
@@ -1020,13 +1039,14 @@ class ExecutionRepo:
             )
             execution = replace(execution, branch_id=branch.branch_id)
         await self.db.execute(
-            "INSERT INTO executions(execution_id, session_id, agent_id, branch_id, run_id, "
-            "triggered_by, status, input_data, output_data, error, started_at, "
-            "completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO executions(execution_id, session_id, agent_id, authorized_by, "
+            "branch_id, run_id, triggered_by, status, input_data, output_data, error, "
+            "started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 execution.execution_id,
                 execution.session_id,
                 execution.agent_id,
+                execution.authorized_by,
                 execution.branch_id,
                 execution.run_id,
                 execution.triggered_by.value,
@@ -1066,13 +1086,14 @@ class ExecutionRepo:
                 (SessionStatus.ACTIVE.value, execution.session_id),
             )
             await self.db.execute(
-                "INSERT INTO executions(execution_id, session_id, agent_id, branch_id, run_id, "
-                "triggered_by, status, input_data, output_data, error, started_at, "
-                "completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO executions(execution_id, session_id, agent_id, authorized_by, "
+                "branch_id, run_id, triggered_by, status, input_data, output_data, error, "
+                "started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     execution.execution_id,
                     execution.session_id,
                     execution.agent_id,
+                    execution.authorized_by,
                     execution.branch_id,
                     execution.run_id,
                     execution.triggered_by.value,
@@ -1120,6 +1141,7 @@ class ExecutionRepo:
         self,
         execution_id: str,
         status: ExecutionStatus,
+        expected: ExecutionStatus,
         output_data: dict[str, Any] | None = None,
         error: str = "",
     ) -> None:
@@ -1131,18 +1153,32 @@ class ExecutionRepo:
         if status in (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED):
             updates["completed_at"] = utcnow().isoformat()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
-        await self.db.execute(
-            f"UPDATE executions SET {set_clause} WHERE execution_id = ?",
-            (*updates.values(), execution_id),
+        cursor = await self.db.execute(
+            f"UPDATE executions SET {set_clause} WHERE execution_id = ? AND status = ?",
+            (*updates.values(), execution_id, expected.value),
         )
+        _require_execution_transition(cursor, execution_id, expected, status)
         await self.db.commit()
 
-    async def mark_running(self, execution_id: str, run_id: str) -> None:
-        await self.db.execute(
-            "UPDATE executions SET status = ?, run_id = ? WHERE execution_id = ?",
-            (ExecutionStatus.RUNNING.value, run_id, execution_id),
+    async def mark_running(self, execution_id: str, run_id: str, expected: ExecutionStatus) -> None:
+        cursor = await self.db.execute(
+            "UPDATE executions SET status = ?, run_id = ? WHERE execution_id = ? AND status = ?",
+            (ExecutionStatus.RUNNING.value, run_id, execution_id, expected.value),
+        )
+        _require_execution_transition(cursor, execution_id, expected, ExecutionStatus.RUNNING)
+        await self.db.commit()
+
+    async def claim_for_dispatch(self, execution_id: str, claim: str) -> bool:
+        """Take responsibility for dispatching one PENDING run, or report that
+        somebody else already has. An unclaimed run is the only kind the startup
+        sweep may settle, so this is what separates an orphan from live work."""
+        cursor = await self.db.execute(
+            "UPDATE executions SET dispatch_claim = ? "
+            "WHERE execution_id = ? AND status = ? AND dispatch_claim IS NULL",
+            (claim, execution_id, ExecutionStatus.PENDING.value),
         )
         await self.db.commit()
+        return cursor.rowcount == 1
 
     async def terminalize_without_output(
         self,
@@ -1171,10 +1207,12 @@ class ExecutionRepo:
             raise RuntimeError("terminalize_without_output_in_transaction requires ownership")
         persisted_events: list[RoomEvent] = []
         completed_at = serialize_datetime(utcnow())
-        await self.db.execute(
-            "UPDATE executions SET status = ?, error = ?, completed_at = ? WHERE execution_id = ?",
-            (status.value, error, completed_at, execution.execution_id),
+        cursor = await self.db.execute(
+            "UPDATE executions SET status = ?, error = ?, completed_at = ? "
+            "WHERE execution_id = ? AND status = ?",
+            (status.value, error, completed_at, execution.execution_id, execution.status.value),
         )
+        _require_execution_transition(cursor, execution.execution_id, execution.status, status)
         await self.db.execute(
             "UPDATE sessions SET status = ?, ended_at = ? WHERE session_id = ?",
             (SessionStatus.FAILED.value, completed_at, execution.session_id),
@@ -1206,10 +1244,13 @@ class ExecutionRepo:
         )
         return [self._from_row(r) for r in rows]
 
-    async def list_pending_by_trigger(self, trigger: AgentTrigger) -> list[Execution]:
-        """Runs still waiting to start, for a startup sweep that settles orphans."""
+    async def list_unclaimed_pending_by_trigger(self, trigger: AgentTrigger) -> list[Execution]:
+        """Runs waiting to start that no dispatcher ever claimed, for the startup
+        sweep. A claimed run belongs to a dispatcher that is running it; the sweep
+        cannot tell that dispatcher's health from here, so it leaves it alone."""
         rows = await self.db.fetch_all(
-            "SELECT * FROM executions WHERE status = ? AND triggered_by = ? ORDER BY started_at",
+            "SELECT * FROM executions WHERE status = ? AND triggered_by = ? "
+            "AND dispatch_claim IS NULL ORDER BY started_at",
             (ExecutionStatus.PENDING.value, trigger.value),
         )
         return [self._from_row(r) for r in rows]
@@ -1234,6 +1275,7 @@ class ExecutionRepo:
             execution_id=row["execution_id"],
             session_id=row["session_id"],
             agent_id=row["agent_id"],
+            authorized_by=row.get("authorized_by") or "",
             branch_id=row.get("branch_id") or "",
             run_id=row.get("run_id"),
             triggered_by=AgentTrigger(row["triggered_by"]),
@@ -1292,6 +1334,7 @@ class AgentOutputRepo:
         self,
         output: AgentOutput,
         events: list[RoomEvent],
+        expected: ExecutionStatus,
         message: Message | None = None,
         message_event: RoomEvent | None = None,
     ) -> list[RoomEvent]:
@@ -1329,15 +1372,21 @@ class AgentOutputRepo:
                 ),
             )
             completed_at = serialize_datetime(utcnow())
-            await self.db.execute(
+            cursor = await self.db.execute(
                 "UPDATE executions SET status = ?, output_data = ?, completed_at = ? "
-                "WHERE execution_id = ?",
+                "WHERE execution_id = ? AND status = ?",
                 (
                     ExecutionStatus.COMPLETED.value,
                     json.dumps(output.output_data, sort_keys=True, default=str),
                     completed_at,
                     output.execution_id,
+                    expected.value,
                 ),
+            )
+            # A run somebody else already settled must not complete, and must not
+            # speak: raising here rolls back the output, the events and the message.
+            _require_execution_transition(
+                cursor, output.execution_id, expected, ExecutionStatus.COMPLETED
             )
             await self.db.execute(
                 "UPDATE sessions SET status = ?, ended_at = ? WHERE session_id = ?",

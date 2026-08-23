@@ -38,7 +38,7 @@ async def _pending_execution(service: MultiplayerService):
     template = (await service.list_agent_templates())[0]
     agent = await service.spawn_agent(room.room_id, template.template_id)
     session = await service.start_agent_session(room.room_id, agent.agent_id)
-    execution = await service.start_execution(session.session_id)
+    execution = await service.start_execution(session.session_id, "u1")
     return room, agent, session, execution
 
 
@@ -309,7 +309,9 @@ async def test_output_state_and_events_roll_back_as_one_unit(service):
     )
 
     with pytest.raises(sqlite3.IntegrityError):
-        await service.repos.agent_outputs.complete_execution(output, [duplicate, duplicate])
+        await service.repos.agent_outputs.complete_execution(
+            output, [duplicate, duplicate], execution.status
+        )
 
     assert await service.repos.agent_outputs.get(output.output_id) is None
     persisted_execution = await service.repos.executions.get(execution.execution_id)
@@ -333,6 +335,7 @@ async def test_run_start_state_and_event_roll_back_as_one_unit(service):
         execution_id="exec_atomic_start",
         session_id=session.session_id,
         agent_id=agent.agent_id,
+        authorized_by="u1",
     )
     existing_event = (await service.get_room_events(room.room_id))[0]
     colliding_event = RoomEvent(

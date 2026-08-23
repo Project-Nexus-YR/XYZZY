@@ -273,6 +273,9 @@ class Execution:
     execution_id: str
     session_id: str
     agent_id: str
+    # The human whose authority this run carries. Capability terms are derived
+    # from this principal at execution time, never from the agent or the branch.
+    authorized_by: str = ""
     branch_id: str = ""
     run_id: str | None = None
     triggered_by: AgentTrigger = AgentTrigger.DIRECT

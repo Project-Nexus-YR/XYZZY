@@ -232,6 +232,9 @@ class MultiplayerService:
         # or a user row that bootstrapping already created.
         self.known_users = known_users or frozenset()
         self._running_executions: dict[str, asyncio.Task[None]] = {}
+        # Identifies this dispatcher's claims on runs, so another process can tell
+        # a run somebody is dispatching from one nobody ever picked up.
+        self._dispatch_claim = new_id("dispatch")
 
     async def initialize(self) -> None:
         migrations_dir = Path(__file__).parent.parent / "migrations"
@@ -254,16 +257,22 @@ class MultiplayerService:
         await self._settle_orphaned_mention_runs()
 
     async def _settle_orphaned_mention_runs(self) -> None:
-        """Settle mention runs whose dispatcher died before it could start them.
+        """Settle mention runs whose dispatcher died before it could claim them.
 
-        A mention run is committed PENDING and dispatched immediately afterwards by
-        the same process. A process that dies in between leaves a run nothing will
-        ever pick up, so startup settles it as FAILED with an event that says why,
-        rather than leaving a PENDING row the system cannot describe. Restarting the
-        turn here instead would replay a question the room has probably moved past;
-        the author can address the agent again.
+        A mention run is committed PENDING and claimed by its dispatcher immediately
+        after that commit. A process that dies in between leaves a run nothing will
+        ever pick up, and only that run is an orphan: a claimed run belongs to a
+        dispatcher that is working on it, and settling it here would destroy healthy
+        work another process is doing. The sweep therefore reads only unclaimed runs
+        and writes conditionally, so it loses every race it enters rather than
+        winning one it should not. Restarting the turn instead would replay a
+        question the room has probably moved past; the author can address the agent
+        again.
         """
-        for orphan in await self.repos.executions.list_pending_by_trigger(AgentTrigger.MENTION):
+        orphans = await self.repos.executions.list_unclaimed_pending_by_trigger(
+            AgentTrigger.MENTION
+        )
+        for orphan in orphans:
             await self._settle_undispatched_run(
                 orphan.execution_id, "dispatcher stopped before the run started"
             )
@@ -1019,6 +1028,7 @@ class MultiplayerService:
                     execution_id=new_id("exec"),
                     session_id=session.session_id,
                     agent_id=agent.agent_id,
+                    authorized_by=initiated_by,
                     branch_id=branch.branch_id,
                     status=ExecutionStatus.PENDING,
                     input_data={
@@ -1146,7 +1156,7 @@ class MultiplayerService:
         return session
 
     async def start_execution(
-        self, session_id: str, input_data: dict[str, Any] | None = None
+        self, session_id: str, authorized_by: str, input_data: dict[str, Any] | None = None
     ) -> Execution:
         session = await self.repos.sessions.get(session_id)
         if not session:
@@ -1158,6 +1168,7 @@ class MultiplayerService:
             execution_id=new_id("exec"),
             session_id=session_id,
             agent_id=session.agent_id,
+            authorized_by=authorized_by,
             input_data=input_data or {},
         )
         event = await self.repos.executions.start_with_event(
@@ -1180,13 +1191,29 @@ class MultiplayerService:
         persisted = await self.repos.executions.get(execution.execution_id)
         return persisted or execution
 
-    async def _capability_terms(
-        self, agent: AgentInstance, room_id: str, initiated_by: str
-    ) -> CapabilityTerms:
-        """The five durable terms of PRD §13, read from records alone."""
-        member = await self.repos.room_members.get(room_id, initiated_by)
+    async def _user_term(self, room_id: str, user_id: str) -> frozenset[str]:
+        """What one human may lend an agent here, from durable membership alone."""
+        member = await self.repos.room_members.get(room_id, user_id)
         granted = _policy_list(member.allowed_capabilities if member else None)
-        user = user_capabilities(member.role if member else None) & policy_capabilities(granted)
+        return user_capabilities(member.role if member else None) & policy_capabilities(granted)
+
+    async def _capability_terms(
+        self,
+        agent: AgentInstance,
+        room_id: str,
+        authorized_by: str,
+        acting_as: str = "",
+    ) -> CapabilityTerms:
+        """The five durable terms of PRD §13, read from records alone.
+
+        The user term is the authorizing principal's grant. A different caller
+        acting on that principal's run gets the intersection of the two: nobody
+        obtains through somebody else's run more than they hold themselves, and
+        the authorizing principal's grant is a ceiling rather than a substitute.
+        """
+        user = await self._user_term(room_id, authorized_by)
+        if acting_as and acting_as != authorized_by:
+            user &= await self._user_term(room_id, acting_as)
         template = await self.repos.agents.get_template(agent.template_id)
         room = await self.repos.rooms.get(room_id)
         workspace = await self.repos.workspaces.get(room.workspace_id) if room is not None else None
@@ -1218,6 +1245,32 @@ class MultiplayerService:
         """Terms as they would apply to a run this member initiated."""
         agent = await self.get_agent(agent_id)
         return await self._capability_terms(agent, agent.room_id, requested_by)
+
+    async def _require_delegated_authority(
+        self, execution: Execution, acting_as: str
+    ) -> CapabilityTerms | None:
+        """Guard every verb that advances or influences somebody else's run.
+
+        Room MUTATE says the caller may act in this channel; it does not say what
+        this run may do on their behalf. The effective set is re-derived here from
+        durable records, and a caller narrower than the authorizing principal gets
+        the intersection: refused when it is empty, and bounded by it when it is
+        not. Returns the narrowed terms, or None when no delegation applies.
+        """
+        if not acting_as or acting_as == execution.authorized_by:
+            return None
+        session = await self.repos.sessions.get(execution.session_id)
+        if session is None:
+            raise DomainError("session not found")
+        agent = await self.get_agent(execution.agent_id)
+        terms = await self._capability_terms(
+            agent, session.room_id, execution.authorized_by, acting_as
+        )
+        if not terms.effective:
+            raise AuthorizationError(
+                f"{acting_as} may not act on run {execution.execution_id}: no effective capability"
+            )
+        return terms
 
     async def _handle_tool_request(
         self,
@@ -1279,16 +1332,13 @@ class MultiplayerService:
         return self._tool_response(await self._execute_tool_request(request))
 
     async def _current_tool_decision(
-        self, request: ToolRequest
+        self, request: ToolRequest, acting_as: str = ""
     ) -> tuple[GatewayDecision, frozenset[str]]:
         """Decide a stored request again from the records as they stand right now."""
         agent = await self.get_agent(request.agent_id)
         execution = await self.repos.executions.get(request.execution_id)
-        initiated_by = ""
-        if execution is not None:
-            branch = await self.get_branch(execution.branch_id)
-            initiated_by = branch.initiated_by
-        terms = await self._capability_terms(agent, request.room_id, initiated_by)
+        authorized_by = execution.authorized_by if execution is not None else ""
+        terms = await self._capability_terms(agent, request.room_id, authorized_by, acting_as)
         effective = terms.effective
         return decide(request.tool, effective), effective
 
@@ -1373,7 +1423,9 @@ class MultiplayerService:
             },
         }
 
-    async def execute_agent_step(self, execution_id: str, prompt: str) -> dict[str, Any]:
+    async def execute_agent_step(
+        self, execution_id: str, prompt: str, acting_as: str = ""
+    ) -> dict[str, Any]:
         prompt = self._validate_non_empty(prompt, "agent prompt")
         execution = await self.repos.executions.get(execution_id)
         if not execution:
@@ -1393,6 +1445,25 @@ class MultiplayerService:
                 f"execution {execution_id} is terminal (current: {execution.status.value})"
             )
 
+        # The authority the run carries, re-derived from durable records now rather
+        # than trusted from the request that opened it. A principal whose grant was
+        # withdrawn between that write and this dispatch can no longer make the
+        # agent speak, so the run is settled instead of run.
+        terms = await self._capability_terms(agent, session.room_id, execution.authorized_by)
+        if not terms.effective:
+            await self._settle_undispatched_run(
+                execution_id,
+                f"{execution.authorized_by or 'an unknown principal'} may no longer "
+                f"invoke agent {execution.agent_id}: no effective capability",
+            )
+            raise AuthorizationError(
+                f"run {execution_id} is no longer authorized by {execution.authorized_by}"
+            )
+        # A caller who is not that principal is bounded by their own grant too.
+        delegated = await self._require_delegated_authority(execution, acting_as)
+        if delegated is not None:
+            terms = delegated
+
         source_prompt = prompt
         provider_prompt = prompt
         if branch.lifecycle_managed:
@@ -1406,10 +1477,11 @@ class MultiplayerService:
             run_id = f"run_{execution.execution_id}"
             # replace(), not a rebuild: a rebuild silently reset triggered_by to
             # DIRECT, losing why the run was opened at the moment it starts.
+            await self.repos.executions.mark_running(
+                execution.execution_id, run_id, execution.status
+            )
             execution = replace(execution, run_id=run_id, status=ExecutionStatus.RUNNING)
-            await self.repos.executions.mark_running(execution.execution_id, run_id)
 
-        terms = await self._capability_terms(agent, session.room_id, branch.initiated_by)
         effective = terms.effective
         result = await self.nexus.execute_step(
             execution_id, provider_prompt, self._step_schema(effective)
@@ -1503,6 +1575,7 @@ class MultiplayerService:
                         actor_type="agent",
                     ),
                 ],
+                execution.status,
                 agent_message,
                 agent_message_event,
             )
@@ -1512,17 +1585,20 @@ class MultiplayerService:
             result["output_id"] = output.output_id
         return result
 
-    async def execute_branch_run(self, branch_id: str, execution_id: str) -> dict[str, Any]:
+    async def execute_branch_run(
+        self, branch_id: str, execution_id: str, acting_as: str = ""
+    ) -> dict[str, Any]:
         branch = await self.get_branch(branch_id)
         execution = await self.repos.executions.get(execution_id)
         if execution is None or execution.branch_id != branch.branch_id:
             raise DomainError("agent run not found in branch")
-        return await self.execute_agent_step(execution_id, branch.initiating_prompt)
+        return await self.execute_agent_step(execution_id, branch.initiating_prompt, acting_as)
 
-    async def pause_execution(self, execution_id: str) -> bool:
+    async def pause_execution(self, execution_id: str, acting_as: str = "") -> bool:
         execution = await self.repos.executions.get(execution_id)
         if execution is None:
             raise DomainError("execution not found")
+        await self._require_delegated_authority(execution, acting_as)
         branch = await self.get_branch(execution.branch_id)
         if not branch.lifecycle_managed:
             return await self.nexus.pause_execution(execution_id)
@@ -1532,13 +1608,16 @@ class MultiplayerService:
         ok = await self.nexus.pause_execution(execution_id)
         if not ok:
             return False
-        await self.repos.executions.update_status(execution_id, ExecutionStatus.PAUSED)
+        await self.repos.executions.update_status(
+            execution_id, ExecutionStatus.PAUSED, execution.status
+        )
         return True
 
-    async def resume_execution(self, execution_id: str) -> bool:
+    async def resume_execution(self, execution_id: str, acting_as: str = "") -> bool:
         execution = await self.repos.executions.get(execution_id)
         if execution is None:
             raise DomainError("execution not found")
+        await self._require_delegated_authority(execution, acting_as)
         branch = await self.get_branch(execution.branch_id)
         if not branch.lifecycle_managed:
             return await self.nexus.resume_execution(execution_id)
@@ -1548,7 +1627,9 @@ class MultiplayerService:
         ok = await self.nexus.resume_execution(execution_id)
         if not ok:
             return False
-        await self.repos.executions.update_status(execution_id, ExecutionStatus.RUNNING)
+        await self.repos.executions.update_status(
+            execution_id, ExecutionStatus.RUNNING, execution.status
+        )
         return True
 
     async def cancel_execution(
@@ -1557,6 +1638,8 @@ class MultiplayerService:
         execution = await self.repos.executions.get(execution_id)
         if execution is None:
             raise DomainError("execution not found")
+        if require_member:
+            await self._require_delegated_authority(execution, cancelled_by)
         branch = await self.get_branch(execution.branch_id)
         if not branch.lifecycle_managed:
             return await self.nexus.cancel_execution(execution_id)
@@ -1608,6 +1691,8 @@ class MultiplayerService:
         if execution is None:
             raise DomainError("execution not found")
         agent = await self.get_agent(execution.agent_id)
+        if require_member:
+            await self._require_delegated_authority(execution, user_id)
         async with self.db.transaction():
             if require_member:
                 await self._require_mutate_in_transaction(agent.room_id, user_id)
@@ -2730,6 +2815,7 @@ class MultiplayerService:
             execution_id=new_id("exec"),
             session_id=session.session_id,
             agent_id=agent_id,
+            authorized_by=requested_by,
             triggered_by=AgentTrigger.MENTION,
             input_data={"mention_message_id": message_id, "requested_by": requested_by},
         )
@@ -2766,26 +2852,33 @@ class MultiplayerService:
         session = await self.repos.sessions.get(execution.session_id)
         if session is None:
             return
-        events = await self.repos.executions.terminalize_without_output(
-            execution,
-            ExecutionStatus.FAILED,
-            error,
-            [
-                RoomEvent(
-                    room_id=session.room_id,
-                    sequence=0,
-                    event_type=EventType.EXECUTION_FAILED,
-                    payload={
-                        "execution_id": execution.execution_id,
-                        "agent_id": execution.agent_id,
-                        "triggered_by": execution.triggered_by.value,
-                        "error": error,
-                    },
-                    actor_id=execution.agent_id,
-                    actor_type="agent",
-                )
-            ],
-        )
+        try:
+            events = await self.repos.executions.terminalize_without_output(
+                execution,
+                ExecutionStatus.FAILED,
+                error,
+                [
+                    RoomEvent(
+                        room_id=session.room_id,
+                        sequence=0,
+                        event_type=EventType.EXECUTION_FAILED,
+                        payload={
+                            "execution_id": execution.execution_id,
+                            "agent_id": execution.agent_id,
+                            "triggered_by": execution.triggered_by.value,
+                            "error": error,
+                        },
+                        actor_id=execution.agent_id,
+                        actor_type="agent",
+                    )
+                ],
+            )
+        except DomainError:
+            # The run moved on between the read above and this write. Settling a run
+            # somebody else is advancing is exactly the damage this guard exists to
+            # prevent, so this pass loses the race and writes nothing.
+            log.info("Run %s advanced while being settled; leaving it alone", execution_id)
+            return
         await self._broadcast_persisted_events(events)
         await self._set_agent_status_safe(execution.agent_id, AgentStatus.FAILED)
 
@@ -2798,7 +2891,15 @@ class MultiplayerService:
         as FAILED with an event saying why. The one gap a running process cannot
         close is a crash between the commit and this call, and
         :meth:`_settle_orphaned_mention_runs` closes that at the next startup.
+
+        Claiming the run first is what makes that sweep safe: from here on the run
+        is visibly somebody's work, so no other process mistakes it for an orphan.
+        A claim that does not take means another dispatcher already has it, or the
+        run is no longer pending, and either way this process must not run it.
         """
+        if not await self.repos.executions.claim_for_dispatch(execution_id, self._dispatch_claim):
+            log.info("Mention-invoked run %s was already claimed; not dispatching", execution_id)
+            return
         try:
             await self.execute_agent_step(execution_id, prompt)
         except Exception as exc:
@@ -3415,7 +3516,9 @@ class MultiplayerService:
         await self._broadcast_persisted_events([event])
         pending = await self.repos.tool_requests.get_by_approval(approval_id)
         if pending is not None and pending.status == "PENDING_APPROVAL":
-            decision, effective = await self._current_tool_decision(pending)
+            # The reviewer grants from their own capabilities, never above them:
+            # an approval is not a way to lend what the reviewer does not hold.
+            decision, effective = await self._current_tool_decision(pending, reviewer_id)
             stamped = json.dumps(sorted(effective))
             await self.repos.tool_requests.set_effective(pending.request_id, stamped)
             pending = replace(pending, effective_json=stamped)
@@ -3504,10 +3607,20 @@ class MultiplayerService:
 
     # ── Human Intervention ───────────────────────────────────────────────────
 
+    async def _require_agent_run_authority(self, agent_id: str, acting_as: str) -> None:
+        """The agent-scoped doors reach whatever run the agent is serving, so the
+        run's own authorization bounds them exactly as the run-scoped doors."""
+        execution_id = await self.nexus.get_execution_for_agent(agent_id)
+        execution = await self.repos.executions.get(execution_id) if execution_id else None
+        if execution is not None:
+            await self._require_delegated_authority(execution, acting_as)
+
     async def interrupt_agent(
         self, agent_id: str, user_id: str, reason: str = "", *, require_member: bool = False
     ) -> None:
         agent = await self.get_agent(agent_id)
+        if require_member:
+            await self._require_agent_run_authority(agent_id, user_id)
         async with self.db.transaction():
             if require_member:
                 await self._require_mutate_in_transaction(agent.room_id, user_id)
@@ -3531,6 +3644,8 @@ class MultiplayerService:
         self, agent_id: str, user_id: str, instruction: str, *, require_member: bool = False
     ) -> None:
         agent = await self.get_agent(agent_id)
+        if require_member:
+            await self._require_agent_run_authority(agent_id, user_id)
         async with self.db.transaction():
             if require_member:
                 await self._require_mutate_in_transaction(agent.room_id, user_id)

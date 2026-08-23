@@ -57,7 +57,7 @@ async def test_full_workflow(service):
     assert session.status.value == "CREATED"
 
     # Start execution
-    execution = await service.start_execution(session.session_id)
+    execution = await service.start_execution(session.session_id, "u1")
     assert execution.status.value == "PENDING"
 
     # Execute a step

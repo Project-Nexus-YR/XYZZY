@@ -814,7 +814,7 @@ async def execute_branch_run(
     if execution.branch_id != branch_id:
         raise HTTPException(404, "agent run not found in branch")
     try:
-        return await _svc_or_404().execute_branch_run(branch_id, execution_id)
+        return await _svc_or_404().execute_branch_run(branch_id, execution_id, principal.user_id)
     except DomainError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -1257,7 +1257,7 @@ async def start_execution(
     svc = _svc_or_404()
     await _authorized_session(session_id, principal, RoomCapability.MUTATE)
     try:
-        execution = await svc.start_execution(session_id)
+        execution = await svc.start_execution(session_id, principal.user_id)
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {
@@ -1276,7 +1276,7 @@ async def execute_step(
     svc = _svc_or_404()
     await _authorized_execution(execution_id, principal, RoomCapability.MUTATE)
     try:
-        result = await svc.execute_agent_step(execution_id, req.prompt)
+        result = await svc.execute_agent_step(execution_id, req.prompt, principal.user_id)
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return result
@@ -1290,7 +1290,7 @@ async def pause_execution(
     svc = _svc_or_404()
     await _authorized_execution(execution_id, principal, RoomCapability.MUTATE)
     try:
-        ok = await svc.pause_execution(execution_id)
+        ok = await svc.pause_execution(execution_id, principal.user_id)
     except DomainError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"status": "paused" if ok else "failed"}
@@ -1304,7 +1304,7 @@ async def resume_execution(
     svc = _svc_or_404()
     await _authorized_execution(execution_id, principal, RoomCapability.MUTATE)
     try:
-        ok = await svc.resume_execution(execution_id)
+        ok = await svc.resume_execution(execution_id, principal.user_id)
     except DomainError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"status": "resumed" if ok else "failed"}

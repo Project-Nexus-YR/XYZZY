@@ -224,7 +224,7 @@ async def test_provider_failure_persists_failed_execution_without_publishing_out
         template = (await service.list_agent_templates())[0]
         agent = await service.spawn_agent(room.room_id, template.template_id)
         session = await service.start_agent_session(room.room_id, agent.agent_id)
-        execution = await service.start_execution(session.session_id)
+        execution = await service.start_execution(session.session_id, "user_1")
 
         result = await service.execute_agent_step(execution.execution_id, "Decide safely")
 

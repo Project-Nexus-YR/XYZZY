@@ -221,7 +221,7 @@ async def test_a_direct_run_records_a_direct_trigger(service: MultiplayerService
     template = (await service.list_agent_templates())[0]
     agent = await service.spawn_agent(room_id, template.template_id)
     session = await service.start_agent_session(room_id, agent.agent_id)
-    execution = await service.start_execution(session.session_id)
+    execution = await service.start_execution(session.session_id, "owner")
 
     assert execution.triggered_by is AgentTrigger.DIRECT
 
@@ -484,12 +484,12 @@ async def test_a_mention_run_orphaned_by_a_crash_is_settled_at_the_next_startup(
     template = (await service.list_agent_templates())[0]
     await service.spawn_agent(room_id, template.template_id, name="Architect")
 
-    async def never_dispatched(execution_id: str, prompt: str) -> dict[str, Any]:
+    async def never_dispatched(execution_id: str, prompt: str) -> None:
         # The process dies between the commit and the dispatch: the run is written
-        # and nothing ever starts it.
-        return {}
+        # and nothing ever claims it, which is what makes it an orphan.
+        return None
 
-    service.execute_agent_step = never_dispatched  # type: ignore[method-assign]
+    service._dispatch_mention_run = never_dispatched  # type: ignore[method-assign]
     await service.send_message(
         room_id,
         MessageRole.HUMAN,

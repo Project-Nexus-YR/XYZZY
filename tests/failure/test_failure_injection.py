@@ -68,7 +68,7 @@ async def test_nonexistent_task_raises_domain_error(service):
 @pytest.mark.asyncio
 async def test_nonexistent_session_raises_domain_error(service):
     with pytest.raises(DomainError, match="session not found"):
-        await service.start_execution("nonexistent_session")
+        await service.start_execution("nonexistent_session", "u1")
 
 
 @pytest.mark.asyncio

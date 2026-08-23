@@ -30,7 +30,7 @@ async def room_setup(service):
     templates = await service.list_agent_templates()
     agent = await service.spawn_agent(room.room_id, templates[0].template_id)
     session = await service.start_agent_session(room.room_id, agent.agent_id)
-    execution = await service.start_execution(session.session_id)
+    execution = await service.start_execution(session.session_id, "u1")
     return room, agent, execution
 
 

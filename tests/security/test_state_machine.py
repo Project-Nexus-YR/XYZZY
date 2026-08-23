@@ -161,7 +161,7 @@ async def test_session_valid_transitions(service):
     assert session.status == SessionStatus.CREATED
 
     # CREATED -> ACTIVE (via start_execution)
-    await service.start_execution(session.session_id)
+    await service.start_execution(session.session_id, "u1")
     session = await service.repos.sessions.get(session.session_id)
     assert session.status == SessionStatus.ACTIVE
 
@@ -176,10 +176,10 @@ async def test_session_invalid_start_execution_twice(service):
     agent = await service.spawn_agent(room.room_id, templates[0].template_id)
 
     session = await service.start_agent_session(room.room_id, agent.agent_id)
-    await service.start_execution(session.session_id)
+    await service.start_execution(session.session_id, "u1")
 
     with pytest.raises(DomainError, match="invalid session transition"):
-        await service.start_execution(session.session_id)
+        await service.start_execution(session.session_id, "u1")
 
 
 # ── _validate_transition edge cases ────────────────────────────────────────
