@@ -1683,6 +1683,10 @@ async def search(
         {
             "object_kind": hit.object_kind.value,
             "object_id": hit.object_id,
+            # What it is and where it lives: the kind names the endpoint family, and
+            # container_id is the extra id that family needs when object_id and
+            # room_id alone do not address the object.
+            "container_id": hit.container_id,
             "room_id": hit.room_id,
             "room_name": hit.room_name,
             "author_id": hit.author_id,

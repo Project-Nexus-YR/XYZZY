@@ -266,6 +266,8 @@ class MultiplayerService:
             )
         await self._backfill_legacy_artifact_provenance_hashes()
         await self._backfill_participant_handles()
+        # Objects written before their kind joined the search allowlist.
+        await self.repos.search.backfill()
         await self._seed_default_templates()
         await self._settle_orphaned_mention_runs()
 

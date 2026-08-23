@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from multiplayer.db.connection import Database
 from multiplayer.db.repositories import SearchRepo
-from multiplayer.domain.models import MessageRole
+from multiplayer.domain.models import MessageRole, SearchObjectKind
 from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.security.authorization import (
     _ROLE_CAPABILITIES,
@@ -122,8 +122,14 @@ async def test_an_object_kind_nobody_opted_in_cannot_enter_the_index() -> None:
         room = await svc.create_room(workspace.workspace_id, "Decision", "owner")
         await svc.send_message(room.room_id, MessageRole.HUMAN, "owner", SECRET)
 
-        listed = await db.fetch_all("SELECT object_kind FROM search_indexed_kinds")
-        assert [row["object_kind"] for row in listed] == ["MESSAGE"]
+        listed = await db.fetch_all(
+            "SELECT object_kind FROM search_indexed_kinds ORDER BY object_kind"
+        )
+        kinds = [row["object_kind"] for row in listed]
+        assert kinds == ["AGENT_OUTPUT", "ARTIFACT_VERSION", "DECISION", "MESSAGE", "TASK"]
+        # The table and the enum are one allowlist expressed twice, never two that
+        # can drift: a kind added to either alone fails here.
+        assert kinds == sorted(kind.value for kind in SearchObjectKind)
 
         with pytest.raises(Exception, match="FOREIGN KEY"):
             await db.execute(

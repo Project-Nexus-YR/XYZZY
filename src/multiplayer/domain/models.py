@@ -562,15 +562,29 @@ class ReadCursor:
 
 
 class SearchObjectKind(StrEnum):
-    """Kinds that opted in to indexing. Anything absent here is never searchable."""
+    """Kinds that opted in to indexing. Anything absent here is never searchable.
+
+    A kind earns a place here only when a member of the room can already read the
+    indexed text through an existing endpoint under the same RoomCapability.READ
+    that the search query joins on, so indexing widens what a reader can find and
+    never what they are allowed to see.
+    """
 
     MESSAGE = "MESSAGE"
+    ARTIFACT_VERSION = "ARTIFACT_VERSION"
+    TASK = "TASK"
+    AGENT_OUTPUT = "AGENT_OUTPUT"
+    DECISION = "DECISION"
 
 
 @dataclass(frozen=True, slots=True)
 class SearchHit:
     object_kind: SearchObjectKind
     object_id: str
+    # The id a client needs alongside object_id to reach the object itself, empty
+    # when object_id and room_id already address it. An artifact version is read
+    # through its artifact; a message, task, output and decision are not.
+    container_id: str
     room_id: str
     # The room's name travels with the hit: a result the reader cannot place is a
     # result they cannot act on, and re-reading rooms client-side would leak which

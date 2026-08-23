@@ -1391,6 +1391,21 @@ class AgentOutputRepo:
                     serialize_datetime(output.created_at),
                 ),
             )
+            # The answer the agent produced, and nothing else about the turn.
+            # provider_input, provider_evidence, source_prompt and output_data are
+            # deliberately excluded: the provider request is assembled context —
+            # system prompt, retrieved memories, other people's messages — so a
+            # snippet of it would present text borrowed from elsewhere as if this
+            # output had said it, and some of that context is drawn from scopes
+            # wider than the room the hit is authorized against.
+            await SearchRepo(self.db).index(
+                SearchObjectKind.AGENT_OUTPUT,
+                output.output_id,
+                output.room_id,
+                output.agent_id,
+                output.content,
+                output.created_at,
+            )
             completed_at = serialize_datetime(utcnow())
             cursor = await self.db.execute(
                 "UPDATE executions SET status = ?, output_data = ?, completed_at = ? "
@@ -1787,8 +1802,26 @@ class TaskRepo:
                 serialize_datetime(task.updated_at),
             ),
         )
+        await self._index(task)
         await self.db.commit()
         return task
+
+    async def _index(self, task: Task) -> None:
+        """Index the title only.
+
+        description is deliberately excluded: no read path returns it. Both the
+        task list and the room state carry title, status, priority and assignee and
+        nothing else, so indexing the description would make text findable that a
+        member of the room has no endpoint to read.
+        """
+        await SearchRepo(self.db).index(
+            SearchObjectKind.TASK,
+            task.task_id,
+            task.room_id,
+            task.created_by,
+            task.title,
+            task.created_at,
+        )
 
     async def get(self, task_id: str) -> Task | None:
         row = await self.db.fetch_one("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
@@ -1808,6 +1841,7 @@ class TaskRepo:
                 task.task_id,
             ),
         )
+        await self._index(task)
         await self.db.commit()
         return task
 
@@ -2285,12 +2319,66 @@ class SearchRepo:
         author_id: str,
         content: str,
         created_at: datetime,
+        container_id: str = "",
     ) -> None:
         await self.db.execute(
-            "INSERT INTO search_documents(object_kind, object_id, room_id, author_id, content, "
-            "created_at) VALUES (?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(object_kind, object_id) DO UPDATE SET content = excluded.content",
-            (kind.value, object_id, room_id, author_id, content, serialize_datetime(created_at)),
+            "INSERT INTO search_documents(object_kind, object_id, room_id, container_id, "
+            "author_id, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(object_kind, object_id) DO UPDATE SET content = excluded.content, "
+            "container_id = excluded.container_id",
+            (
+                kind.value,
+                object_id,
+                room_id,
+                container_id,
+                author_id,
+                content,
+                serialize_datetime(created_at),
+            ),
+        )
+
+    async def backfill(self) -> None:
+        """Index the rows that already existed when their kind joined the allowlist.
+
+        Every statement is INSERT OR IGNORE against UNIQUE(object_kind, object_id),
+        so a second run inserts nothing and overwrites nothing a write path has
+        indexed since. Each selects exactly the fields its write path indexes, so a
+        backfilled row and a freshly written one are the same row.
+
+        Each also joins rooms. A row whose room no longer exists has no membership
+        to authorize a reader against, so it is skipped rather than indexed — and
+        joining says so, where relying on the foreign key would abort the whole
+        backfill on the first orphan a legacy database happens to hold.
+        """
+        await self.db.execute(
+            "INSERT OR IGNORE INTO search_documents(object_kind, object_id, room_id, "
+            "container_id, author_id, content, created_at) "
+            "SELECT 'ARTIFACT_VERSION', v.version_id, a.room_id, a.artifact_id, v.created_by, "
+            "v.content, v.created_at FROM artifact_versions v "
+            "JOIN artifacts a ON a.artifact_id = v.artifact_id "
+            "JOIN rooms r ON r.room_id = a.room_id "
+            "WHERE v.version_number = ("
+            "SELECT MAX(n.version_number) FROM artifact_versions n "
+            "WHERE n.artifact_id = v.artifact_id)"
+        )
+        await self.db.execute(
+            "INSERT OR IGNORE INTO search_documents(object_kind, object_id, room_id, "
+            "container_id, author_id, content, created_at) "
+            "SELECT 'TASK', t.task_id, t.room_id, '', t.created_by, t.title, t.created_at "
+            "FROM tasks t JOIN rooms r ON r.room_id = t.room_id"
+        )
+        await self.db.execute(
+            "INSERT OR IGNORE INTO search_documents(object_kind, object_id, room_id, "
+            "container_id, author_id, content, created_at) "
+            "SELECT 'AGENT_OUTPUT', o.output_id, o.room_id, '', o.agent_id, o.content, "
+            "o.created_at FROM agent_outputs o JOIN rooms r ON r.room_id = o.room_id"
+        )
+        await self.db.execute(
+            "INSERT OR IGNORE INTO search_documents(object_kind, object_id, room_id, "
+            "container_id, author_id, content, created_at) "
+            "SELECT 'DECISION', d.decision_id, d.room_id, '', d.created_by, "
+            "d.title || char(10) || d.content, d.created_at "
+            "FROM decisions d JOIN rooms r ON r.room_id = d.room_id"
         )
 
     async def search(
@@ -2298,8 +2386,9 @@ class SearchRepo:
     ) -> list[SearchHit]:
         placeholders = ", ".join("?" for _ in self._READING_ROLES)
         sql = (
-            "SELECT d.object_kind, d.object_id, d.room_id, r.name AS room_name, d.author_id, "
-            "d.created_at, snippet(search_documents_fts, 0, '[', ']', '…', 12) AS excerpt "
+            "SELECT d.object_kind, d.object_id, d.container_id, d.room_id, r.name AS room_name, "
+            "d.author_id, d.created_at, "
+            "snippet(search_documents_fts, 0, '[', ']', '…', 12) AS excerpt "
             "FROM search_documents_fts f "
             "JOIN search_documents d ON d.document_id = f.rowid "
             "JOIN search_indexed_kinds k ON k.object_kind = d.object_kind "
@@ -2319,6 +2408,7 @@ class SearchRepo:
             SearchHit(
                 object_kind=SearchObjectKind(r["object_kind"]),
                 object_id=r["object_id"],
+                container_id=r["container_id"],
                 room_id=r["room_id"],
                 room_name=r["room_name"],
                 author_id=r["author_id"],
@@ -2521,7 +2611,40 @@ class ArtifactRepo:
             "UPDATE artifacts SET current_version = ?, updated_at = ? WHERE artifact_id = ?",
             (version.version_number, utcnow().isoformat(), version.artifact_id),
         )
+        await self._index_version_in_transaction(version)
         return version
+
+    async def _index_version_in_transaction(self, version: ArtifactVersion) -> None:
+        """Index the artifact's newest text, replacing whatever version preceded it.
+
+        Only one version of an artifact is searchable at a time. A superseded
+        version is durable history that the version list still serves alongside its
+        version number; as a search hit it is an excerpt with nothing to say it is
+        stale, which reads as the artifact's current text.
+
+        The version's content is indexed whole because the version list already
+        returns it whole to any reader of the room. container_id carries the
+        artifact id, which is what a client needs to fetch the version back.
+        """
+        row = await self.db.fetch_one(
+            "SELECT room_id FROM artifacts WHERE artifact_id = ?", (version.artifact_id,)
+        )
+        if row is None:
+            raise DomainError(f"artifact not found: {version.artifact_id}")
+        await self.db.execute(
+            "DELETE FROM search_documents WHERE object_kind = ? AND object_id IN "
+            "(SELECT version_id FROM artifact_versions WHERE artifact_id = ?)",
+            (SearchObjectKind.ARTIFACT_VERSION.value, version.artifact_id),
+        )
+        await SearchRepo(self.db).index(
+            SearchObjectKind.ARTIFACT_VERSION,
+            version.version_id,
+            row["room_id"],
+            version.created_by,
+            version.content,
+            version.created_at,
+            container_id=version.artifact_id,
+        )
 
     async def list_versions(self, artifact_id: str) -> list[ArtifactVersion]:
         rows = await self.db.fetch_all(
@@ -2715,6 +2838,7 @@ class ArtifactRepo:
             "UPDATE artifacts SET current_version = ?, updated_at = ? WHERE artifact_id = ?",
             (version.version_number, serialize_datetime(utcnow()), artifact.artifact_id),
         )
+        await self._index_version_in_transaction(version)
         if synthesis is not None:
             await self.db.execute(
                 "UPDATE branch_syntheses SET status = ?, provider_input = ?, "
@@ -3243,6 +3367,18 @@ class DecisionRepo:
                 decision.reviewed_by,
                 serialize_datetime(decision.created_at),
             ),
+        )
+        # Title and content, which the decision list returns to any reader of the
+        # room. reason is deliberately excluded: it is the deliberation behind the
+        # call, no read path returns it, and a snippet would surface it stripped of
+        # the decision it belongs to.
+        await SearchRepo(self.db).index(
+            SearchObjectKind.DECISION,
+            decision.decision_id,
+            decision.room_id,
+            decision.created_by,
+            f"{decision.title}\n{decision.content}",
+            decision.created_at,
         )
         await self.db.commit()
         return decision
