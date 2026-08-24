@@ -763,7 +763,10 @@ async def set_workspace_policy(
     principal: CurrentUser,
 ) -> dict[str, Any]:
     svc = _svc_or_404()
-    await _require_workspace(workspace_id, principal)
+    try:
+        await svc.authorization.require_workspace_admin(workspace_id, principal.user_id)
+    except AuthorizationError as exc:
+        raise HTTPException(403, "workspace access forbidden") from exc
     try:
         await svc.set_workspace_policy(workspace_id, req.allowed_capabilities, principal.user_id)
     except DomainError as exc:

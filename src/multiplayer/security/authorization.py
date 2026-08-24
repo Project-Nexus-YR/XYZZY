@@ -63,6 +63,17 @@ class RoomPolicy:
         if await self._repos.workspaces.get_member(workspace_id, user_id) is None:
             raise AuthorizationError("workspace access forbidden")
 
+    async def require_workspace_admin(self, workspace_id: str, user_id: str) -> None:
+        """A workspace-wide governance write needs more than being on the roster.
+
+        The room tier grades every member into a capability set; the workspace
+        tier graded nobody, so a write that bounds every room in the workspace
+        was gated on strictly less than the single-room equivalent.
+        """
+        member = await self._repos.workspaces.get_member(workspace_id, user_id)
+        if member is None or member.role != "admin":
+            raise AuthorizationError("workspace access forbidden")
+
     async def require_org_member(self, org_id: str, user_id: str) -> None:
         if await self._repos.orgs.get_member(org_id, user_id) is None:
             raise AuthorizationError("organization access forbidden")

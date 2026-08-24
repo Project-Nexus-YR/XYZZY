@@ -1130,23 +1130,44 @@ class MultiplayerService:
         self, workspace_id: str, allowed: list[str] | None, changed_by: str
     ) -> None:
         """Bound every channel in the workspace. Logged in each of its rooms."""
-        await self.authorization.require_workspace_member(workspace_id, changed_by)
         stored = _policy_json(allowed)
-        await self.repos.workspaces.set_allowed_capabilities(workspace_id, stored)
-        for room in await self.repos.rooms.list_by_workspace(workspace_id):
-            await self._append_room_event(
-                room.room_id,
-                EventType.WORKSPACE_POLICY_UPDATED,
-                {"workspace_id": workspace_id, "allowed_capabilities": allowed},
-                changed_by,
-                "user",
-            )
+        events: list[RoomEvent] = []
+        async with self.db.transaction():
+            # A workspace-wide bound outranks any single room's, so it demands
+            # the workspace admin role, re-read inside the transaction that
+            # writes - the same fence every room-tier governance write has.
+            member = await self.repos.workspaces.get_member(workspace_id, changed_by)
+            if member is None or member.role != "admin":
+                raise AuthorizationError("workspace access forbidden")
+            await self.repos.workspaces.set_allowed_capabilities(workspace_id, stored)
+            for room in await self.repos.rooms.list_by_workspace(workspace_id):
+                events.append(
+                    await self.repos.events.append_with_next_sequence_in_transaction(
+                        RoomEvent(
+                            room_id=room.room_id,
+                            sequence=0,
+                            event_type=EventType.WORKSPACE_POLICY_UPDATED,
+                            payload={
+                                "workspace_id": workspace_id,
+                                "allowed_capabilities": allowed,
+                            },
+                            actor_id=changed_by,
+                            actor_type="user",
+                        )
+                    )
+                )
+        await self._broadcast_persisted_events(events)
 
     async def remove_room_member(self, room_id: str, user_id: str, removed_by: str) -> None:
         """Revoke a non-admin member's access, including any live realtime subscription."""
         if user_id == removed_by:
             raise DomainError("use leave to remove yourself")
         async with self.db.transaction():
+            # The route authorized ADMINISTER; a demotion committing in between
+            # must not let a former admin's removal land. Same fence as invite.
+            await self._require_capability_in_transaction(
+                room_id, removed_by, RoomCapability.ADMINISTER
+            )
             member = await self.repos.room_members.get(room_id, user_id)
             if member is None:
                 raise DomainError("user is not a channel member")
