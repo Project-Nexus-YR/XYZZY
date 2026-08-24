@@ -228,7 +228,7 @@ async def test_a_steer_is_read_from_the_rows_rather_than_carried_by_the_caller(
     svc = service
     provider = _AsksForAToolThenAnswers(*GATED[0])
     room_id, execution_id, approval_id = await _steered_run_waiting_on_a_reviewer(svc, provider)
-    assert await svc.repos.interventions.steerers(execution_id) == frozenset({STEERER})
+    assert STEERER in await svc.repos.executions.bounding_principals(execution_id)
     columns = await svc.db.fetch_all("SELECT name FROM pragma_table_info('suspended_turns')")
     assert "steerers" not in {str(row["name"]) for row in columns}
 
@@ -298,10 +298,12 @@ def _callers_of(name: str) -> set[str]:
 def test_the_raw_five_way_derivation_produces_nothing_a_gateway_can_spend() -> None:
     """``UnboundedTerms`` has no ``effective``. That is the wall, not a convention."""
     assert not hasattr(UnboundedTerms, "effective")
-    # No default, so no construction can leave the steerers out by omission.
-    steerers = RunAuthorization.__dataclass_fields__["steerers"]
-    assert steerers.default is dataclasses.MISSING
-    assert steerers.default_factory is dataclasses.MISSING
+    # No default, so no construction can leave the bounding principals out by
+    # omission. The steerers are inside that set now; see
+    # test_every_bounding_principal.py for what else is.
+    bounding = RunAuthorization.__dataclass_fields__["bounding"]
+    assert bounding.default is dataclasses.MISSING
+    assert bounding.default_factory is dataclasses.MISSING
 
 
 def test_only_one_factory_builds_a_run_authorization() -> None:

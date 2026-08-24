@@ -8,8 +8,8 @@ rejected. Everything here is a pure function of durable records.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 
 CAPABILITIES: frozenset[str] = frozenset(
     {
@@ -49,6 +49,46 @@ def policy_capabilities(allowed: Iterable[str] | None) -> frozenset[str]:
     return frozenset(allowed) & CAPABILITIES
 
 
+# A run whose durable rows name nobody is authorized by nobody. The empty name
+# matches no room membership, so it lends nothing, which is what an unknown
+# principal must lend.
+UNKNOWN_PRINCIPAL = ""
+
+
+@dataclass(frozen=True, slots=True)
+class BoundingPrincipals:
+    """Everyone whose grant bounds one run: one set, never a field per kind.
+
+    Thirteen rounds relocated one defect, and the last two were the same mistake in
+    two costumes. Round eight put the steerers on the authorization and left the
+    acting caller off it, so a caller narrowed to nothing while an approval waited
+    still spent the grant they had when they stepped. Enumerating identities one at a
+    time is what failed: the fix was always one short of the participants a run has.
+
+    So there is one field, and it holds all of them. A spend-point cannot pick a
+    principal out of this and bound by that alone, because there is no field to pick;
+    a new kind of participant is a new durable row in the one union that fills this,
+    not a new argument at every door that already forgot the last one.
+
+    Empty is refused. The intersection over no principals is the whole vocabulary,
+    which is the one value this must never quietly mean.
+    """
+
+    principals: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if not self.principals:
+            raise ValueError("a run bounded by no principal at all is bounded by nothing")
+
+    @classmethod
+    def read_from(cls, principals: Iterable[str]) -> BoundingPrincipals:
+        """Whatever the durable rows named. Rows that named nobody are an unknown."""
+        return cls(frozenset(principals) or frozenset({UNKNOWN_PRINCIPAL}))
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(sorted(self.principals))
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityTerms:
     user: frozenset[str]
@@ -61,14 +101,6 @@ class CapabilityTerms:
     def effective(self) -> frozenset[str]:
         return self.user & self.agent & self.skill & self.channel & self.workspace
 
-    def bounded_by(self, authority: frozenset[str]) -> CapabilityTerms:
-        """These terms narrowed by a second principal's authority over the same run.
-
-        The user term is the principal-side ceiling, so a delegate or an intervener
-        lands there: whoever steers a run can only ever lower it.
-        """
-        return replace(self, user=self.user & authority)
-
     def as_dict(self) -> dict[str, list[str]]:
         return {
             "user": sorted(self.user),
@@ -80,39 +112,6 @@ class CapabilityTerms:
 
 
 @dataclass(frozen=True, slots=True)
-class UnboundedTerms:
-    """One principal's five terms, before the steerers of a run have narrowed them.
-
-    It deliberately has no ``effective``. A set that a tool decision may spend comes
-    out of :meth:`bounded_by` and nowhere else, so a spend-point that derives terms
-    and forgets the steerers has nothing to hand the gateway: the omission is a type
-    error rather than a quietly wider set. That is the whole reason this wrapper
-    exists — the bound had been applied by remembering to apply it, and remembering
-    failed at a new place every round.
-
-    :meth:`lendable` is the other exit, and it is not a spend: it is what one
-    principal may lend an agent, which is what a launch gate asks and what each
-    steerer contributes as one of the bounds above.
-    """
-
-    terms: CapabilityTerms
-
-    def bounded_by(self, authorities: Iterable[frozenset[str]]) -> CapabilityTerms:
-        """These terms narrowed by every authority that steers the same run."""
-        bounded = self.terms
-        for authority in authorities:
-            bounded = bounded.bounded_by(authority)
-        return bounded
-
-    def lendable(self) -> frozenset[str]:
-        """What this principal may lend an agent here. A gate, never a tool decision."""
-        return self.terms.effective
-
-    def as_dict(self) -> dict[str, list[str]]:
-        return self.terms.as_dict()
-
-
-@dataclass(frozen=True, slots=True)
 class RunAuthorization:
     """What a tool writer re-derives its terms from, inside its own transaction.
 
@@ -120,23 +119,56 @@ class RunAuthorization:
     the authority a write still has to be checked against. A human caller passes
     ``None`` instead and is guarded by the room membership check beside it.
 
-    ``steerers`` names everyone who has steered this run. It is on the authorization
-    rather than threaded to each spend-point because the twelve relocations of one
-    defect all had the same shape: a spend-point re-derived the five terms correctly
-    and did not know it also owed the steerer bound. A spend-point cannot know that,
-    and should not have to — it consumes this object, the object names the steerers,
-    and the single derivation that reads it applies them. The names are records, not
-    authority: what each of them may lend is read from durable rows at the moment it
-    is spent.
+    It names its principals once, as a whole set, because the thirteen relocations of
+    one defect were all an enumeration that came up short: a spend-point re-derived
+    the five terms correctly and did not know which further identity it also owed. A
+    spend-point cannot know that, and should not have to — it consumes this object,
+    the object carries every principal, and the single derivation that reads it
+    intersects all of them. The names are records, not authority: what each may lend
+    is read from durable rows at the moment it is spent.
     """
 
     run_id: str
     agent_id: str
     room_id: str
-    authorized_by: str
-    acting_user_id: str
+    bounding: BoundingPrincipals
     required_capability: str
-    steerers: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class UnboundedTerms:
+    """The five terms read for one set of principals, before anything may spend them.
+
+    It deliberately has no ``effective``. A set that a tool decision may spend comes
+    out of :meth:`spend_under` and nowhere else, and that method demands the
+    authorization whose principals these terms were read for. So terms derived for a
+    narrower set than the run actually has cannot be handed to a gateway at all: the
+    omission is a refusal rather than a quietly wider set. That is the whole reason
+    this wrapper exists — the bound had been applied by remembering to apply it, and
+    remembering failed at a new place every round.
+
+    :meth:`lendable` is the other exit, and it is not a spend: it is what these
+    principals may lend an agent here, which is what a launch or steer gate asks.
+    """
+
+    bounding: BoundingPrincipals
+    terms: CapabilityTerms
+
+    def spend_under(self, authorization: RunAuthorization) -> CapabilityTerms:
+        """The one exit to a spendable set, and only for the run these terms are of."""
+        if authorization.bounding != self.bounding:
+            raise ValueError(
+                f"terms bounded by {sorted(self.bounding)} may not be spent under run "
+                f"{authorization.run_id}, which is bounded by {sorted(authorization.bounding)}"
+            )
+        return self.terms
+
+    def lendable(self) -> frozenset[str]:
+        """What these principals may lend an agent here. A gate, never a tool decision."""
+        return self.terms.effective
+
+    def as_dict(self) -> dict[str, list[str]]:
+        return self.terms.as_dict()
 
 
 def may_address(

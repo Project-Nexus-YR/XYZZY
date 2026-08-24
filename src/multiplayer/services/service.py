@@ -142,6 +142,8 @@ from ..security.authorization import (
     capabilities_for_role,
 )
 from ..security.capabilities import (
+    CAPABILITIES,
+    BoundingPrincipals,
     CapabilityTerms,
     GatewayDecision,
     RunAuthorization,
@@ -1450,8 +1452,9 @@ class MultiplayerService:
             log.info("Run %s advanced while being settled; leaving it alone", run.run_id)
             return False
         # Nothing will prompt a settled run again, so the turn held for a reviewer is
-        # not waiting any more either.
+        # not waiting any more either — and neither is the approval it was held for.
         await self.repos.suspended_turns.discard(run.execution_id)
+        await self._expire_undecided_approvals(run.execution_id, error)
         await self._broadcast_persisted_events(events)
         return True
 
@@ -1466,7 +1469,8 @@ class MultiplayerService:
         second one: nothing was orphaned, nothing was dispatched and lost, and no
         attempt was spent — a person simply never answered. Naming that outcome is
         only half of it, because the approval row it belongs to sat PENDING for ever
-        against a run that had ended. It is closed here with the run.
+        against a run that had ended. It is closed with the run, in
+        :meth:`_settle_run`, rather than only here.
         """
         settled = 0
         for run in await self.repos.agent_runs.list_expired(utcnow()):
@@ -1481,20 +1485,27 @@ class MultiplayerService:
                 error = f"lease expired after {run.attempts} attempt(s)"
             if await self._settle_run(run, settlement, "system", error):
                 settled += 1
-                await self._expire_undecided_approvals(run, error)
         return settled
 
-    async def _expire_undecided_approvals(self, run: AgentRun, reason: str) -> None:
+    async def _expire_undecided_approvals(self, execution_id: str, reason: str) -> None:
         """Close the approvals of a settled run, so no row outlives what it gated.
 
         A PENDING approval against a settled run is an invitation to decide something
         that can no longer happen, and the tool request behind it is a call that
         started and never ended. Both are resolved here, in one transaction, with the
         events that say so.
+
+        This used to hang off the lease sweep alone, and a settled run is never swept
+        again: a run ended by ``cancel_execution`` or by its agent being removed left
+        its approval PENDING and its tool request PENDING_APPROVAL for ever, and that
+        approval could still be granted afterwards against a run that had ended long
+        before. It belongs to settlement, not to expiry, so every settlement calls it.
         """
-        pending_approvals = await self.repos.approvals.list_pending_by_execution(run.execution_id)
+        pending_approvals = await self.repos.approvals.list_pending_by_execution(execution_id)
         if not pending_approvals:
             return
+        run = await self.repos.agent_runs.get_by_execution(execution_id)
+        settlement = run.settlement.value if run is not None and run.settlement is not None else ""
         events: list[RoomEvent] = []
         async with self.db.transaction():
             for approval in pending_approvals:
@@ -1509,10 +1520,8 @@ class MultiplayerService:
                             event_type=EventType.APPROVAL_EXPIRED,
                             payload={
                                 "approval_id": approval.approval_id,
-                                "execution_id": run.execution_id,
-                                "settlement": run.settlement.value
-                                if run.settlement is not None
-                                else "",
+                                "execution_id": execution_id,
+                                "settlement": settlement,
                                 "reason": reason,
                             },
                             actor_id="system",
@@ -1625,6 +1634,11 @@ class MultiplayerService:
                     )
                 )
             )
+        # The approvals those runs were holding at end with them. It happens outside
+        # the transaction above because closing one is a transaction of its own, and
+        # the alternative — leaving it — is the row that outlives what it gated.
+        for run in settled:
+            await self._expire_undecided_approvals(run.execution_id, "agent removed from room")
         await self._broadcast_persisted_events(events)
         harness = self._harness(agent.harness_id) if agent.harness_id in KNOWN_HARNESS_IDS else None
         for run in settled:
@@ -2042,28 +2056,27 @@ class MultiplayerService:
         self,
         agent: AgentInstance,
         room_id: str,
-        authorized_by: str,
-        acting_as: str = "",
+        bounding: BoundingPrincipals,
     ) -> UnboundedTerms:
         """The five durable terms of PRD §13, read from records alone.
 
-        The user term is the authorizing principal's grant. A different caller
-        acting on that principal's run gets the intersection of the two: nobody
-        obtains through somebody else's run more than they hold themselves, and
-        the authorizing principal's grant is a ceiling rather than a substitute.
+        The user term is every named principal's grant intersected. Nobody obtains
+        through somebody else's run more than they hold themselves, and no principal's
+        grant is a substitute for another's: each is a ceiling, and the ceiling is the
+        lowest of them.
 
         What comes back is deliberately not spendable. It answers "what may these
-        principals lend this agent here" — the question a launch gate asks, and the
-        bound one steerer contributes to somebody else's run. What a tool call is
-        decided against is :meth:`_authorized_terms`, and only that.
+        principals lend this agent here" — the question a launch gate asks. What a
+        tool call is decided against is :meth:`_authorized_terms`, and only that.
         """
-        user = await self._user_term(room_id, authorized_by)
-        if acting_as and acting_as != authorized_by:
-            user &= await self._user_term(room_id, acting_as)
+        user = CAPABILITIES
+        for principal in bounding:
+            user &= await self._user_term(room_id, principal)
         template = await self.repos.agents.get_template(agent.template_id)
         room = await self.repos.rooms.get(room_id)
         workspace = await self.repos.workspaces.get(room.workspace_id) if room is not None else None
         return UnboundedTerms(
+            bounding,
             CapabilityTerms(
                 user=user,
                 agent=frozenset(agent.capabilities),
@@ -2074,65 +2087,51 @@ class MultiplayerService:
                 workspace=policy_capabilities(
                     _policy_list(workspace.allowed_capabilities if workspace else None)
                 ),
-            )
+            ),
         )
 
     async def _authorized_terms(self, authorization: RunAuthorization) -> CapabilityTerms:
         """The one derivation a spend-point spends. Nothing else produces spendable terms.
 
-        Twelve rounds relocated one defect because the steerer bound was applied by
-        remembering to apply it: a spend-point re-derived the five terms from durable
-        records — correctly, in itself — and did not know it also owed the bound, so a
-        steerer narrowed after her text entered the turn was still spending her
-        original set at whichever door had been written last. The approval door was
-        the twelfth.
+        Thirteen rounds relocated one defect because the bound was applied by
+        remembering which identities to apply, and the list was one short every time:
+        a spend-point re-derived the five terms from durable records — correctly, in
+        itself — and did not know it also owed a steerer, or a caller who was not the
+        run's own principal.
 
-        The bound is not an argument here. The authorization names the steerers, this
-        reads what each of them may lend right now, and the terms come back already
-        narrowed by all of them. A spend-point written next year gets it by consuming
-        the object it already had to consume, without its author knowing the rule.
+        Nothing is enumerated here now. The authorization carries every bounding
+        principal as one set, this reads what each of them may lend right now, and
+        :meth:`UnboundedTerms.spend_under` refuses to produce a spendable set for any
+        run but the one they were read for. A spend-point written next year gets all
+        of it by consuming the object it already had to consume.
         """
         agent = await self.get_agent(authorization.agent_id)
-        unbounded = await self._lendable_terms(
-            agent,
-            authorization.room_id,
-            authorization.authorized_by,
-            authorization.acting_user_id,
-        )
-        bounds = [
-            (
-                await self._lendable_terms(
-                    agent, authorization.room_id, authorization.authorized_by, steerer
-                )
-            ).lendable()
-            for steerer in sorted(authorization.steerers)
-        ]
-        return unbounded.bounded_by(bounds)
+        unbounded = await self._lendable_terms(agent, authorization.room_id, authorization.bounding)
+        return unbounded.spend_under(authorization)
 
     async def _authorization_for(
         self,
         execution_id: str,
         agent_id: str,
         room_id: str,
-        authorized_by: str,
-        acting_user_id: str = "",
         required_capability: str = "",
     ) -> RunAuthorization:
         """Build the authority object every spend-point re-derives its terms from.
 
-        The single place a ``RunAuthorization`` is made, which is what keeps the
-        steerers on it from being something a caller has to remember: they are read
-        here, from the run's own intervention rows.
+        The single place a ``RunAuthorization`` is made, and it takes no principal:
+        there is no argument through which a caller could hand it a set that is
+        missing one. Who bounds this run is a question the durable rows answer, in one
+        read, and that read is the only thing that fills the set.
         """
         run = await self.repos.agent_runs.get_by_execution(execution_id)
         return RunAuthorization(
             run_id=run.run_id if run is not None else execution_id,
             agent_id=agent_id,
             room_id=room_id,
-            authorized_by=authorized_by,
-            acting_user_id=acting_user_id or authorized_by,
+            bounding=BoundingPrincipals.read_from(
+                await self.repos.executions.bounding_principals(execution_id)
+            ),
             required_capability=required_capability,
-            steerers=await self.repos.interventions.steerers(execution_id),
         )
 
     @staticmethod
@@ -2160,10 +2159,12 @@ class MultiplayerService:
     async def agent_capability_terms(self, agent_id: str, requested_by: str) -> UnboundedTerms:
         """What this member could lend this agent, for a run they have not opened yet.
 
-        A preview, not a spend: there is no run, so there is nothing steering one.
+        A preview, not a spend: there is no run, so this member is the whole of it.
         """
         agent = await self.get_agent(agent_id)
-        return await self._lendable_terms(agent, agent.room_id, requested_by)
+        return await self._lendable_terms(
+            agent, agent.room_id, BoundingPrincipals(frozenset({requested_by}))
+        )
 
     async def _require_delegated_authority(self, execution: Execution, acting_as: str) -> None:
         """Guard every verb that advances or influences somebody else's run.
@@ -2174,9 +2175,14 @@ class MultiplayerService:
         refused when the intersection is empty.
 
         What the run may then spend is not decided here. That is
-        :meth:`_authorized_terms`, which narrows by this caller and by the run's
-        steerers together; asking it here instead would let a steerer who has since
-        been narrowed to nothing block the cancel that ends her own turn.
+        :meth:`_authorized_terms`, which narrows by every principal bounding the run
+        at once; asking it here instead would let a steerer who has since been
+        narrowed to nothing block the cancel that ends her own turn.
+
+        A caller this gate admits is written down as one of the run's callers, because
+        from here on their grant bounds it. A caller it refuses is not: a refusal is
+        not participation, and recording one would let anybody narrow a run they were
+        never allowed to touch.
         """
         if not acting_as:
             return
@@ -2195,19 +2201,21 @@ class MultiplayerService:
         if acting_as == execution.authorized_by:
             return
         lendable = await self._lendable_terms(
-            agent, session.room_id, execution.authorized_by, acting_as
+            agent,
+            session.room_id,
+            BoundingPrincipals(frozenset({execution.authorized_by, acting_as})),
         )
         if not lendable.lendable():
             raise AuthorizationError(
                 f"{acting_as} may not act on run {execution.execution_id}: no effective capability"
             )
+        await self.repos.executions.record_caller(execution.execution_id, acting_as)
 
     async def _handle_tool_request(
         self,
         execution: Execution,
         session: Session,
         agent: AgentInstance,
-        acting_as: str,
         result: dict[str, Any],
     ) -> dict[str, Any]:
         """Permission check, policy check, approval gate, execution, audit event.
@@ -2216,16 +2224,13 @@ class MultiplayerService:
         offered the tool: a provider call sits between the two, and a grant withdrawn
         while the model was thinking must not still be spendable when it answers.
 
-        Re-deriving is not the same as unbinding. A steer that shaped this step still
-        bounds what the step may spend, and the authorization carries the steerers, so
-        the derivation applies them without this door having to know they exist.
+        Re-deriving is not the same as unbinding. The caller who drove this step and
+        the steers that shaped it still bound what it may spend, and the authorization
+        carries every one of them, so the derivation applies them without this door
+        having to know any of them exist — or being able to name one if it wanted to.
         """
         authorization = await self._authorization_for(
-            execution.execution_id,
-            agent.agent_id,
-            session.room_id,
-            execution.authorized_by,
-            acting_as,
+            execution.execution_id, agent.agent_id, session.room_id
         )
         effective = (await self._authorized_terms(authorization)).effective
         tool = str(result.get("tool", ""))
@@ -2289,22 +2294,20 @@ class MultiplayerService:
         return self._tool_response(await self._execute_tool_request(request))
 
     async def _current_tool_decision(
-        self, request: ToolRequest, acting_as: str = ""
+        self, request: ToolRequest
     ) -> tuple[GatewayDecision, frozenset[str]]:
         """Decide a stored request again from the records as they stand right now.
 
         A twelve-hour approval window sits in front of this, and everything that can
-        narrow a run can happen inside it — including a steer being reduced or its
-        author being taken out of the room. The authorization carries the steerers,
-        so the door a reviewer opens is bounded by them exactly as the gateway was.
+        narrow a run can happen inside it — a steer reduced, the caller who asked for
+        this tool narrowed, either of them taken out of the room. The authorization
+        carries all of them, so the door a reviewer opens is bounded exactly as the
+        gateway was, and takes no principal from its caller to be bounded by.
         """
-        execution = await self.repos.executions.get(request.execution_id)
         authorization = await self._authorization_for(
             request.execution_id,
             request.agent_id,
             request.room_id,
-            execution.authorized_by if execution is not None else "",
-            acting_as,
             request.required_capability or "",
         )
         effective = (await self._authorized_terms(authorization)).effective
@@ -2342,8 +2345,7 @@ class MultiplayerService:
                 EventType.AGENT_RUN_AUTHORITY_REVOKED,
                 {
                     "run_id": revoked.authorization.run_id,
-                    "authorized_by": revoked.authorization.authorized_by,
-                    "acting_user_id": revoked.authorization.acting_user_id,
+                    "bounded_by": sorted(revoked.authorization.bounding),
                     "stage": revoked.stage,
                     "missing_capability": revoked.authorization.required_capability,
                 },
@@ -2367,7 +2369,7 @@ class MultiplayerService:
                 await self._settle_run(
                     run,
                     RunSettlement.AUTHORITY_REVOKED,
-                    revoked.authorization.acting_user_id,
+                    run.acting_user_id,
                     str(revoked),
                 )
             return replace(request, status="REJECTED", reason=str(revoked))
@@ -2495,18 +2497,18 @@ class MultiplayerService:
         raise DomainError(f"tool not executable: {request.tool}")
 
     async def _run_authorization(self, request: ToolRequest) -> RunAuthorization:
-        """What the writer re-derives its terms from, read from durable records."""
-        run = await self.repos.agent_runs.get_by_execution(request.execution_id)
-        execution = await self.repos.executions.get(request.execution_id)
-        authorized_by = request.authorized_by or (
-            execution.authorized_by if execution is not None else ""
-        )
+        """What the writer re-derives its terms from, read from durable records.
+
+        It used to read the acting caller off ``agent_runs.acting_user_id``, which is
+        the last human to have moved the run rather than the set of humans whose grant
+        bounds it. By the time a reviewer released a parked call that column had been
+        overwritten with the run's own principal, and the delegate who asked for the
+        call was bounding nothing.
+        """
         return await self._authorization_for(
             request.execution_id,
             request.agent_id,
             request.room_id,
-            authorized_by,
-            run.acting_user_id if run is not None else authorized_by,
             request.required_capability or "",
         )
 
@@ -2731,7 +2733,9 @@ class MultiplayerService:
         # than trusted from the request that opened it. A principal whose grant was
         # withdrawn between that write and this dispatch can no longer make the
         # agent speak, so the run is settled instead of run.
-        principal = await self._lendable_terms(agent, session.room_id, execution.authorized_by)
+        principal = await self._lendable_terms(
+            agent, session.room_id, BoundingPrincipals(frozenset({execution.authorized_by}))
+        )
         if not principal.lendable():
             await self._settle_undispatched_run(
                 execution_id,
@@ -2742,15 +2746,13 @@ class MultiplayerService:
                 f"run {execution_id} is no longer authorized by {execution.authorized_by}"
             )
         # A caller who is not that principal is bounded by their own grant too, and so
-        # is every steer the run is carrying: the authorization names the steerers and
-        # the derivation reads what each may lend now. The steers still queued are read
-        # separately, because those are what this prompt delivers rather than what
-        # bounds it.
+        # is every steer the run is carrying. The gate above writes this caller into
+        # the run's own records, and the authorization below reads every principal
+        # back out of them. The steers still queued are read separately, because those
+        # are what this prompt delivers rather than what bounds it.
         await self._require_delegated_authority(execution, acting_as)
         steers = await self.repos.interventions.list_unconsumed(execution_id)
-        authorization = await self._authorization_for(
-            execution_id, agent.agent_id, session.room_id, execution.authorized_by, acting_as
-        )
+        authorization = await self._authorization_for(execution_id, agent.agent_id, session.room_id)
         terms = await self._authorized_terms(authorization)
 
         source_prompt = prompt
@@ -2871,7 +2873,7 @@ class MultiplayerService:
                 "cancelled while the turn was in flight",
             )
         if result.get("action") == "tool":
-            return await self._handle_tool_request(execution, session, agent, acting_as, result)
+            return await self._handle_tool_request(execution, session, agent, result)
         if result.get("action") == "finish":
             raw_output = result.get("result")
             output_data = raw_output if isinstance(raw_output, dict) else {"result": raw_output}
@@ -3125,8 +3127,9 @@ class MultiplayerService:
                 cancelled_by,
             )
         # Nothing prompts a cancelled run again, so a turn held at a reviewer is not
-        # waiting on one either.
+        # waiting on one either — nor is the approval that turn stopped at.
         await self.repos.suspended_turns.discard(execution_id)
+        await self._expire_undecided_approvals(execution_id, "cancelled by user")
         await self._broadcast_persisted_events(events)
         return True
 
@@ -4334,7 +4337,8 @@ class MultiplayerService:
         agent = await self.get_agent(agent_id)
         if agent.room_id != room_id:
             raise DomainError("mentioned agent is not in this room")
-        if not (await self._lendable_terms(agent, room_id, requested_by)).lendable():
+        mentioner = BoundingPrincipals(frozenset({requested_by}))
+        if not (await self._lendable_terms(agent, room_id, mentioner)).lendable():
             raise AuthorizationError(
                 f"{requested_by} may not invoke agent {agent_id}: no effective capability"
             )
@@ -5185,14 +5189,21 @@ class MultiplayerService:
                 reviewed_at=utcnow(),
             )
             await self.repos.approvals.update(approval)
-            pending = await self.repos.tool_requests.get_by_approval(approval_id)
-            if pending is not None and pending.status == "PENDING_APPROVAL":
+            pending = self._request_this_approval_gated(
+                approval, await self.repos.tool_requests.get_by_approval(approval_id)
+            )
+            if pending is not None:
                 # The reviewer grants from their own capabilities, never above them:
                 # an approval is not a way to lend what the reviewer does not hold.
+                # Releasing a call is acting on the run, so she is written into its
+                # callers first and the derivation below reads her back out with
+                # everybody else — rather than being handed to it as the one identity
+                # this door happens to know about.
+                await self.repos.executions.record_caller(pending.execution_id, reviewer_id)
                 # Re-derived inside the transaction that grants rather than after it
                 # closed; the re-stamped effective set is an audit record, never an
                 # input, because the writer re-derives again inside its own.
-                decision, effective = await self._current_tool_decision(pending, reviewer_id)
+                decision, effective = await self._current_tool_decision(pending)
                 run = await self.repos.agent_runs.get_by_execution(pending.execution_id)
                 if run is not None and run.harness_state is HarnessState.SETTLED:
                     # The run this call belongs to ended while the reviewer was
@@ -5206,8 +5217,6 @@ class MultiplayerService:
                 stamped = json.dumps(sorted(effective))
                 await self.repos.tool_requests.set_effective(pending.request_id, stamped)
                 pending = replace(pending, effective_json=stamped)
-            else:
-                pending = None
             event = await self.repos.events.append_with_next_sequence_in_transaction(
                 RoomEvent(
                     room_id=approval.room_id,
@@ -5366,8 +5375,11 @@ class MultiplayerService:
                     )
                 )
             )
-            pending = await self.repos.tool_requests.get_by_approval(approval_id)
-            if pending is not None and pending.status == "PENDING_APPROVAL":
+            gated = self._request_this_approval_gated(
+                approval, await self.repos.tool_requests.get_by_approval(approval_id)
+            )
+            pending = gated
+            if pending is not None:
                 await self.repos.tool_requests.resolve(
                     pending.request_id, "REJECTED", "approval rejected", "{}"
                 )
@@ -5388,26 +5400,53 @@ class MultiplayerService:
                     )
                 )
                 pending = replace(pending, status="REJECTED", reason="approval rejected")
-            else:
-                pending = None
             events.extend(
                 await self._end_refused_approval_in_transaction(
-                    approval.execution_id, reviewer_id, continue_turn
+                    approval.execution_id, gated, reviewer_id, continue_turn
                 )
             )
         await self._broadcast_persisted_events(events)
-        if continue_turn:
-            # The fresh lease above is only honest if something is about to prompt
-            # this run again. That is here.
-            await self._resume_suspended_turn(approval.execution_id, pending)
-        else:
-            await self.repos.suspended_turns.discard(approval.execution_id)
+        if gated is not None:
+            if continue_turn:
+                # The fresh lease above is only honest if something is about to prompt
+                # this run again. That is here.
+                await self._resume_suspended_turn(approval.execution_id, pending)
+            else:
+                await self.repos.suspended_turns.discard(approval.execution_id)
         return approval
 
+    @staticmethod
+    def _request_this_approval_gated(
+        approval: Approval, request: ToolRequest | None
+    ) -> ToolRequest | None:
+        """The undecided tool call this approval is actually holding, if it is holding one.
+
+        An approval that gated nothing is a record of a question, and deciding it is a
+        record of an answer. It is not an account of why a run ended, and it used to be
+        allowed to write one: any member could open an approval against a live run
+        through the approvals route, reject it, and settle that run APPROVAL_REFUSED —
+        an untrue account of a run nobody had refused anything to. With
+        ``continue_turn`` it put the run back on a fresh STREAMING lease with nothing
+        suspended to prompt it, which is the state the turn loop promises cannot exist.
+        """
+        if request is None or request.status != "PENDING_APPROVAL":
+            return None
+        if request.execution_id != approval.execution_id:
+            return None
+        return request
+
     async def _end_refused_approval_in_transaction(
-        self, execution_id: str, reviewer_id: str, continue_turn: bool
+        self, execution_id: str, gated: ToolRequest | None, reviewer_id: str, continue_turn: bool
     ) -> list[RoomEvent]:
-        """Settle the run, or put it back on a fresh lease. Never neither."""
+        """Settle the run this approval was holding, or put it back on a fresh lease.
+
+        Never neither — and never a run this approval was not holding. ``gated`` is
+        the undecided tool call the approval gated, and without one there is nothing
+        here to end: refusing a question nobody's turn was waiting on leaves the run
+        exactly where it was found.
+        """
+        if gated is None:
+            return []
         run = await self.repos.agent_runs.get_by_execution(execution_id)
         if run is None or run.harness_state is HarnessState.SETTLED:
             return []
@@ -5468,7 +5507,8 @@ class MultiplayerService:
             await self._require_delegated_authority(execution, acting_as)
             return
         agent = await self.get_agent(agent_id)
-        if not (await self._lendable_terms(agent, agent.room_id, acting_as)).lendable():
+        bounding = BoundingPrincipals(frozenset({acting_as}))
+        if not (await self._lendable_terms(agent, agent.room_id, bounding)).lendable():
             raise AuthorizationError(
                 f"{acting_as} may not steer agent {agent_id}: no effective capability"
             )

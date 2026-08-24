@@ -22,6 +22,7 @@ from multiplayer.db.connection import Database
 from multiplayer.domain.models import MessageRole
 from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
 from multiplayer.realtime.hub import RealtimeHub
+from multiplayer.security.capabilities import BoundingPrincipals
 from multiplayer.services.service import MultiplayerService
 
 OWNER = "owner"
@@ -93,8 +94,12 @@ async def _assert_bounded_by_the_caller(
 ) -> None:
     """Whatever the initiator holds, the run under this caller holds no more."""
     agent = await svc.get_agent(agent_id)
-    initiator_only = await svc._lendable_terms(agent, room_id, OWNER)
-    delegated = await svc._lendable_terms(agent, room_id, OWNER, NARROW)
+    initiator_only = await svc._lendable_terms(
+        agent, room_id, BoundingPrincipals(frozenset({OWNER}))
+    )
+    delegated = await svc._lendable_terms(
+        agent, room_id, BoundingPrincipals(frozenset({OWNER, NARROW}))
+    )
     caller_own = await svc._user_term(room_id, NARROW)
     assert delegated.lendable() <= caller_own
     assert delegated.lendable() < initiator_only.lendable()

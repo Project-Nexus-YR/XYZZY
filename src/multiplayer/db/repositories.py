@@ -1733,6 +1733,41 @@ class ExecutionRepo:
         )
         return [self._from_row(row) for row in rows]
 
+    async def record_caller(self, execution_id: str, caller_id: str) -> None:
+        """Write down a human who is acting on this run, so its bound can read them.
+
+        Idempotent and append-only: the row says that this person directed this run,
+        which stops being true never. What they may lend is not stored — that is read
+        from their room membership every time it is spent.
+        """
+        if not caller_id:
+            return
+        await self.db.execute(
+            "INSERT OR IGNORE INTO execution_callers(execution_id, caller_id, first_acted_at) "
+            "VALUES (?, ?, ?)",
+            (execution_id, caller_id, utcnow().isoformat()),
+        )
+        await self.db.commit()
+
+    async def bounding_principals(self, execution_id: str) -> frozenset[str]:
+        """Every principal whose grant bounds this run, as one set, in one read.
+
+        Three kinds of participant leave a durable row against a run, and this is the
+        only place they are enumerated: the human who authorized it, every human who
+        has acted on it, and every human who has steered it. A fourth kind is a fourth
+        arm of this union and nothing else — no spend-point learns a new name, because
+        no spend-point ever knew any of these.
+        """
+        rows = await self.db.fetch_all(
+            "SELECT authorized_by AS principal FROM executions WHERE execution_id = ?"
+            " UNION "
+            "SELECT caller_id FROM execution_callers WHERE execution_id = ?"
+            " UNION "
+            "SELECT intervened_by FROM execution_interventions WHERE execution_id = ?",
+            (execution_id, execution_id, execution_id),
+        )
+        return frozenset(str(row["principal"]) for row in rows)
+
     def _from_row(self, row: dict[str, Any]) -> Execution:
         try:
             input_data = json.loads(row["input_data"])
@@ -1791,21 +1826,6 @@ class ExecutionInterventionRepo:
             (execution_id,),
         )
         return [self._from_row(row) for row in rows]
-
-    async def steerers(self, execution_id: str) -> frozenset[str]:
-        """Everyone who has steered this run, whether or not a prompt has spent them.
-
-        A steer bounds every prompt of the turn it entered, so the set is the whole
-        history of this execution rather than the queue still waiting. It is read
-        here, from the rows themselves, so that no caller has to carry it: a cached
-        copy is exactly the authorization input frozen at write time that this
-        table's own ``intervened_by`` column exists to avoid.
-        """
-        rows = await self.db.fetch_all(
-            "SELECT DISTINCT intervened_by FROM execution_interventions WHERE execution_id = ?",
-            (execution_id,),
-        )
-        return frozenset(str(row["intervened_by"]) for row in rows)
 
     async def mark_consumed(self, intervention_ids: list[str]) -> None:
         """Retire the steers a step has just taken into its prompt."""

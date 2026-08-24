@@ -16,16 +16,22 @@ transaction that writes, where a settlement landing in between is still visible.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
 import multiplayer.nexus_bridge.agent_bridge as bridge_module
 from multiplayer.db.connection import Database
-from multiplayer.domain.models import HarnessState, MessageRole, RunSettlement
+from multiplayer.domain.models import (
+    ApprovalStatus,
+    HarnessState,
+    MessageRole,
+    RunSettlement,
+)
 from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
 from multiplayer.realtime.hub import RealtimeHub
-from multiplayer.services.service import MultiplayerService
+from multiplayer.services.service import DomainError, MultiplayerService
 
 
 class _ArtifactProvider:
@@ -79,21 +85,64 @@ async def _pending_approval_then_removal(svc: MultiplayerService) -> tuple[str, 
 
 
 @pytest.mark.asyncio
-async def test_releasing_an_approval_left_by_a_settled_run_publishes_nothing(
+async def test_an_approval_left_by_a_settled_run_is_closed_with_it(
     service: MultiplayerService,
 ) -> None:
+    """Removing the agent ends the approval too, so there is nothing left to release."""
     svc = service
     room_id, agent_id, approval_id = await _pending_approval_then_removal(svc)
 
-    approved = await svc.approve_action(approval_id, "owner", require_member=True)
+    approval = await svc.repos.approvals.get(approval_id)
+    assert approval is not None and approval.status.value == "EXPIRED"
+    with pytest.raises(DomainError, match="is not pending"):
+        await svc.approve_action(approval_id, "owner", require_member=True)
 
-    assert approved.status.value == "APPROVED"
     assert await svc.list_room_artifacts(room_id) == []
     rejected = [
         e for e in await svc.get_room_events(room_id) if e.event_type.value == "tool.call_rejected"
     ]
     assert len(rejected) == 1
-    assert "is settled (AGENT_REMOVED)" in rejected[0].payload["reason"]
+    assert rejected[0].payload["reason"] == "agent removed from room"
+    types = [e.event_type.value for e in await svc.get_room_events(room_id)]
+    assert "tool.call_completed" not in types
+    assert "artifact.created" not in types
+
+
+@pytest.mark.asyncio
+async def test_the_approval_door_still_refuses_a_settled_run_if_one_ever_reaches_it(
+    service: MultiplayerService,
+) -> None:
+    """The second line, behind the closure above.
+
+    Settlement now closes the approvals of the run it ends, so a PENDING approval
+    against a settled run should not exist. ``approve_action`` reads the run's state
+    anyway, and that read is what held before the closure did; the row is put back to
+    PENDING here so the guard is still exercised rather than quietly retired.
+    """
+    svc = service
+    room_id, agent_id, approval_id = await _pending_approval_then_removal(svc)
+    expired = await svc.repos.approvals.get(approval_id)
+    assert expired is not None
+    await svc.repos.approvals.update(
+        replace(expired, status=ApprovalStatus.PENDING, reviewed_at=None)
+    )
+    pending = await svc.repos.tool_requests.get_by_approval(approval_id)
+    assert pending is not None
+    await svc.db.execute(
+        "UPDATE tool_requests SET status = 'PENDING_APPROVAL' WHERE request_id = ?",
+        (pending.request_id,),
+    )
+
+    approved = await svc.approve_action(approval_id, "owner", require_member=True)
+
+    assert approved.status.value == "APPROVED"
+    assert await svc.list_room_artifacts(room_id) == []
+    reasons = [
+        e.payload["reason"]
+        for e in await svc.get_room_events(room_id)
+        if e.event_type.value == "tool.call_rejected"
+    ]
+    assert any("is settled (AGENT_REMOVED)" in reason for reason in reasons)
     types = [e.event_type.value for e in await svc.get_room_events(room_id)]
     assert "tool.call_completed" not in types
     assert "artifact.created" not in types
@@ -114,7 +163,7 @@ async def test_the_writer_refuses_a_settled_run_inside_the_transaction_that_writ
     approval = await svc.repos.approvals.get(approval_id)
     assert approval is not None
     pending = await svc.repos.tool_requests.get_by_approval(approval_id)
-    assert pending is not None and pending.status == "PENDING_APPROVAL"
+    assert pending is not None
 
     resolved = await svc._execute_tool_request(pending)
 

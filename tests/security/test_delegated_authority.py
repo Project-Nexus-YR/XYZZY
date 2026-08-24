@@ -193,7 +193,9 @@ async def test_authority_lost_after_run_tool_is_entered_is_still_caught(
     ]
     assert len(revoked) == 1, revoked
     assert revoked[0]["stage"] == "artifact.write"
-    assert revoked[0]["authorized_by"] == AUTHOR
+    # The refusal names every principal the run was bounded by, not the one identity
+    # whichever door raised it happened to be holding.
+    assert AUTHOR in revoked[0]["bounded_by"]
     assert revoked[0]["missing_capability"] == "writing"
 
     run = (await svc.db.fetch_all("SELECT harness_state, settlement FROM agent_runs"))[0]
