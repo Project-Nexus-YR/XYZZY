@@ -62,7 +62,7 @@ src/multiplayer/
 │   ├── connection.py      # aiosqlite wrapper with transaction support
 │   └── repositories.py    # 16 typed repository classes
 ├── migrations/
-│   └── 001_initial.sql    # 20-table schema with indexes
+│   └── 0NN_*.sql           # 28 migrations, applied in order at startup
 ├── services/
 │   ├── service.py         # Core service layer with state machines
 │   └── presence.py        # In-memory presence tracking
@@ -111,16 +111,26 @@ pip install -e ".[dev]"
 
 ## Running
 
+Every route below `/api/v1` needs a bearer token from `MULTIAI_AUTH_TOKENS`;
+`/api/v1/health` is the exception. Without `OPENAI_API_KEY` the server runs a
+credential-free simulator, which is enough for the whole workflow.
+
 ```bash
-# Start the server (serves API + web UI)
+# Start the server (serves API + web UI). POSIX shells:
 export MULTIAI_AUTH_TOKENS='{"local-dev-token":"user_local"}'
-export OPENAI_API_KEY="..."                 # read only by the server process
+export OPENAI_API_KEY="..."                 # optional; simulated when unset
 export MULTIAI_OPENAI_MODEL="gpt-5.4-mini" # optional; this is the default
 export MULTIAI_MODEL_TIMEOUT_SECONDS="45"  # optional
 python -m multiplayer.server
 
 # Open browser
 # http://localhost:8000
+```
+
+```powershell
+# Windows PowerShell: `export` is not a PowerShell verb.
+$env:MULTIAI_AUTH_TOKENS = '{"local-dev-token":"user_local"}'
+python -m multiplayer.server
 ```
 
 The model credential is never accepted from an API request, written to SQLite, or included in an
@@ -149,7 +159,7 @@ python -m pytest tests/regression/ -v
 
 ## Current Status
 
-The current repository gate is 143 passing tests plus Ruff format/check and strict `mypy src`.
+The current repository gate is 673 passing tests plus Ruff format/check and strict `mypy src`.
 The suite covers:
 - Unit tests for domain models
 - Integration tests for repositories, services, and API endpoints

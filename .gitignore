@@ -26,6 +26,8 @@ htmlcov/
 
 # Database (runtime only, not test fixtures)
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 

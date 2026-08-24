@@ -7,7 +7,9 @@ The prepared Slack channel remains available as historical benchmark setup, but 
 active gauntlet quality bar and was never executed as a three-person run.
 
 - Slack channel: `multiai-gauntlet-benchmark` (private)
-- Seed message: <https://newworkspace-nf01857.slack.com/archives/C0BRAKARBFF/p1787187536295479>
+- Seed message: recorded privately. The workspace URL is deliberately not published here -
+  this baseline is superseded, and a private workspace link is of no use to a reader while
+  naming an internal workspace to everyone who clones the repository.
 - Required participants: engineering lead, security lead, product lead
 - Reference tools: one Slack channel/thread plus one separate current ChatGPT chat per participant
 
