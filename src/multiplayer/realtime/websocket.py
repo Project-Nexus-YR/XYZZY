@@ -20,6 +20,11 @@ from ..security import (
 
 log = logging.getLogger(__name__)
 
+# How long a revoked credential can keep an already-open socket: the send loop
+# re-reads the token row on this cadence, so an operator's revocation reaches a
+# live connection without any channel into the server process.
+REAUTH_SECONDS = 30.0
+
 
 def _websocket_authorization(websocket: WebSocket) -> tuple[str | None, str | None]:
     """Read a browser-compatible bearer credential from negotiated subprotocols.
@@ -97,10 +102,28 @@ async def websocket_endpoint(
     )
 
     async def send_loop() -> None:
-        """Read from subscription queue and send to WebSocket."""
+        """Read from subscription queue and send to WebSocket.
+
+        Authentication happened once at the handshake, but a credential can be
+        revoked while the socket lives, from a process this one never hears
+        from. The loop therefore re-authenticates on its own heartbeat: a
+        revoked token closes the connection within about two beats, busy or
+        quiet.
+        """
+        loop = asyncio.get_running_loop()
+        next_reauth = loop.time() + REAUTH_SECONDS
         while True:
+            if loop.time() >= next_reauth:
+                try:
+                    await authenticator.authenticate(websocket_authorization)
+                except AuthenticationError:
+                    await websocket.close(code=4401, reason="authentication revoked")
+                    return
+                except Exception:
+                    return
+                next_reauth = loop.time() + REAUTH_SECONDS
             try:
-                event = await asyncio.wait_for(sub.queue.get(), timeout=30.0)
+                event = await asyncio.wait_for(sub.queue.get(), timeout=REAUTH_SECONDS)
                 if event.get("type") == "access_revoked":
                     # Membership was removed; the hub already dropped the subscription.
                     await websocket.close(code=4403, reason="room access revoked")

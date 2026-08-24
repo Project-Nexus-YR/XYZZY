@@ -6,8 +6,13 @@ stored, a revocation takes effect on the next request, and re-ingesting the
 bootstrap configuration does not resurrect a credential an operator revoked.
 """
 
-import pytest
+import sqlite3
 
+import pytest
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+import multiplayer.realtime.websocket as websocket_module
 from multiplayer import manage
 from multiplayer.db.connection import Database
 from multiplayer.realtime.hub import RealtimeHub
@@ -17,6 +22,7 @@ from multiplayer.security.auth import (
     hash_token,
     ingest_bootstrap_tokens,
 )
+from multiplayer.server import create_app
 from multiplayer.services.service import MultiplayerService
 
 
@@ -97,3 +103,37 @@ async def test_minting_requires_an_existing_user():
             await manage.mint_token(db, "nobody", None)
     finally:
         await db.close()
+
+
+def test_a_revoked_credential_closes_an_already_open_socket(tmp_path, monkeypatch):
+    """An operator revokes from another process; the live socket must notice."""
+    monkeypatch.setattr(websocket_module, "REAUTH_SECONDS", 0.05)
+    db_path = tmp_path / "ws.db"
+    app = create_app(str(db_path), auth_tokens={"live-token": "user_1"})
+    headers = {"Authorization": "Bearer live-token"}
+    with TestClient(app) as client:
+        bootstrap = client.post(
+            "/api/v1/me/bootstrap",
+            headers=headers,
+            json={"display_name": "Owner", "room_name": "Ops"},
+        )
+        assert bootstrap.status_code == 200, bootstrap.text
+        room_id = bootstrap.json()["room"]["room_id"]
+
+        with client.websocket_connect(f"/ws?room_id={room_id}", headers=headers) as ws:
+            assert ws.receive_json()["type"] == "connected"
+
+            # Out-of-band revocation, exactly as `manage token revoke` does it.
+            out_of_band = sqlite3.connect(db_path)
+            try:
+                out_of_band.execute(
+                    "UPDATE user_tokens SET revoked_at = '2026-01-01T00:00:00+00:00'"
+                )
+                out_of_band.commit()
+            finally:
+                out_of_band.close()
+
+            with pytest.raises(WebSocketDisconnect) as disconnect:
+                for _ in range(100):
+                    ws.receive_json()
+            assert disconnect.value.code == 4401
