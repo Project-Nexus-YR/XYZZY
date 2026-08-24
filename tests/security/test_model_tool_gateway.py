@@ -33,7 +33,13 @@ HARNESSES = [NEXUS_HARNESS_ID, MODEL_PROVIDER_HARNESS_ID]
 
 
 class _ToolChoosingTransport(httpx.AsyncBaseTransport):
-    """Answers a step request with the action a model would choose: one tool call."""
+    """The actions a model would choose: one tool call, then the answer it enables.
+
+    The second answer matters as much as the first. A turn is not over when the
+    gateway has run the tool — the room is waiting on what the agent says about the
+    result — so a transport that only ever asks for tools would exercise the bound
+    rather than the gateway.
+    """
 
     def __init__(self, tool: str, tool_input: dict[str, Any] | None = None) -> None:
         self.tool = tool
@@ -53,6 +59,8 @@ class _ToolChoosingTransport(httpx.AsyncBaseTransport):
                 "input": self.tool_input,
                 "output": {"content": f"requesting {self.tool}"},
             }
+            if len(self.requests) == 1
+            else {"action": "finish", "output": {"content": f"answered using {self.tool}"}}
         )
         return httpx.Response(
             200,
@@ -65,10 +73,19 @@ class _ToolChoosingTransport(httpx.AsyncBaseTransport):
         )
 
 
-def _offered_tools(transport: _ToolChoosingTransport) -> list[str]:
-    schema = transport.requests[-1]["text"]["format"]["schema"]
+def _offered_tools(transport: _ToolChoosingTransport, index: int = -1) -> list[str]:
+    schema = transport.requests[index]["text"]["format"]["schema"]
     tool = schema["properties"].get("tool")
     return list(tool["enum"]) if tool else []
+
+
+async def _tool_requests(svc: MultiplayerService) -> list[dict[str, Any]]:
+    return list(
+        await svc.db.fetch_all(
+            "SELECT tool, status, reason, required_capability, effective_json, result_json "
+            "FROM tool_requests ORDER BY created_at, request_id"
+        )
+    )
 
 
 async def _service(transport: httpx.AsyncBaseTransport) -> MultiplayerService:
@@ -121,17 +138,23 @@ async def test_a_model_that_asks_for_an_offered_tool_reaches_the_gateway_and_the
 
         # The run offered the tool, the model asked for it, and the answer survived
         # the decode instead of being flattened into a finish.
-        assert _offered_tools(transport) == ["channel.read_context"]
-        assert result["action"] == "tool"
-        request = result["tool_request"]
-        assert request["tool"] == "channel.read_context"
-        assert request["status"] == "EXECUTED"
-        assert request["required_capability"] == "retrieval"
-        assert "The migration is blocked on auth." in json.dumps(request["result"])
+        assert _offered_tools(transport, 0) == ["channel.read_context"]
+        requests = await _tool_requests(svc)
+        assert [(r["tool"], r["status"]) for r in requests] == [
+            ("channel.read_context", "EXECUTED")
+        ]
+        assert requests[0]["required_capability"] == "retrieval"
+        assert "The migration is blocked on auth." in str(requests[0]["result_json"])
+        # And the turn did not end at the gateway: the tool result went back to the
+        # model and the run produced the output the room was waiting for.
+        assert result["action"] == "finish"
+        assert len(transport.requests) == 2
+        assert len(await svc.repos.agent_outputs.list_by_room(room_id)) == 1
 
         types = [e.event_type.value for e in await svc.get_room_events(room_id)]
         assert types.count("tool.call_started") == 1
         assert types.count("tool.call_completed") == 1
+        assert types.count("agent.run.completed") == 1
         assert "tool.call_rejected" not in types
     finally:
         await svc.db.close()
@@ -187,12 +210,15 @@ async def test_a_capability_withdrawn_while_the_model_thinks_is_rejected_at_the_
             await svc.set_member_capabilities(room_id, "owner", ["analysis"], "owner")
 
         transport.before_answering = withdraw
-        result = await svc.execute_agent_step(execution_id, "Assess the deploy.", "owner")
+        await svc.execute_agent_step(execution_id, "Assess the deploy.", "owner")
 
-        assert _offered_tools(transport) == ["channel.read_context"]
-        assert result["tool_request"]["status"] == "REJECTED"
-        assert result["tool_request"]["effective"] == ["analysis"]
-        assert "retrieval" in result["tool_request"]["reason"]
+        # The offer was honest when it was made, and the gateway refused on the
+        # records as they stood when the answer came back.
+        assert _offered_tools(transport, 0) == ["channel.read_context"]
+        requests = await _tool_requests(svc)
+        assert [r["status"] for r in requests] == ["REJECTED"]
+        assert json.loads(str(requests[0]["effective_json"])) == ["analysis"]
+        assert "retrieval" in str(requests[0]["reason"])
         types = [e.event_type.value for e in await svc.get_room_events(room_id)]
         assert "tool.call_rejected" in types
         assert "tool.call_completed" not in types

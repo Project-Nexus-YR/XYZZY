@@ -52,8 +52,16 @@ class _GatedProvider:
 
 
 class _ArtifactProvider:
+    """Asks for the gated tool once, then answers with whatever came back."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def acomplete(self, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
         del prompt, schema
+        self.calls += 1
+        if self.calls > 1:
+            return {"action": "finish", "output": {"content": "drafted without the artifact"}}
         return {
             "action": "tool",
             "tool": "artifact.write",
@@ -207,24 +215,23 @@ async def test_a_refused_approval_can_instead_continue_the_turn_on_a_fresh_lease
     )
     approval = (await svc.list_pending_approvals(room_id))[0]
     waiting = await _the_run(svc)
+    assert waiting["harness_state"] == HarnessState.AWAITING_APPROVAL.value
 
     await svc.reject_action(approval.approval_id, "owner", continue_turn=True)
 
+    # Continued means continued: the refusal goes back to the model, it answers, and
+    # the run ends END_TURN rather than holding a fresh lease nobody ever spends.
     run = await _the_run(svc)
-    assert run["harness_state"] == HarnessState.STREAMING.value
-    assert run["settlement"] is None
-    # A fresh lease, not the reviewer's long one: nobody is thinking any more.
+    assert run["harness_state"] == HarnessState.SETTLED.value
+    assert run["settlement"] == RunSettlement.END_TURN.value
+    # On the streaming lease, not the reviewer's long one: nobody is thinking now.
     assert run["lease_expires_at"] < waiting["lease_expires_at"]
     assert await svc.repos.artifacts.list_by_room(room_id) == []
+    assert [m.role for m in await svc.list_room_messages(room_id)] == [
+        MessageRole.HUMAN,
+        MessageRole.AGENT,
+    ]
     await _assert_records_agree(svc)
-
-    # And it is still sweepable, which is the point of not leaving it where it was.
-    await svc.db.execute(
-        "UPDATE agent_runs SET lease_expires_at = '2000-01-01T00:00:00+00:00' WHERE run_id = ?",
-        (run["run_id"],),
-    )
-    assert await svc.sweep_expired_run_leases() == 1
-    assert (await _the_run(svc))["settlement"] == RunSettlement.ORPHANED.value
 
 
 # ── A settled run cannot write ───────────────────────────────────────────────

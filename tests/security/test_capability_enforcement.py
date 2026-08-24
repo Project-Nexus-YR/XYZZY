@@ -510,7 +510,9 @@ async def test_a_valid_owner_addressed_identity_still_cannot_write_for_a_viewer(
     await svc.execute_agent_step(execution.execution_id, "Draft the rollout plan.")
 
     statuses = [row["status"] for row in await svc.db.fetch_all("SELECT status FROM tool_requests")]
-    assert statuses == ["REJECTED"]
+    # The turn asks again for what it was refused until its attempts run out; every
+    # one of those requests is refused the same way.
+    assert statuses and set(statuses) == {"REJECTED"}
     assert await svc.repos.artifacts.list_by_room(room_id) == []
 
     # Revoking the identity refuses the next launch and changes no term at all: a

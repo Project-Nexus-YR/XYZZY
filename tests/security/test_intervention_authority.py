@@ -116,7 +116,10 @@ async def test_a_narrow_intervener_narrows_the_step_that_consumes_her_steer(
     provider = svc.nexus._model
     assert isinstance(provider, _RetrievingProvider)
     # Her instruction did reach the prompt. What changed is what the run may do with it.
-    assert "Read the channel and quote it back" in provider.prompts[-1]
+    assert "Read the channel and quote it back" in provider.prompts[0]
+    # And it keeps bounding the prompts that follow it in the same turn: the tool
+    # result the next one reasons over was fetched under her bound.
+    assert len(provider.prompts) > 1
     assert _offered_tools(svc) == []
     assert result["tool_request"]["status"] == "REJECTED"
     assert result["tool_request"]["effective"] == ["analysis"]
@@ -250,8 +253,8 @@ async def test_a_cancelled_turn_does_not_spend_a_steer_it_never_delivered(
     await svc.set_member_capabilities(room_id, "narrow", ["analysis"], "owner")
     session = await svc.start_agent_session(room_id, agent_id)
     run = await svc.start_execution(session.session_id, "owner")
-    # One delivered turn first, so the bridge holds a live run to cancel.
-    await svc.execute_agent_step(run.execution_id, "Assess the deploy.", "owner")
+    # A live bridge run to cancel, without spending a turn on the way to one.
+    await svc.nexus.create_execution(await svc.get_agent(agent_id), session, "", run)
     await svc.intervene_execution(
         run.execution_id, "narrow", "Read the channel and quote it back", require_member=True
     )

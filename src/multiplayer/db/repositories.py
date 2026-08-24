@@ -1178,6 +1178,23 @@ class AgentRunRepo:
         await self.db.commit()
         return cursor.rowcount == 1
 
+    async def spend_attempt(self, run_id: str, expected: int) -> bool:
+        """Charge one attempt to an open run, conditional on the count its caller read.
+
+        Every prompt of a turn spends one, so the bound a continuation runs under is
+        the same ``max_attempts`` the lease sweep parks a run on rather than a second
+        limit beside it. A write that no longer matches touches zero rows, and the
+        caller parks the run instead of prompting it again.
+        """
+        cursor = await self.db.execute(
+            "UPDATE agent_runs SET attempts = attempts + 1 "
+            "WHERE run_id = ? AND attempts = ? AND attempts < max_attempts "
+            "AND harness_state <> ?",
+            (run_id, expected, HarnessState.SETTLED.value),
+        )
+        await self.db.commit()
+        return cursor.rowcount == 1
+
     @staticmethod
     def _from_row(row: dict[str, Any]) -> AgentRun:
         settlement = row.get("settlement")

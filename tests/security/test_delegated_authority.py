@@ -153,7 +153,9 @@ async def test_a_demotion_during_the_provider_call_refuses_the_tool_it_asks_for(
     assert await svc.list_pending_approvals(room_id) == []
     assert await svc.repos.artifacts.list_by_room(room_id) == []
     statuses = [row["status"] for row in await svc.db.fetch_all("SELECT status FROM tool_requests")]
-    assert statuses == ["REJECTED"]
+    # The turn asks again for what it was refused until its attempts run out;
+    # every one of those requests is refused the same way.
+    assert statuses and set(statuses) == {"REJECTED"}
 
 
 # ── The writer leg: the authority goes after _run_tool is entered ────────────
@@ -180,7 +182,9 @@ async def test_authority_lost_after_run_tool_is_entered_is_still_caught(
 
     assert await svc.repos.artifacts.list_by_room(room_id) == []
     statuses = [row["status"] for row in await svc.db.fetch_all("SELECT status FROM tool_requests")]
-    assert statuses == ["REJECTED"]
+    # The turn asks again for what it was refused until its attempts run out;
+    # every one of those requests is refused the same way.
+    assert statuses and set(statuses) == {"REJECTED"}
 
     revoked = [
         event.payload

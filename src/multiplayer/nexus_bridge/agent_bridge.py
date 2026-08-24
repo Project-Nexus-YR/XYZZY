@@ -290,6 +290,22 @@ class NexusAgentBridge:
         try:
             response = self._executor.reason(run_id, provider_prompt, schema)
             action = self._executor.choose_action(run_id, response)
+            if str(action.get("action", "")) == "tool":
+                # NEXUS may execute a step; it may not decide a tool call. Its own
+                # ToolRegistry answers to a PolicyEngine this bridge never configures,
+                # so handing the request to execute_action would put the workspace
+                # gateway — the five-way intersection, the approval gate and the audit
+                # event — outside the path entirely. The request goes back to the
+                # caller instead, in the shape the bridge-native branch returns, and
+                # the run stays RUNNING so the caller can prompt it again with the
+                # result the gateway produced.
+                self._executor.update_state(run_id)
+                return self._tool_request_step(
+                    action,
+                    provider_prompt=provider_prompt,
+                    interventions=interventions,
+                    context=context,
+                )
             result = self._executor.execute_action(run_id, action)
             self._executor.update_state(run_id)
             result_data = result if isinstance(result, dict) else {"result": result}
@@ -297,6 +313,8 @@ class NexusAgentBridge:
                 "status": "ok",
                 "result": result,
                 "action": action.get("action"),
+                "tool": "",
+                "input": {},
                 "provenance": self._provider_provenance(
                     response={},
                     output=result_data,
@@ -314,6 +332,38 @@ class NexusAgentBridge:
         except Exception as exc:
             log.error("Unexpected agent execution failure (%s)", type(exc).__name__)
             return {"status": "error", "error": "internal agent execution error"}
+
+    def _tool_request_step(
+        self,
+        action: dict[str, Any],
+        *,
+        provider_prompt: str,
+        interventions: list[str],
+        context: _SpecialistContext | None,
+    ) -> dict[str, Any]:
+        """One step that asks for a tool, in the one shape every caller reads.
+
+        ``tool`` and ``input`` are always present, because the workspace gateway
+        decides on them: a step that named the tool only inside the runtime that
+        executed it is a step the gateway could not have refused.
+        """
+        raw_output = action.get("output", {})
+        output = dict(raw_output) if isinstance(raw_output, dict) else {"content": raw_output}
+        raw_input = action.get("input", {})
+        return {
+            "status": "ok",
+            "result": output,
+            "action": "tool",
+            "tool": str(action.get("tool", "")),
+            "input": dict(raw_input) if isinstance(raw_input, dict) else {},
+            "provenance": self._provider_provenance(
+                response={},
+                output=output,
+                provider_input=provider_prompt,
+                interventions=interventions,
+                context=context,
+            ),
+        }
 
     @staticmethod
     def _build_specialist_prompt(prompt: str, context: _SpecialistContext | None) -> str:

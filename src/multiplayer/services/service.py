@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -324,6 +324,26 @@ class RunAuthorityRevoked(AuthorizationError):
         self.stage = stage
 
 
+@dataclass
+class _TurnContinuation:
+    """What one agent turn carries across the prompts that make it up.
+
+    A turn is not one provider call. A model that asks for a tool is prompted again
+    with what the tool returned, so ``observations`` are the gateway's own records of
+    those calls, in order, and they are what the next prompt reasons over.
+
+    ``steer_bound`` is every steer that shaped any prompt of this turn, not only the
+    one that spent her text: the tool output the next prompt reads was fetched under
+    her bound, so dropping it between prompts would launder it. Authority itself is
+    never carried — it is re-derived from durable records at every prompt.
+    """
+
+    prompt: str
+    acting_as: str
+    observations: list[str] = field(default_factory=list)
+    steer_bound: frozenset[str] | None = None
+
+
 class MultiplayerService:
     def __init__(
         self, db: Database, hub: RealtimeHub, known_users: frozenset[str] | None = None
@@ -347,6 +367,11 @@ class MultiplayerService:
         self._dispatch_claim = new_id("dispatch")
         # One in-process lease per room, so two drains never do the same pass twice.
         self._ontology_drains: set[str] = set()
+        # Turns holding at a reviewer, by execution id. The decision that releases one
+        # arrives on this process, so this is where the rest of the turn waits. A
+        # restart loses it and the run keeps its approval lease until the sweep
+        # settles it, which is a described end rather than a silent one.
+        self._suspended_turns: dict[str, _TurnContinuation] = {}
 
     async def initialize(self) -> None:
         migrations_dir = Path(__file__).parent.parent / "migrations"
@@ -1408,6 +1433,9 @@ class MultiplayerService:
             # else is advancing is the damage this guard exists to prevent.
             log.info("Run %s advanced while being settled; leaving it alone", run.run_id)
             return False
+        # Nothing will prompt a settled run again, so the turn held for a reviewer is
+        # not waiting any more either.
+        self._suspended_turns.pop(run.execution_id, None)
         await self._broadcast_persisted_events(events)
         return True
 
@@ -2245,7 +2273,118 @@ class MultiplayerService:
     async def execute_agent_step(
         self, execution_id: str, prompt: str, acting_as: str = ""
     ) -> dict[str, Any]:
-        prompt = self._validate_non_empty(prompt, "agent prompt")
+        """Run one agent turn to its end, however many provider calls that takes.
+
+        A model that asked for a tool used to end the turn at the gateway: the call
+        ran and was audited, and then nothing prompted the model again. The run held
+        its lease in silence, no agent message reached the thread, and the sweep
+        eventually stamped it ORPHANED — a false account of a dispatcher that had
+        returned normally. The tool result is fed back here instead.
+        """
+        return await self._continue_agent_turn(
+            execution_id,
+            _TurnContinuation(self._validate_non_empty(prompt, "agent prompt"), acting_as),
+        )
+
+    async def _continue_agent_turn(
+        self, execution_id: str, turn: _TurnContinuation
+    ) -> dict[str, Any]:
+        """Prompt, feed the tool result back, prompt again, until something ends it.
+
+        Exactly three things end it, and each is a state a reader can name: the model
+        answering (or choosing an action the server does not continue), a tool that
+        needs a human, which suspends the turn in the run's approval state, and the
+        run spending its last attempt, which parks it. None of them leaves the run
+        RUNNING with nobody about to prompt it.
+        """
+        while True:
+            result = await self._execute_one_agent_step(execution_id, turn)
+            request = result.get("tool_request")
+            if not isinstance(request, dict):
+                return result
+            if str(request.get("status")) == "PENDING_APPROVAL":
+                # The reviewer holds the turn now; approve_action resumes it here.
+                self._suspended_turns[execution_id] = turn
+                return result
+            turn.observations.append(self._tool_observation(request))
+            parked = await self._park_if_attempts_spent(execution_id, turn.acting_as, result)
+            if parked is not None:
+                return parked
+
+    @staticmethod
+    def _tool_observation(request: dict[str, Any]) -> str:
+        """What the next prompt is told about the tool the last one asked for.
+
+        The gateway's own record and nothing beside it: which tool, what the gateway
+        decided, and the output it produced under this run's authority. A refusal is
+        fed back too, so the model learns it was refused rather than asking again
+        into silence.
+        """
+        return json.dumps(
+            {
+                "tool": request.get("tool", ""),
+                "status": request.get("status", ""),
+                "reason": request.get("reason", ""),
+                "result": request.get("result", {}),
+            },
+            default=str,
+        )
+
+    @staticmethod
+    def _prompt_with_tool_results(provider_prompt: str, observations: list[str]) -> str:
+        """The same turn, continued: what the tools this turn already called returned."""
+        results = "\n".join(f"- {observation}" for observation in observations)
+        return (
+            f"{provider_prompt}\n\nTool results from this turn, in order:\n{results}\n\n"
+            'Answer with action "finish" unless another tool call is genuinely required.'
+        )
+
+    async def _park_if_attempts_spent(
+        self, execution_id: str, acting_as: str, last: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Charge the next prompt to the run's attempts, or park it. Never neither.
+
+        The bound is the run's own ``max_attempts`` — the counter the lease sweep
+        already parks a run on — rather than a second limit invented beside it. A
+        turn that keeps asking for tools without answering therefore ends PARKED,
+        which is terminal, which a reader can name, and which ``resume_agent_run``
+        already refuses to reopen.
+
+        The refusal carries the step the turn stopped on, because where a turn ran
+        out is the part of it worth reading.
+        """
+        run = await self.repos.agent_runs.get_by_execution(execution_id)
+        if run is not None and await self.repos.agent_runs.spend_attempt(run.run_id, run.attempts):
+            return None
+        if run is None:
+            error = f"execution {execution_id} has no run envelope to bound its turn"
+            return {**(last or {}), "status": "error", "error": error}
+        if run.harness_state is HarnessState.SETTLED:
+            # Something already ended this run and said why. Parking it on top would
+            # replace that account with a less accurate one.
+            error = f"run {run.run_id} is settled ({run.settlement})"
+            return {**(last or {}), "status": "error", "error": error}
+        error = f"turn stopped after {run.attempts} step(s) without an answer"
+        await self._settle_run(run, RunSettlement.PARKED, acting_as or "system", error)
+        await self._set_agent_status_safe(run.agent_id, AgentStatus.FAILED)
+        return {
+            **(last or {}),
+            "status": "error",
+            "error": error,
+            "settlement": RunSettlement.PARKED.value,
+        }
+
+    async def _execute_one_agent_step(
+        self, execution_id: str, continuation: _TurnContinuation
+    ) -> dict[str, Any]:
+        """One prompt of a turn: authority, harness, and whatever the model chose.
+
+        Every authority this spends is re-derived here rather than carried in from
+        the prompt before it, so a grant withdrawn between two tool calls stops the
+        second one.
+        """
+        prompt = continuation.prompt
+        acting_as = continuation.acting_as
         execution = await self.repos.executions.get(execution_id)
         if not execution:
             raise DomainError(f"execution not found: {execution_id}")
@@ -2288,12 +2427,16 @@ class MultiplayerService:
         # was accepted would be an authorization input frozen at write time: narrowing
         # her, or removing her from the room, would leave the stale set bounding this
         # step, which is the asymmetry the run principal's own re-derivation avoids.
+        # A steer bounds every prompt of the turn it entered, so the bound this turn
+        # already carries is the floor the new ones narrow, never a set they replace.
         steers = await self.repos.interventions.list_unconsumed(execution_id)
-        steer_bound: frozenset[str] | None = None
+        steer_bound = continuation.steer_bound
         for steer in steers:
             authority = (await self._delegated_terms(execution, steer.intervened_by)).effective
-            terms = terms.bounded_by(authority)
             steer_bound = authority if steer_bound is None else steer_bound & authority
+        if steer_bound is not None:
+            terms = terms.bounded_by(steer_bound)
+        continuation.steer_bound = steer_bound
 
         source_prompt = prompt
         provider_prompt = prompt
@@ -2302,6 +2445,10 @@ class MultiplayerService:
                 raise DomainError("managed branch run must use its immutable initiating prompt")
             source_prompt = branch.initiating_prompt
             provider_prompt = self._branch_execution_prompt(branch)
+        if continuation.observations:
+            provider_prompt = self._prompt_with_tool_results(
+                provider_prompt, continuation.observations
+            )
 
         if agent.harness_id not in KNOWN_HARNESS_IDS:
             raise DomainError(f"no harness is registered as {agent.harness_id!r}")
@@ -4686,7 +4833,7 @@ class MultiplayerService:
                 await self._advance_run_for_execution(
                     pending.execution_id, HarnessState.STREAMING, reviewer_id, _STREAMING_LEASE
                 )
-                await self._execute_tool_request(pending)
+                resolved = await self._execute_tool_request(pending)
             else:
                 # The capability was withdrawn between the request and the grant; a
                 # human's approval cannot restore what the policy no longer permits.
@@ -4706,7 +4853,38 @@ class MultiplayerService:
                     pending.agent_id,
                     "agent",
                 )
+                resolved = replace(pending, status="REJECTED", reason=decision.reason)
+            # The turn stopped at this reviewer. Running the tool is not what the
+            # room was waiting for; the answer is, so the rest of the turn runs now.
+            await self._resume_suspended_turn(pending.execution_id, resolved)
         return approval
+
+    async def _resume_suspended_turn(self, execution_id: str, request: ToolRequest | None) -> None:
+        """Carry a turn that stopped at a reviewer through to its answer.
+
+        It resumes under the principals it suspended under, not under the reviewer:
+        she decided one tool call, and lending her grant to the rest of the turn
+        would be a wider authority than anyone asked her for. Every prompt re-derives
+        from durable records regardless, so a grant withdrawn while she deliberated
+        still stops the next call.
+
+        A continuation that cannot run — its run settled meanwhile, its principal
+        narrowed to nothing — has already recorded why in the same places any other
+        step would. The approval is committed, and failing it here would tell the
+        reviewer her decision was lost when it was not.
+        """
+        turn = self._suspended_turns.pop(execution_id, None)
+        if turn is None:
+            return
+        if request is not None:
+            response = self._tool_response(request)
+            turn.observations.append(self._tool_observation(response["tool_request"]))
+        if await self._park_if_attempts_spent(execution_id, turn.acting_as) is not None:
+            return
+        try:
+            await self._continue_agent_turn(execution_id, turn)
+        except (DomainError, AuthorizationError):
+            log.info("Turn for %s could not resume after its approval decision", execution_id)
 
     async def reject_action(
         self,
@@ -4786,12 +4964,21 @@ class MultiplayerService:
                         )
                     )
                 )
+                pending = replace(pending, status="REJECTED", reason="approval rejected")
+            else:
+                pending = None
             events.extend(
                 await self._end_refused_approval_in_transaction(
                     approval.execution_id, reviewer_id, continue_turn
                 )
             )
         await self._broadcast_persisted_events(events)
+        if continue_turn:
+            # The fresh lease above is only honest if something is about to prompt
+            # this run again. That is here.
+            await self._resume_suspended_turn(approval.execution_id, pending)
+        else:
+            self._suspended_turns.pop(approval.execution_id, None)
         return approval
 
     async def _end_refused_approval_in_transaction(
