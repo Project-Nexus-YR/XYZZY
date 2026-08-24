@@ -472,6 +472,12 @@ class MultiplayerService:
             if migration_file.name in applied:
                 continue
             body = migration_file.read_text()
+            # A body that commits inside the wrapper would leave its own DDL
+            # committed but unrecorded on a later failure - wedged forever.
+            # (A stray BEGIN needs no guard: it fails as a nested transaction
+            # and rolls back cleanly.)
+            if re.search(r"(?im)^\s*(COMMIT|ROLLBACK)\b", body):
+                raise RuntimeError(f"migration {migration_file.name} manages its own transaction")
             wants_foreign_keys_off = "foreign_keys=OFF" in body
             record = (
                 "INSERT INTO schema_migrations(name, applied_at) VALUES "
