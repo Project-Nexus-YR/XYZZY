@@ -15,6 +15,8 @@ import aiosqlite
 
 log = logging.getLogger(__name__)
 
+_READER_POOL_SIZE = 4
+
 
 class Database:
     """Async SQLite database wrapper with transaction support."""
@@ -27,6 +29,15 @@ class Database:
         # explicit transaction holds the gate for its complete lifetime.
         self._connection_lock = asyncio.Lock()
         self._transaction_owner: asyncio.Task[Any] | None = None
+        # Under WAL, read connections proceed while the write connection holds
+        # a transaction. A :memory: database is private to its one connection,
+        # so it stays on the single-connection path.
+        self._readers: asyncio.Queue[aiosqlite.Connection] | None = None
+        self._all_readers: list[aiosqlite.Connection] = []
+        self._reader_open_lock = asyncio.Lock()
+
+    def _is_memory(self) -> bool:
+        return ":memory:" in self._path or "mode=memory" in self._path
 
     async def connect(self) -> None:
         try:
@@ -40,8 +51,40 @@ class Database:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA busy_timeout=30000")
         await self._db.execute("PRAGMA foreign_keys=ON")
+        if not self._is_memory():
+            self._readers = asyncio.Queue()
+
+    @asynccontextmanager
+    async def _reader(self) -> AsyncIterator[aiosqlite.Connection]:
+        if self._readers is None:
+            raise RuntimeError("Database not connected")
+        readers = self._readers
+        if readers.empty() and len(self._all_readers) < _READER_POOL_SIZE:
+            async with self._reader_open_lock:
+                if readers.empty() and len(self._all_readers) < _READER_POOL_SIZE:
+                    conn = await aiosqlite.connect(self._path, isolation_level=None)
+                    conn.row_factory = aiosqlite.Row
+                    await conn.execute("PRAGMA busy_timeout=30000")
+                    await conn.execute("PRAGMA foreign_keys=ON")
+                    # A read connection that is handed a write must fail loudly,
+                    # not race the writer.
+                    await conn.execute("PRAGMA query_only=ON")
+                    self._all_readers.append(conn)
+                    readers.put_nowait(conn)
+        conn = await readers.get()
+        try:
+            yield conn
+        finally:
+            readers.put_nowait(conn)
 
     async def close(self) -> None:
+        self._readers = None
+        for reader in self._all_readers:
+            try:
+                await reader.close()
+            except Exception:
+                log.warning("Error closing read connection", exc_info=True)
+        self._all_readers = []
         if self._db:
             try:
                 async with self._connection_lock:
@@ -108,6 +151,13 @@ class Database:
                 row = await cursor.fetchone()
             finally:
                 await cursor.close()
+        elif self._readers is not None:
+            async with self._reader() as conn:
+                cursor = await conn.execute(sql, params)
+                try:
+                    row = await cursor.fetchone()
+                finally:
+                    await cursor.close()
         else:
             async with self._connection_lock:
                 cursor = await self.conn.execute(sql, params)
@@ -126,6 +176,13 @@ class Database:
                 rows = await cursor.fetchall()
             finally:
                 await cursor.close()
+        elif self._readers is not None:
+            async with self._reader() as conn:
+                cursor = await conn.execute(sql, params)
+                try:
+                    rows = await cursor.fetchall()
+                finally:
+                    await cursor.close()
         else:
             async with self._connection_lock:
                 cursor = await self.conn.execute(sql, params)
