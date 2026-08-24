@@ -1,4 +1,4 @@
-"""Multiplayer AI Workspace - persistent shared workspace for humans and agents."""
+"""XYZZY - persistent shared workspace for humans and agents."""
 
 from importlib.metadata import PackageNotFoundError, version
 

@@ -39,13 +39,13 @@ def create_app(
     db = Database(db_path)
     hub = RealtimeHub()
     if auth_tokens is None:
-        raw_tokens = os.environ.get("MULTIAI_AUTH_TOKENS", "{}")
+        raw_tokens = os.environ.get("XYZZY_AUTH_TOKENS", "{}")
         try:
             configured_tokens = json.loads(raw_tokens)
         except json.JSONDecodeError as exc:
-            raise RuntimeError("MULTIAI_AUTH_TOKENS must be a JSON object") from exc
+            raise RuntimeError("XYZZY_AUTH_TOKENS must be a JSON object") from exc
         if not isinstance(configured_tokens, dict):
-            raise RuntimeError("MULTIAI_AUTH_TOKENS must be a JSON object")
+            raise RuntimeError("XYZZY_AUTH_TOKENS must be a JSON object")
         auth_tokens = {str(token): str(user_id) for token, user_id in configured_tokens.items()}
     authenticator = TokenAuthenticator(db)
     svc = MultiplayerService(db, hub, known_users=frozenset(auth_tokens.values()))
@@ -78,7 +78,7 @@ def create_app(
         await db.close()
 
     app = FastAPI(
-        title="Multiplayer AI Workspace",
+        title="XYZZY",
         description="Persistent shared workspace for humans and AI agents",
         version=__version__,
         lifespan=lifespan,

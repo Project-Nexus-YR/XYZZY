@@ -1,4 +1,4 @@
-# MultiAI — Pain, Value Proposition & ICP
+# XYZZY — Pain, Value Proposition & ICP
 
 ## 1. Core Pain
 
@@ -124,13 +124,13 @@ Giving every employee the full capabilities of an engineering agent is unsafe.
 
 Giving agents no operational capability makes them much less useful.
 
-MultiAI needs to make collaborative AI **permission-aware by construction**.
+XYZZY needs to make collaborative AI **permission-aware by construction**.
 
 ---
 
 # 2. Core Value Proposition
 
-> **MultiAI turns AI from a single-player assistant into a shared organizational intelligence layer.**
+> **XYZZY turns AI from a single-player assistant into a shared organizational intelligence layer.**
 
 Teams collaborate with AI in shared channels, branch work across specialized agents, inspect every output, selectively synthesize the best reasoning, and automatically preserve important knowledge in a provenance-aware organizational ontology.
 
@@ -140,7 +140,7 @@ Instead of:
 people → private AI chats → copy/paste → Slack
 ```
 
-MultiAI enables:
+XYZZY enables:
 
 ```text
              Shared Context
@@ -214,7 +214,7 @@ That is immediate product value.
 
 The ontology creates the longer-term value.
 
-As the team works, MultiAI gradually learns:
+As the team works, XYZZY gradually learns:
 
 ```text
 People
@@ -266,7 +266,7 @@ Meetings
 status updates
 ```
 
-MultiAI's Meta layer should turn that into:
+XYZZY's Meta layer should turn that into:
 
 ```text
 What changed?
@@ -408,7 +408,7 @@ that context is already becoming difficult to maintain.
 
 ### Short Decision Cycles
 
-The company makes frequent technical/product decisions, giving MultiAI many opportunities to demonstrate value.
+The company makes frequent technical/product decisions, giving XYZZY many opportunities to demonstrate value.
 
 ### Low Procurement Friction
 
@@ -546,7 +546,7 @@ If the buying motivation is:
 
 > Rank my employees by productivity.
 
-MultiAI is the wrong product.
+XYZZY is the wrong product.
 
 The product should understand **work**, not manufacture employee scores from activity proxies.
 
@@ -604,7 +604,7 @@ If only management benefits, employees will not use it enough to generate useful
 The long-term advantage is a compounding loop:
 
 ```text
-More work happens in MultiAI
+More work happens in XYZZY
           ↓
 More useful evidence exists
           ↓
@@ -618,7 +618,7 @@ Organizational context improves
           ↓
 Agents become more useful
           ↓
-More work happens in MultiAI
+More work happens in XYZZY
 ```
 
 The ontology is therefore not merely a feature.
@@ -657,7 +657,7 @@ For technical audiences:
 
 # 16. The Bet
 
-MultiAI ultimately rests on one fundamental bet:
+XYZZY ultimately rests on one fundamental bet:
 
 > **AI is moving from individual assistance toward collaborative organizational work, but today's interfaces and infrastructure remain fundamentally single-player.**
 
@@ -672,10 +672,10 @@ If that transition occurs, teams will need:
 - synthesis;
 - persistent organizational memory.
 
-MultiAI aims to provide that layer.
+XYZZY aims to provide that layer.
 
 The first thing to prove is much smaller:
 
-> **Can 3–5 people solve an important problem meaningfully better by working with AI together in MultiAI than by each opening their own AI assistant and coordinating afterward?**
+> **Can 3–5 people solve an important problem meaningfully better by working with AI together in XYZZY than by each opening their own AI assistant and coordinating afterward?**
 
 If the answer is yes, the ontology, Meta, integrations, and management intelligence have a strong foundation to build on.

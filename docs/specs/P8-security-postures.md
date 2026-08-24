@@ -3,7 +3,7 @@
 Two things, on top of the five-way intersection in `security/capabilities.py` and neither of them
 widening it.
 
-The first is the posture gap in `docs/benchmarks/buzz-agent-workspace-baseline.md`. MultiAI has
+The first is the posture gap in `docs/benchmarks/buzz-agent-workspace-baseline.md`. XYZZY has
 per-tool `requires_approval` booleans decided at write time by whoever registered the tool and
 nothing above them: no way to say "in this room, everything pauses", and no way afterwards to show
 which rule was in force. `yc-software/qm` declares three postures — Strict pauses every tool call,
@@ -31,7 +31,7 @@ tier would be a second scope to compose, and composition is where four of the re
 lived; a `SUPERVISED` tier over `MUTATING_CAPABILITIES` is definable but nothing asked for it; a
 `Dangerous` tier is refused outright, because a floor a setting can remove is not a floor and
 postures are per room, so the weakest room would define the product. qm's `Auto` screens external
-content and MultiAI has no external ingress for it to screen.
+content and XYZZY has no external ingress for it to screen.
 
 Two named values need no ordering to compare, so there is no rank table and nothing that reads one.
 

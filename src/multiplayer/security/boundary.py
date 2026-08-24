@@ -24,7 +24,7 @@ from contextvars import ContextVar
 
 from .authorization import AuthorizationError
 
-_agent_turn: ContextVar[str | None] = ContextVar("multiai_agent_turn", default=None)
+_agent_turn: ContextVar[str | None] = ContextVar("xyzzy_agent_turn", default=None)
 
 
 @contextmanager

@@ -1,12 +1,12 @@
-# MultiAI seeded workflow run — 2026-08-20
+# XYZZY seeded workflow run — 2026-08-20
 
 ## Status
 
-This is the recorded local MultiAI run against the active
+This is the recorded local XYZZY run against the active
 `chatgpt-shared-projects-baseline.md` quality bar. It is not a winning comparison yet: the
 connected browser had no signed-in three-person ChatGPT shared Project, and the local server had
-no `OPENAI_API_KEY`. The reference artifact and live model-backed MultiAI artifact therefore
-remain pending. The gauntlet rule counts both unverified conditions as a MultiAI loss.
+no `OPENAI_API_KEY`. The reference artifact and live model-backed XYZZY artifact therefore
+remain pending. The gauntlet rule counts both unverified conditions as a XYZZY loss.
 
 ## Seeded decision
 
@@ -46,9 +46,9 @@ text is treated as a real outcome.
 
 ## Manual-transfer comparison
 
-The MultiAI browser workflow required no manual copying between specialist branches and the
+The XYZZY browser workflow required no manual copying between specialist branches and the
 decision artifact. The corresponding hands-on ChatGPT shared Project transfer count remains
-unrecorded, so this is evidence about MultiAI only and not a comparative win.
+unrecorded, so this is evidence about XYZZY only and not a comparative win.
 
 ## Remaining external acceptance work
 

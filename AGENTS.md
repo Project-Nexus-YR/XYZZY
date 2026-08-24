@@ -1,4 +1,4 @@
-# MultiAI Repository Contract
+# XYZZY Repository Contract
 
 This repository builds the multiplayer workspace for teams working with AI. The product is
 successful only when 3–5 people can solve a consequential technical problem together more
@@ -109,5 +109,5 @@ infrastructure work that does not strengthen the core multiplayer decision loop.
 Split work into independently testable pieces. Builders own implementation; separate critics with
 fresh context inspect the actual artifact. Critics compare anonymized outcomes against the real
 ChatGPT shared Projects workflow, make a binary choice, and name the single largest remaining gap.
-No self-scoring. Feed that gap back to a builder and repeat until MultiAI wins or the user stops
+No self-scoring. Feed that gap back to a builder and repeat until XYZZY wins or the user stops
 the run.

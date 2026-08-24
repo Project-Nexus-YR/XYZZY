@@ -143,7 +143,7 @@ def test_selective_synthesis_persists_choices_and_exact_provenance_on_reconnect(
         ui = client.get("/").text
         assert 'id="setup-token"' in ui
         assert "'Authorization': `Bearer ${accessToken}`" in ui
-        assert "['multiai.v1', `bearer.${encodedToken}`]" in ui
+        assert "['xyzzy.v1', `bearer.${encodedToken}`]" in ui
         assert "output-selections/${outputId}" in ui
         assert "/syntheses`," in ui
         assert "synthesis_type: type" in ui
@@ -151,7 +151,7 @@ def test_selective_synthesis_persists_choices_and_exact_provenance_on_reconnect(
 
         with client.websocket_connect(
             f"/ws?room_id={room_id}",
-            subprotocols=["multiai.v1", "bearer.ZWRpdG9yLXRva2Vu"],
+            subprotocols=["xyzzy.v1", "bearer.ZWRpdG9yLXRva2Vu"],
         ) as websocket:
-            assert websocket.accepted_subprotocol == "multiai.v1"
+            assert websocket.accepted_subprotocol == "xyzzy.v1"
             assert websocket.receive_json()["type"] == "connected"

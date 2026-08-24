@@ -147,8 +147,8 @@ def test_environment_configuration_does_not_require_a_request_credential() -> No
     configured = model_provider_from_environment(
         {
             "OPENAI_API_KEY": "sk-test-not-real",
-            "MULTIAI_OPENAI_MODEL": "gpt-test",
-            "MULTIAI_MODEL_TIMEOUT_SECONDS": "7",
+            "XYZZY_OPENAI_MODEL": "gpt-test",
+            "XYZZY_MODEL_TIMEOUT_SECONDS": "7",
         }
     )
 
@@ -180,7 +180,7 @@ async def test_synthesis_schema_opts_into_responses_structured_output() -> None:
     request = transport.requests[0]
     assert request["text"]["format"] == {
         "type": "json_schema",
-        "name": "multiai_response",
+        "name": "xyzzy_response",
         "strict": True,
         "schema": schema,
     }

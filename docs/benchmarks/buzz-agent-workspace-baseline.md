@@ -28,9 +28,9 @@ Hermes Agent (<https://github.com/NousResearch/hermes-agent>) and xAI's Grok bot
 (<https://docs.x.ai/grok-bot/overview>, plus the mention-triggered `@grok` behaviour on X, which
 is documented only in platform announcements and press).
 
-## What Buzz does that MultiAI does not
+## What Buzz does that XYZZY does not
 
-Every item below is a capability MultiAI lacked entirely as of commit `c7836ab`, which is
+Every item below is a capability XYZZY lacked entirely as of commit `c7836ab`, which is
 when this bar was set. The table is deliberately not updated as work lands: it records the
 starting position the gauntlet was run against, not today's status. For what has since been
 built, read the log from `c382c2a` onward.
@@ -50,7 +50,7 @@ built, read the log from `c382c2a` onward.
 ## What Buzz concedes it does not do
 
 These are quoted or paraphrased from the repository's own documentation, not inferred. They are
-the ground MultiAI must hold.
+the ground XYZZY must hold.
 
 1. **Search authorization is advisory.** `buzz-search` "returns candidate hits; the relay
    re-authorizes each one" afterwards, and private kinds are excluded by a hardcoded blocklist of
@@ -83,23 +83,23 @@ Added 2026-08-23 at the user's direction. Verified directly from the repository 
 shared org agent (managed-agents architecture)", version 0.1.0.
 
 qm is the closer competitor. Buzz is a workspace that agents can join; qm is an agent harness for a
-whole organisation, which is the same product thesis as MultiAI.
+whole organisation, which is the same product thesis as XYZZY.
 
 ### What to take from it
 
 | Idea | Where | Why it matters here |
 |---|---|---|
-| Three declared security postures — Strict pauses every tool call for approval, Auto screens external content before it reaches the model, Dangerous does neither — inheritable by narrower scopes | `SECURITY.md` | MultiAI has per-tool `requires_approval` booleans and no posture above them. A room-level posture that a narrower scope may only tighten, never loosen, is the missing layer |
+| Three declared security postures — Strict pauses every tool call for approval, Auto screens external content before it reaches the model, Dangerous does neither — inheritable by narrower scopes | `SECURITY.md` | XYZZY has per-tool `requires_approval` booleans and no posture above them. A room-level posture that a narrower scope may only tighten, never loosen, is the missing layer |
 | An always-on command policy of hard denials and approval rules that applies even under the most permissive posture | `SECURITY.md` | A floor no policy can lower, independent of the capability intersection |
 | Agents act with the authorising human's own permissions rather than a service identity | `README.md` | Independent confirmation of P6's delegated authority: attribution by construction rather than by logging |
 | A run record carrying `leaseToken`, `leaseExpiresAt`, `workerId`, `attempts`, `maxAttempts`, with `leaseLapsed()` reclaiming stuck runs, `errorParks()` parking a run that exceeds its attempts, and a reaper process | `src/runs/run-store.ts` | This is the answer to "no run may be left in a state the system cannot describe". P6 has the lease and the sweep; it is missing a parked terminal state |
-| Idempotent enqueue via `dedupKey` on the run store | `src/runs/run-store.ts` | Matches MultiAI's idempotency keys, applied to run submission rather than only to writes |
+| Idempotent enqueue via `dedupKey` on the run store | `src/runs/run-store.ts` | Matches XYZZY's idempotency keys, applied to run submission rather than only to writes |
 | Background work as first-class triggers — crons, webhooks, watches | repository overview | Confirms `triggered_by: SCHEDULE` is a real category, not speculation |
-| Skills with their own access control, separate from the channel model | repository overview | MultiAI folds skills into the five-way intersection; qm gives them an ACL of their own |
+| Skills with their own access control, separate from the channel model | repository overview | XYZZY folds skills into the five-way intersection; qm gives them an ACL of their own |
 
 Session concurrency converges with ours independently: `createOrchestrator()` takes a per-session
 lease and refuses a second turn with "session busy (another turn is in progress)"
-(`src/core/orchestrator.ts`) — MultiAI's turn lock, arrived at separately. Parallelism comes from
+(`src/core/orchestrator.ts`) — XYZZY's turn lock, arrived at separately. Parallelism comes from
 separate worker processes across sessions; no dependency graph or fan-out primitive was found in the
 files read.
 
@@ -125,7 +125,7 @@ From its own `SECURITY.md` and open issues, not inferred:
    audited but requiring no additional approval.
 
 The sentence that states the whole difference, from `SECURITY.md`: **"audit records support
-investigation; they do not prevent an action."** MultiAI's claim is the opposite one — the check is
+investigation; they do not prevent an action."** XYZZY's claim is the opposite one — the check is
 inside the write transaction, so the action does not happen. Every piece in this gauntlet is judged
 against that.
 
@@ -150,12 +150,12 @@ produced by selective synthesis.
 
 ## Binary comparison rules
 
-Strip product labels before criticism. Ties and unverified conditions count as a MultiAI loss.
+Strip product labels before criticism. Ties and unverified conditions count as a XYZZY loss.
 The critic returns a binary winner and the single largest remaining gap, nothing else.
 
 ### P5 — Conversation layer
 
-MultiAI wins only if it matches Buzz on threaded replies, mention addressing, reactions, and
+XYZZY wins only if it matches Buzz on threaded replies, mention addressing, reactions, and
 cross-object search, while clearly beating it on all of:
 
 1. every thread reply is an ordered event with a room sequence, and reply counts are derived
@@ -170,7 +170,7 @@ cross-object search, while clearly beating it on all of:
 
 ### P6 — Agent identity and harness
 
-MultiAI wins only if it matches Buzz on durable agent identity and a pluggable harness, while
+XYZZY wins only if it matches Buzz on durable agent identity and a pluggable harness, while
 clearly beating it on all of:
 
 1. every agent action names the human whose authority it runs under, and that authority is
@@ -215,17 +215,17 @@ supersede the doc-derived claims where they differ.
   (`migrations/0001:190-236`, `0021:1-30`).
 - **No per-user read state: CONTRADICTED.** Kind 30078 stores per-client read-position blobs
   (`buzz-core/src/kind.rs:71-75`). The blobs are NIP-44 encrypted to the user's own key, so
-  the server cannot compute unread state; MultiAI's server-derived cursors remain the
+  the server cannot compute unread state; XYZZY's server-derived cursors remain the
   differentiator, but "does not exist at all" is wrong and is withdrawn.
 - **Reply counters can desync: partially confirmed.** Inserts bump the counter in the same
   transaction (`buzz-db/src/thread.rs:112-129`); the delete path decrements outside any
   transaction and floors at zero (`thread.rs:292-310`), so drift is real but narrower.
 - **Tool scoping deferred: confirmed, and worse.** No per-agent tool allow/deny exists, and
   the ACP bridge auto-approves every `session/request_permission` with `allow_once`
-  (`buzz-acp/src/acp.rs:1925-1960`). The approval gate MultiAI runs per call does not exist
+  (`buzz-acp/src/acp.rs:1925-1960`). The approval gate XYZZY runs per call does not exist
   in buzz at all today.
 - **Audit chain: real, detection-only.** Per-community SHA-256 chain with `verify_chain`
-  over 11 action kinds (`buzz-audit/src/service.rs:169-215`). MultiAI's chain (migration 033)
+  over 11 action kinds (`buzz-audit/src/service.rs:169-215`). XYZZY's chain (migration 033)
   covers every room event, not a subset.
 
 ### qm, verified
@@ -242,7 +242,7 @@ supersede the doc-derived claims where they differ.
   but no approval (`src/api/routes/emoji.ts:6-42`).
 - **Postures and run-as: confirmed.** `dangerous`/`auto`/`strict` compose stricter-of
   (`src/security/security-posture.ts:24-39`); `auto`'s LLM inbound screening **fails open**
-  with an audit mark (`src/core/orchestrator.ts:2384-2395`). MultiAI's screen is
+  with an audit mark (`src/core/orchestrator.ts:2384-2395`). XYZZY's screen is
   deterministic and cannot err open. Run-as resolves the actor at fire time and fails closed
   (`src/triggers/run-trigger.ts:163-186`) - noted as the part worth respecting.
 

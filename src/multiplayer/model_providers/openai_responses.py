@@ -123,7 +123,7 @@ class OpenAIResponsesProvider:
         if isinstance(properties, Mapping) and "claims" in properties:
             text["format"] = {
                 "type": "json_schema",
-                "name": "multiai_response",
+                "name": "xyzzy_response",
                 "strict": True,
                 "schema": response_schema,
             }
@@ -134,7 +134,7 @@ class OpenAIResponsesProvider:
             # prose the decoder would have to guess a choice from.
             text["format"] = {
                 "type": "json_schema",
-                "name": "multiai_step",
+                "name": "xyzzy_step",
                 "strict": False,
                 "schema": response_schema,
             }
@@ -292,10 +292,10 @@ def model_provider_from_environment(
     api_key = values.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         return WorkflowOnlyModelProvider()
-    model = values.get("MULTIAI_OPENAI_MODEL", _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
-    raw_timeout = values.get("MULTIAI_MODEL_TIMEOUT_SECONDS", str(_DEFAULT_TIMEOUT_SECONDS))
+    model = values.get("XYZZY_OPENAI_MODEL", _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
+    raw_timeout = values.get("XYZZY_MODEL_TIMEOUT_SECONDS", str(_DEFAULT_TIMEOUT_SECONDS))
     try:
         timeout = float(raw_timeout)
     except ValueError as exc:
-        raise ValueError("MULTIAI_MODEL_TIMEOUT_SECONDS must be a number") from exc
+        raise ValueError("XYZZY_MODEL_TIMEOUT_SECONDS must be a number") from exc
     return OpenAIResponsesProvider(api_key=api_key, model=model, timeout_seconds=timeout)

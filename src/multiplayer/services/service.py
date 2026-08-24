@@ -1945,7 +1945,7 @@ class MultiplayerService:
             messages = await self.repos.messages.list_by_room(room_id, limit=50)
             events = await self.repos.events.list_since(room_id, max(0, sequence - 100), limit=100)
             snapshot = {
-                "schema": "multiai.branch-context.v1",
+                "schema": "xyzzy.branch-context.v1",
                 "limits": {"messages": 50, "events": 100},
                 "messages": [
                     {

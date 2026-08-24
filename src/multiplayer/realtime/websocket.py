@@ -31,7 +31,7 @@ def _websocket_authorization(websocket: WebSocket) -> tuple[str | None, str | No
     """Read a browser-compatible bearer credential from negotiated subprotocols.
 
     Browser WebSocket APIs cannot set Authorization headers. The UI therefore sends
-    ``multiai.v1`` plus a base64url encoded ``bearer.<token>`` protocol value. This
+    ``xyzzy.v1`` plus a base64url encoded ``bearer.<token>`` protocol value. This
     keeps credentials out of URLs, query logs, and reconnect history.
     """
     authorization = websocket.headers.get("authorization")
@@ -42,7 +42,7 @@ def _websocket_authorization(websocket: WebSocket) -> tuple[str | None, str | No
         for value in websocket.headers.get("sec-websocket-protocol", "").split(",")
         if value.strip()
     ]
-    if "multiai.v1" not in protocols:
+    if "xyzzy.v1" not in protocols:
         return None, None
     encoded = next(
         (value.removeprefix("bearer.") for value in protocols if value.startswith("bearer.")), ""
@@ -54,7 +54,7 @@ def _websocket_authorization(websocket: WebSocket) -> tuple[str | None, str | No
         token = base64.urlsafe_b64decode(padded.encode()).decode()
     except (ValueError, UnicodeDecodeError):
         return None, None
-    return f"Bearer {token}", "multiai.v1"
+    return f"Bearer {token}", "xyzzy.v1"
 
 
 async def websocket_endpoint(

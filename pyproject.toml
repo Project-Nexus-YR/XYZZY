@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "multiplayer-ai"
+name = "xyzzy"
 version = "0.2.0"
 description = "Persistent shared workspace where multiple humans and AI agents work together"
 readme = "README.md"
@@ -33,7 +33,7 @@ dev = [
 nexus = []
 
 [project.scripts]
-multiplayer = "multiplayer.server:main"
+xyzzy = "multiplayer.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

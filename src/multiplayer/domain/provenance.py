@@ -43,7 +43,7 @@ def calculate_artifact_provenance_hash(
         "content_hash": content_hash,
         "created_at": normalize_provenance_timestamp(created_at),
         "created_by": normalize_provenance_author(created_by),
-        "schema": "multiai.artifact-provenance.v2",
+        "schema": "xyzzy.artifact-provenance.v2",
         "version_id": version_id,
         "version_number": version_number,
     }

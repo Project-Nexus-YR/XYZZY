@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Multiplayer AI Workspace</title>
+<title>XYZZY</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#0d0f14;--surface:#151821;--surface2:#1e2330;--surface3:#272d3c;--border:#303747;--text:#eef1f7;--text2:#98a2b6;--accent:#6d7cff;--accent2:#9aa5ff;--green:#35c987;--red:#f0646b;--yellow:#eabf4c;--orange:#f4934d;--radius:9px}
@@ -141,7 +141,7 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
 @media(max-width:1050px){.sidebar{display:none}.right-panel{width:52vw;min-width:400px}}
 @media(max-width:760px){body{overflow:auto;height:auto}.main{display:block!important;overflow:visible}.center{min-height:65vh}.right-panel{width:100%;min-width:0;border-left:0;border-top:1px solid var(--border);overflow:visible}.template-grid,.outputs-grid{grid-template-columns:1fr}.workflow-tag{display:none}}
 
-/* MultiAI application shell */
+/* XYZZY application shell */
 :root{--bg:oklch(97.8% .006 70);--surface:oklch(99.1% .004 70);--surface2:oklch(95.7% .008 70);--surface3:oklch(92.8% .011 70);--border:oklch(87% .012 65);--text:oklch(24% .018 55);--text2:oklch(51% .018 55);--accent:oklch(55% .145 38);--accent2:oklch(49% .15 38);--green:oklch(52% .09 185);--red:oklch(55% .16 25);--yellow:oklch(59% .11 78);--radius:7px}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;font-size:13px}
 button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.48}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
@@ -203,7 +203,7 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
 
 <div id="setup-screen">
 <section class="setup-intro" aria-labelledby="welcome-title">
-  <div class="setup-mark"><span class="product-mark">M</span> MultiAI</div>
+  <div class="setup-mark"><span class="product-mark">X</span> XYZZY</div>
   <h1 id="welcome-title">Decide together. Keep every line of reasoning.</h1>
   <p>One durable channel for your team, specialist branches, deliberate selection, and evidence-backed artifacts.</p>
   <div class="setup-steps"><span><b class="step-no">1</b> Join with your configured test identity</span><span><b class="step-no">2</b> Talk in the shared channel</span><span><b class="step-no">3</b> Branch to specialists when the question is ready</span></div>
@@ -222,8 +222,8 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
 </div>
 
 <div class="header" id="app-header" style="display:none">
-<span class="product-mark">M</span>
-<h1>Multiplayer AI Workspace</h1>
+<span class="product-mark">X</span>
+<h1>XYZZY</h1>
 <span class="workflow-tag">shared context → parallel branches → deliberate selection</span>
 <span class="status" id="ws-status-shell">Connecting...</span>
 </div>
@@ -231,7 +231,7 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
 <div class="main" id="app-main" style="display:none">
 <aside class="workspace-rail" aria-label="Workspaces"><div class="rail-logo">M</div><button class="rail-workspace active" aria-label="Current workspace">MA</button><div class="rail-spacer"></div><div class="rail-workspace rail-avatar" id="rail-avatar">Y</div></aside>
 <div class="sidebar" id="sidebar">
-<div class="workspace-head"><div><div class="workspace-name">MultiAI Workspace</div><div class="workspace-sub">Shared decision space</div></div><button class="icon-button" onclick="openContext('members')" aria-label="Workspace details">···</button></div><div class="sidebar-scroll">
+<div class="workspace-head"><div><div class="workspace-name">XYZZY Workspace</div><div class="workspace-sub">Shared decision space</div></div><button class="icon-button" onclick="openContext('members')" aria-label="Workspace details">···</button></div><div class="sidebar-scroll">
 <div class="nav-label">Channels</div>
 <div id="rooms-list"></div>
 <div class="nav-label">AI work</div><div id="branches-list"><div class="nav-item"><span class="nav-icon">⑂</span><span class="nav-name">No branches yet</span></div></div>
@@ -358,7 +358,7 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
 
 <script>
 const API = '/api/v1';
-const ACTIVE_ROOM_STORAGE_KEY = 'multiai.activeRoomId';
+const ACTIVE_ROOM_STORAGE_KEY = 'xyzzy.activeRoomId';
 let userId = '';
 let userName = '';
 let accessToken = '';
@@ -637,7 +637,7 @@ function connectWS() {
   const encodedToken = bytesToBase64Url(new TextEncoder().encode(accessToken));
   clearTimeout(wsReconnectTimer);
   const socket = new WebSocket(`${proto}://${location.host}/ws?room_id=${encRoomId}`,
-    ['multiai.v1', `bearer.${encodedToken}`]);
+    ['xyzzy.v1', `bearer.${encodedToken}`]);
   ws = socket;
   socket.onopen = () => {
     if (socket !== ws) return;

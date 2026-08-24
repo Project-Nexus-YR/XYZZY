@@ -1,8 +1,8 @@
-# MultiAI — Product Requirements Document
+# XYZZY — Product Requirements Document
 
 ## 1. Product
 
-MultiAI is a **multiplayer AI workspace** where teams collaborate with AI agents in shared channels, preserve individual AI work, selectively synthesize results, and automatically build a queryable organizational ontology from their work.
+XYZZY is a **multiplayer AI workspace** where teams collaborate with AI agents in shared channels, preserve individual AI work, selectively synthesize results, and automatically build a queryable organizational ontology from their work.
 
 The core loop is:
 
@@ -24,7 +24,7 @@ Organizational Ontology
 Meta
 ```
 
-MultiAI initially integrates with existing work systems rather than replacing Slack, GitHub, ClickUp/Linear, or document platforms.
+XYZZY initially integrates with existing work systems rather than replacing Slack, GitHub, ClickUp/Linear, or document platforms.
 
 ---
 
@@ -51,7 +51,7 @@ Teams lack a shared system for:
 - understanding current organizational state;
 - querying why something happened.
 
-MultiAI connects:
+XYZZY connects:
 
 **people → conversations → AI reasoning → decisions → tasks → artifacts → outcomes.**
 
@@ -226,7 +226,7 @@ Outputs become versioned Artifacts.
 
 ## 9. Organizational Ontology
 
-MultiAI maintains a structured representation of organizational work.
+XYZZY maintains a structured representation of organizational work.
 
 Initial objects:
 
@@ -481,7 +481,7 @@ Agents do not receive the entire workspace by default.
 
 ## 16. Integrations
 
-MultiAI should initially **consume existing work systems**, not replace them.
+XYZZY should initially **consume existing work systems**, not replace them.
 
 Priority:
 
@@ -697,7 +697,7 @@ Management features could become employee-monitoring software.
 
 The key product question is:
 
-> Would a real team rather solve a complex problem in MultiAI than coordinate in Slack while everyone separately uses ChatGPT/Claude?
+> Would a real team rather solve a complex problem in XYZZY than coordinate in Slack while everyone separately uses ChatGPT/Claude?
 
 Signals:
 
@@ -787,7 +787,7 @@ If those behaviors do not occur, broader management and enterprise features shou
 
 # 25. Core Product Thesis
 
-MultiAI should not win because it contains more features than Slack, ClickUp, or existing AI assistants.
+XYZZY should not win because it contains more features than Slack, ClickUp, or existing AI assistants.
 
 It should win because it introduces a better model for **collective human–AI work**:
 

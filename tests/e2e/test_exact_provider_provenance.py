@@ -34,7 +34,7 @@ class _ProvenanceTransport(httpx.AsyncBaseTransport):
         text = f"Evidence-backed specialist recommendation {index}"
         # A specialist step is asked for one of the actions the run offered, so it
         # answers in that shape; synthesis is asked for prose and answers with prose.
-        if payload.get("text", {}).get("format", {}).get("name") == "multiai_step":
+        if payload.get("text", {}).get("format", {}).get("name") == "xyzzy_step":
             text = json.dumps({"action": "finish", "output": {"content": text}})
         return httpx.Response(
             200,

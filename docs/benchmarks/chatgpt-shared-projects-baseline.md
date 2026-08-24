@@ -36,7 +36,7 @@ results. Until then, official current product documentation is the recorded sour
 
 ## Binary comparison rule
 
-Remove product labels from the resulting decision artifacts before criticism. MultiAI wins only
+Remove product labels from the resulting decision artifacts before criticism. XYZZY wins only
 if it matches the reference on shared-context continuity, authored branch discoverability, and
 access boundaries, while clearly outperforming it on all of the following:
 
@@ -48,6 +48,6 @@ access boundaries, while clearly outperforming it on all of the following:
 6. surviving reconnect with no lost or duplicated ordered events.
 
 The full test suite must pass and local p95 acknowledgement latency must remain below 250 ms. Ties
-and unverified claims count as a MultiAI loss. The critic returns a binary winner and the single
+and unverified claims count as a XYZZY loss. The critic returns a binary winner and the single
 largest remaining gap.
 

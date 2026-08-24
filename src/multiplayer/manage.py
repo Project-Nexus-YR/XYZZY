@@ -1,4 +1,4 @@
-"""Operator-side user and credential management against a MultiAI database.
+"""Operator-side user and credential management against a XYZZY database.
 
 The server never mints a credential; an operator does, at the machine holding
 the database file. A token is printed exactly once at mint time — only its

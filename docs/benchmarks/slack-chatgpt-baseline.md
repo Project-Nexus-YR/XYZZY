@@ -6,7 +6,7 @@ Superseded by `chatgpt-shared-projects-baseline.md` at the user's direction on 2
 The prepared Slack channel remains available as historical benchmark setup, but it is not the
 active gauntlet quality bar and was never executed as a three-person run.
 
-- Slack channel: `multiai-gauntlet-benchmark` (private)
+- Slack channel: `xyzzy-gauntlet-benchmark` (private)
 - Seed message: recorded privately. The workspace URL is deliberately not published here -
   this baseline is superseded, and a private workspace link is of no use to a reader while
   naming an internal workspace to everyone who clones the repository.
@@ -42,7 +42,7 @@ Record evidence rather than estimates:
 
 ## Binary comparison rule
 
-Remove product labels from the resulting artifacts before criticism. MultiAI wins only if its
+Remove product labels from the resulting artifacts before criticism. XYZZY wins only if its
 three-person run:
 
 1. uses fewer manual copy/paste transfers;
@@ -53,5 +53,5 @@ three-person run:
 6. completes the same decision workflow without introducing a larger critical usability or
    correctness failure.
 
-Ties and unverified conditions count as a MultiAI loss. The critic returns only a binary winner
+Ties and unverified conditions count as a XYZZY loss. The critic returns only a binary winner
 and the single largest remaining gap.

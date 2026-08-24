@@ -8,13 +8,13 @@ the one branch nobody had ever checked.
 It executed tool calls itself. ``execute_step`` handed the chosen action to
 ``AgentExecutor.execute_action``, which ran it through NEXUS's own ``ToolRegistry``
 under a ``PolicyEngine({})`` the bridge constructs empty and never populates, and
-returned a dict with no ``tool`` and no ``input`` key. MultiAI's gateway — the
+returned a dict with no ``tool`` and no ``input`` key. XYZZY's gateway — the
 five-way capability intersection, the approval gate, and the audit event — was not on
 the path at all: with the registry empty every agent tool call failed as "unknown
 tool", and any tool ever registered on it would have run with no capability check, no
 approval and no audit trail.
 
-The invariant here: MultiAI's gateway decides every tool call, whichever runtime is
+The invariant here: XYZZY's gateway decides every tool call, whichever runtime is
 present. NEXUS may execute a step; it may not decide one. The doubles below implement
 the executor contract faithfully — including a registry that would happily run
 anything it was handed — so what the tests assert is that it is never handed one.
@@ -52,7 +52,7 @@ class _Run:
 
 
 class _Registry:
-    """NEXUS's own tool registry, deciding under a policy MultiAI never configured.
+    """NEXUS's own tool registry, deciding under a policy XYZZY never configured.
 
     It runs whatever it is handed, which is the point: anything reaching it has left
     the workspace gateway behind.
