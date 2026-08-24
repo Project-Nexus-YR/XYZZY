@@ -1018,6 +1018,7 @@ class MultiplayerService:
         self, room_id: str, user_id: str, role: str, changed_by: str
     ) -> RoomMember:
         """Change a non-admin member's access; admins are immutable here and use leave_room."""
+        require_human_boundary("member.role")
         if role not in {"viewer", "editor"}:
             raise DomainError("member role must be viewer or editor")
         if user_id == changed_by:
@@ -1821,6 +1822,7 @@ class MultiplayerService:
         ADMINISTER, the same grant removal takes: putting an agent back in a channel
         is a membership change, and the removal it reverses was one.
         """
+        require_human_boundary("agent.rejoin")
         agent = await self.get_agent(agent_id)
         if agent.room_id != room_id:
             raise DomainError("agent is not in this room")
@@ -3219,6 +3221,7 @@ class MultiplayerService:
         return await self.execute_agent_step(execution_id, branch.initiating_prompt, acting_as)
 
     async def pause_execution(self, execution_id: str, acting_as: str = "") -> bool:
+        require_human_boundary("run.pause")
         execution = await self.repos.executions.get(execution_id)
         if execution is None:
             raise DomainError("execution not found")
@@ -3238,6 +3241,7 @@ class MultiplayerService:
         return True
 
     async def resume_execution(self, execution_id: str, acting_as: str = "") -> bool:
+        require_human_boundary("run.resume")
         execution = await self.repos.executions.get(execution_id)
         if execution is None:
             raise DomainError("execution not found")
@@ -3265,6 +3269,7 @@ class MultiplayerService:
         exactly the ambiguity settling it removed. A parked run is not resumed at all —
         it has already used every attempt it was allowed.
         """
+        require_human_boundary("run.reopen")
         previous = await self.repos.agent_runs.get(run_id)
         if previous is None:
             raise DomainError(f"agent run not found: {run_id}")
@@ -3341,6 +3346,7 @@ class MultiplayerService:
         in flight here; the durable settlement below is the cancellation, and it is
         the same on any process.
         """
+        require_human_boundary("run.cancel")
         execution = await self.repos.executions.get(execution_id)
         if execution is None:
             raise DomainError("execution not found")
@@ -3411,6 +3417,7 @@ class MultiplayerService:
         """Record a human redirect against a running execution. The ordered event is
         appended inside the transaction that re-checks membership, so a member demoted
         while the runtime intervention is dispatched cannot author it."""
+        require_human_boundary("run.intervene")
         execution = await self.repos.executions.get(execution_id)
         if execution is None:
             raise DomainError("execution not found")
@@ -5864,6 +5871,7 @@ class MultiplayerService:
     async def redirect_agent(
         self, agent_id: str, user_id: str, instruction: str, *, require_member: bool = False
     ) -> None:
+        require_human_boundary("agent.redirect")
         agent = await self.get_agent(agent_id)
         if require_member:
             await self._require_agent_run_authority(agent_id, user_id)

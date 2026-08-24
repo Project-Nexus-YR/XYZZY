@@ -30,6 +30,7 @@ from multiplayer.db.connection import Database
 from multiplayer.domain.models import ExecutionStatus, HarnessState, RunSettlement
 from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
 from multiplayer.realtime.hub import RealtimeHub
+from multiplayer.security import boundary
 from multiplayer.services.service import MultiplayerService
 
 
@@ -46,7 +47,13 @@ class _CancelsItselfMidTurn:
         self.prompts.append(prompt)
         assert self.svc is not None
         if len(self.prompts) == 1:
-            await self.svc.cancel_execution(self.execution_id, "owner")
+            # A concurrent human cancel runs with no turn context; the stub
+            # injects it mid-turn, so it steps outside the boundary explicitly.
+            token = boundary._agent_turn.set(None)
+            try:
+                await self.svc.cancel_execution(self.execution_id, "owner")
+            finally:
+                boundary._agent_turn.reset(token)
             return {
                 "action": "tool",
                 "tool": "channel.read_context",

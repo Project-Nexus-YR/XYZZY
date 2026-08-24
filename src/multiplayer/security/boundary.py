@@ -9,6 +9,11 @@ added next year inherits it without anyone remembering to say so.
 
 Humans never trip it: a request that entered through the API on a human's
 credential runs with no turn context set.
+
+One enumeration remains - of protected methods, not of call sites. A
+governance method added later must open with require_human_boundary to be
+inside the fence; the adversarial pass that named eight missing ones is
+why the list is now audited in tests/security/test_agent_surface_boundary.py.
 """
 
 from __future__ import annotations

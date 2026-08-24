@@ -128,8 +128,10 @@ class _ReadsWhileASteererIsNarrowed:
         assert self.svc is not None
         if len(self.prompts) == 1:
             # The steer enters the turn here, so every later prompt is bounded by it.
-            await self.svc.intervene_execution(
-                self.execution_id, "steerer", "check the channel first"
+            await _as_human(
+                self.svc.intervene_execution(
+                    self.execution_id, "steerer", "check the channel first"
+                )
             )
             return _read_context()
         if len(self.prompts) == 2:

@@ -45,6 +45,14 @@ def _fenced_calls(svc: MultiplayerService) -> dict[str, Any]:
         "approval.approve": lambda: svc.approve_action("ap", "u"),
         "approval.reject": lambda: svc.reject_action("ap", "u"),
         "agent.interrupt": lambda: svc.interrupt_agent("a", "u"),
+        "member.role": lambda: svc.update_room_member_role("r", "u2", "viewer", "u"),
+        "agent.rejoin": lambda: svc.rejoin_agent_to_room("a", "r", "u"),
+        "agent.redirect": lambda: svc.redirect_agent("a", "u", "go"),
+        "run.pause": lambda: svc.pause_execution("e"),
+        "run.resume": lambda: svc.resume_execution("e"),
+        "run.cancel": lambda: svc.cancel_execution("e", "u"),
+        "run.intervene": lambda: svc.intervene_execution("e", "u", "go"),
+        "run.reopen": lambda: svc.resume_agent_run("run", "u"),
     }
 
 
