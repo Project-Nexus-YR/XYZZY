@@ -105,9 +105,14 @@ async def test_full_api_workflow(client):
     r = await client.post(f"/api/v1/executions/{execution['execution_id']}/resume")
     assert r.status_code == 200
 
-    # Cancel
+    # Cancel. The step above already finished this execution, and a cancel is now a
+    # durable settlement rather than a flag in the dispatching process's memory, so
+    # it is refused here exactly as it always was on a managed branch. It used to
+    # answer 200 by reaching only the in-memory map, which is the same reason a
+    # cancel issued from a second process did nothing at all.
     r = await client.post(f"/api/v1/executions/{execution['execution_id']}/cancel")
-    assert r.status_code == 200
+    assert r.status_code == 400
+    assert "already terminal" in r.json()["detail"]
 
     # Create task
     r = await client.post(

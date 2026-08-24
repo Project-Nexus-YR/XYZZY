@@ -80,12 +80,54 @@ class CapabilityTerms:
 
 
 @dataclass(frozen=True, slots=True)
+class UnboundedTerms:
+    """One principal's five terms, before the steerers of a run have narrowed them.
+
+    It deliberately has no ``effective``. A set that a tool decision may spend comes
+    out of :meth:`bounded_by` and nowhere else, so a spend-point that derives terms
+    and forgets the steerers has nothing to hand the gateway: the omission is a type
+    error rather than a quietly wider set. That is the whole reason this wrapper
+    exists — the bound had been applied by remembering to apply it, and remembering
+    failed at a new place every round.
+
+    :meth:`lendable` is the other exit, and it is not a spend: it is what one
+    principal may lend an agent, which is what a launch gate asks and what each
+    steerer contributes as one of the bounds above.
+    """
+
+    terms: CapabilityTerms
+
+    def bounded_by(self, authorities: Iterable[frozenset[str]]) -> CapabilityTerms:
+        """These terms narrowed by every authority that steers the same run."""
+        bounded = self.terms
+        for authority in authorities:
+            bounded = bounded.bounded_by(authority)
+        return bounded
+
+    def lendable(self) -> frozenset[str]:
+        """What this principal may lend an agent here. A gate, never a tool decision."""
+        return self.terms.effective
+
+    def as_dict(self) -> dict[str, list[str]]:
+        return self.terms.as_dict()
+
+
+@dataclass(frozen=True, slots=True)
 class RunAuthorization:
     """What a tool writer re-derives its terms from, inside its own transaction.
 
     Identity and addressing are gates that already refused earlier; this carries only
     the authority a write still has to be checked against. A human caller passes
     ``None`` instead and is guarded by the room membership check beside it.
+
+    ``steerers`` names everyone who has steered this run. It is on the authorization
+    rather than threaded to each spend-point because the twelve relocations of one
+    defect all had the same shape: a spend-point re-derived the five terms correctly
+    and did not know it also owed the steerer bound. A spend-point cannot know that,
+    and should not have to — it consumes this object, the object names the steerers,
+    and the single derivation that reads it applies them. The names are records, not
+    authority: what each of them may lend is read from durable rows at the moment it
+    is spent.
     """
 
     run_id: str
@@ -94,6 +136,7 @@ class RunAuthorization:
     authorized_by: str
     acting_user_id: str
     required_capability: str
+    steerers: frozenset[str]
 
 
 def may_address(

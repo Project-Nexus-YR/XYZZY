@@ -91,7 +91,7 @@ async def service(monkeypatch: pytest.MonkeyPatch) -> MultiplayerService:
     monkeypatch.setattr(bridge_module, "_HAS_NEXUS", False)
     db = Database(":memory:")
     await db.connect()
-    svc = MultiplayerService(db, RealtimeHub(), known_users=frozenset({"owner"}))
+    svc = MultiplayerService(db, RealtimeHub(), known_users=frozenset({"owner", "delegate"}))
     await svc.initialize()
     yield svc
     await db.close()
@@ -275,3 +275,100 @@ async def test_a_settled_run_leaves_nothing_parked_behind_it(
     assert await svc.db.fetch_all("SELECT * FROM suspended_turns") == []
     run = await _the_run(svc)
     assert run["settlement"] == RunSettlement.AGENT_REMOVED.value
+
+
+# ── A refusal settles the run it refused ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_delegate_narrowed_while_the_approval_waits_settles_the_run(
+    service: MultiplayerService,
+) -> None:
+    """A swallowed refusal left the run in the state the loop's docstring rules out.
+
+    ``_resume_suspended_turn`` caught ``AuthorizationError`` and logged it, on the
+    reasoning that a step which refuses itself has already recorded why. That is true
+    of the run's principal, whose refusal settles the run on the way out. It was not
+    true of the acting caller: narrowing the delegate between the suspension and the
+    approval made ``_require_delegated_authority`` raise before anything had been
+    settled, and ``claim`` had already deleted the continuation — so the run sat
+    STREAMING with a NULL settlement, the model was never re-prompted, and no message
+    reached the room. A refusal has to settle the run truthfully, not vanish.
+    """
+    svc = service
+    provider = _AsksForATaskThenAnswers()
+    room_id, agent_id = await _room_with_agent(
+        svc, provider, template="Synthesizer", harness_id="model-provider"
+    )
+    await svc.invite_room_member(room_id, "delegate", "editor", "owner")
+    execution_id = await _start(svc, room_id, agent_id)
+
+    await svc.execute_agent_step(execution_id, "File the rollback.", "delegate")
+    assert (await _the_run(svc))["harness_state"] == HarnessState.AWAITING_APPROVAL.value
+
+    await svc.set_member_capabilities(room_id, "delegate", [], "owner")
+    approval_id = (await svc.db.fetch_all("SELECT approval_id FROM approvals"))[0]["approval_id"]
+    await svc.approve_action(approval_id, "owner")
+
+    # The reviewer's decision stands and is not reported as lost.
+    approvals = await svc.db.fetch_all("SELECT status FROM approvals")
+    assert [row["status"] for row in approvals] == ["APPROVED"]
+    # The model was never prompted a second time, and the run says so.
+    assert len(provider.prompts) == 1
+    run = await _the_run(svc)
+    assert run["harness_state"] == HarnessState.SETTLED.value
+    assert run["settlement"] == RunSettlement.AUTHORITY_REVOKED.value
+    execution = await svc.repos.executions.get(execution_id)
+    assert execution is not None and execution.status is ExecutionStatus.FAILED
+    assert "delegate" in (execution.error or "")
+    # Nothing left for the sweep to find, and nothing for it to mislabel.
+    assert await svc.db.fetch_all("SELECT * FROM suspended_turns") == []
+    assert await svc.sweep_expired_run_leases() == 0
+    assert await svc.repos.agent_outputs.list_by_room(room_id) == []
+
+
+# ── A cancel is durable, so any process can issue one ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_second_process_can_cancel_a_run_it_is_not_driving(
+    service: MultiplayerService,
+) -> None:
+    """The bridge's map is one process's memory; the cancellation is the record.
+
+    On a branch that is not lifecycle-managed — which is every room's default branch —
+    ``cancel_execution`` returned whatever ``nexus.cancel_execution`` said. A second
+    process, or the same one after a restart, has an empty ``_active_runs``, so it
+    answered False and wrote nothing at all: the run went on holding its lease until
+    the sweep named it something that had not happened.
+    """
+    svc = service
+    provider = _AsksForATaskThenAnswers()
+    # The nexus harness, so this process's bridge really is holding the run: the
+    # point is that a second one does not have to be.
+    room_id, agent_id = await _room_with_agent(svc, provider, template="Synthesizer")
+    execution_id = await _start(svc, room_id, agent_id)
+    await svc.execute_agent_step(execution_id, "File the rollback.", "owner")
+
+    execution = await svc.repos.executions.get(execution_id)
+    assert execution is not None
+    branch = await svc.get_branch(execution.branch_id)
+    assert branch.lifecycle_managed is False
+    # This process is driving it; a second one knows nothing about it.
+    assert await svc.nexus.get_run_id_for_execution(execution_id) is not None
+    other = MultiplayerService(svc.db, RealtimeHub(), known_users=frozenset({"owner"}))
+    other.nexus = NexusAgentBridge(model_provider=provider)
+    assert await other.nexus.get_run_id_for_execution(execution_id) is None
+
+    assert await other.cancel_execution(execution_id, "owner") is True
+
+    cancelled = await svc.repos.executions.get(execution_id)
+    assert cancelled is not None and cancelled.status is ExecutionStatus.CANCELLED
+    run = await _the_run(svc)
+    assert run["harness_state"] == HarnessState.SETTLED.value
+    assert run["settlement"] == RunSettlement.CANCELLED.value
+    # The turn it was holding at a reviewer is not waiting on it any more.
+    assert await svc.db.fetch_all("SELECT * FROM suspended_turns") == []
+    types = [event.event_type.value for event in await svc.get_room_events(room_id)]
+    assert "execution.cancelled" in types
+    assert await svc.sweep_expired_run_leases() == 0

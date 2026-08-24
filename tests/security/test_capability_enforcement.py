@@ -504,7 +504,7 @@ async def test_a_valid_owner_addressed_identity_still_cannot_write_for_a_viewer(
     assert identity.revoked_at is None
     assert (await svc.get_agent_addressing(agent.agent_id)).owner_user_id == "viewer_member"
 
-    with_identity = (await svc.agent_capability_terms(agent.agent_id, "viewer_member")).effective
+    with_identity = (await svc.agent_capability_terms(agent.agent_id, "viewer_member")).lendable()
     session = await svc.start_agent_session(room_id, agent.agent_id)
     execution = await svc.start_execution(session.session_id, "viewer_member")
     await svc.execute_agent_step(execution.execution_id, "Draft the rollout plan.")
@@ -518,7 +518,8 @@ async def test_a_valid_owner_addressed_identity_still_cannot_write_for_a_viewer(
     # Revoking the identity refuses the next launch and changes no term at all: a
     # gate can close the door earlier, and it contributes nothing to the set inside.
     await svc.revoke_agent_identity(agent.agent_id, "owner")
-    without_identity = (await svc.agent_capability_terms(agent.agent_id, "viewer_member")).effective
+    revoked_terms = await svc.agent_capability_terms(agent.agent_id, "viewer_member")
+    without_identity = revoked_terms.lendable()
     assert with_identity == without_identity
     assert "writing" not in with_identity
 

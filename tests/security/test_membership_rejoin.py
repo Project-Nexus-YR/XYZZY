@@ -127,6 +127,72 @@ async def test_a_forged_rejoin_must_name_a_real_departure(
 
 
 @pytest.mark.asyncio
+async def test_a_rejoin_may_not_name_itself(service: MultiplayerService) -> None:
+    """026's guard asked for a departure. A row naming itself answered that.
+
+    The named membership had to be this agent's, this room's, and removed — and an
+    ``INSERT OR REPLACE`` whose ``membership_id`` is an existing removed row satisfies
+    every clause against the row it is about to replace. The replacement is then live,
+    so ``agent_memberships_removal_is_permanent`` and
+    ``agent_memberships_reject_delete``, which both fire only on a removed row, no
+    longer apply to it: the departure could be un-removed and then deleted outright.
+    It fails closed, so nobody gained access; what it destroyed was the record.
+    """
+    svc = service
+    room_id, agent_id = await _room_with_removed_agent(svc)
+    departure = (await _memberships(svc, agent_id))[0]["membership_id"]
+
+    with pytest.raises(Exception, match="names the departure it follows"):
+        await svc.db.execute(
+            "INSERT OR REPLACE INTO agent_room_memberships("
+            "membership_id, agent_id, room_id, joined_at, rejoined_from_membership_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (departure, agent_id, room_id, "2030-01-01T00:00:00+00:00", departure),
+        )
+
+    rows = await _memberships(svc, agent_id)
+    assert len(rows) == 1
+    assert rows[0]["membership_id"] == departure
+    assert rows[0]["removed_at"] is not None
+    assert rows[0]["rejoined_from_membership_id"] is None
+    assert await svc.list_room_agents(room_id) == []
+
+
+@pytest.mark.asyncio
+async def test_an_insert_may_not_land_on_an_existing_membership_id(
+    service: MultiplayerService,
+) -> None:
+    """The general form: REPLACE deletes on a primary-key collision, silently.
+
+    ``recursive_triggers`` is off, so that delete never reaches
+    ``agent_memberships_reject_delete``. Naming itself was one way to aim it at a
+    departure; naming a second, genuinely different departure is another. Refusing to
+    write an id twice is what takes the aim away.
+    """
+    svc = service
+    room_id, agent_id = await _room_with_removed_agent(svc)
+    await svc.rejoin_agent_to_room(agent_id, room_id, "owner")
+    await svc.remove_agent_from_room(agent_id, room_id, "owner")
+    first, second = (row["membership_id"] for row in (await _memberships(svc, agent_id))[:2])
+
+    # A rejoin that names the older departure, written over the newer one.
+    with pytest.raises(Exception, match="written once"):
+        await svc.db.execute(
+            "INSERT OR REPLACE INTO agent_room_memberships("
+            "membership_id, agent_id, room_id, joined_at, rejoined_from_membership_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (second, agent_id, room_id, "2030-01-01T00:00:00+00:00", first),
+        )
+
+    rows = await _memberships(svc, agent_id)
+    assert [row["membership_id"] for row in rows] == [first, second]
+    assert all(row["removed_at"] is not None for row in rows)
+    # And the real verb still works after the refusal.
+    membership = await svc.rejoin_agent_to_room(agent_id, room_id, "owner")
+    assert membership.rejoined_from_membership_id == second
+
+
+@pytest.mark.asyncio
 async def test_a_second_live_membership_cannot_be_inserted(
     service: MultiplayerService,
 ) -> None:

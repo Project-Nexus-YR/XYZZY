@@ -21,6 +21,7 @@ import pytest
 import multiplayer.nexus_bridge.agent_bridge as bridge_module
 from multiplayer.db.connection import Database
 from multiplayer.domain.models import (
+    ApprovalStatus,
     ExecutionStatus,
     HarnessState,
     MessageRole,
@@ -184,8 +185,22 @@ async def test_a_run_awaiting_approval_gets_a_long_lease_and_is_still_swept(
     assert await svc.sweep_expired_run_leases() == 1
 
     swept = (await _runs(svc))[0]
-    assert swept["settlement"] == RunSettlement.ORPHANED.value
+    # Named for what happened. It used to be ORPHANED "lease expired after 1
+    # attempt(s)", and neither half was true: nothing was orphaned, nothing was
+    # dispatched and lost, and no attempt was spent. A reviewer never answered.
+    assert swept["settlement"] == RunSettlement.APPROVAL_EXPIRED.value
     assert await svc.repos.artifacts.list_by_room(room_id) == []
+
+    # And the approval row is reconciled with the run it belonged to, rather than
+    # staying PENDING for ever against something that has ended.
+    assert await svc.list_pending_approvals(room_id) == []
+    approvals = await svc.db.fetch_all("SELECT status FROM approvals")
+    assert [row["status"] for row in approvals] == [ApprovalStatus.EXPIRED.value]
+    requests = await svc.db.fetch_all("SELECT status FROM tool_requests")
+    assert [row["status"] for row in requests] == ["REJECTED"]
+    types = [event.event_type.value for event in await svc.get_room_events(room_id)]
+    assert "approval.expired" in types
+    assert "agent.run.orphaned" not in types
 
 
 @pytest.mark.asyncio

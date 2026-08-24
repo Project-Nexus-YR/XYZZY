@@ -93,16 +93,16 @@ async def _assert_bounded_by_the_caller(
 ) -> None:
     """Whatever the initiator holds, the run under this caller holds no more."""
     agent = await svc.get_agent(agent_id)
-    initiator_only = await svc._capability_terms(agent, room_id, OWNER)
-    delegated = await svc._capability_terms(agent, room_id, OWNER, NARROW)
+    initiator_only = await svc._lendable_terms(agent, room_id, OWNER)
+    delegated = await svc._lendable_terms(agent, room_id, OWNER, NARROW)
     caller_own = await svc._user_term(room_id, NARROW)
-    assert delegated.effective <= caller_own
-    assert delegated.effective < initiator_only.effective
+    assert delegated.lendable() <= caller_own
+    assert delegated.lendable() < initiator_only.lendable()
     # The narrowing lands on the user term; the other four are untouched.
-    assert delegated.agent == initiator_only.agent
-    assert delegated.skill == initiator_only.skill
-    assert delegated.channel == initiator_only.channel
-    assert delegated.workspace == initiator_only.workspace
+    assert delegated.terms.agent == initiator_only.terms.agent
+    assert delegated.terms.skill == initiator_only.terms.skill
+    assert delegated.terms.channel == initiator_only.terms.channel
+    assert delegated.terms.workspace == initiator_only.terms.workspace
 
 
 def _offered_tools(svc: MultiplayerService) -> list[str]:
@@ -194,8 +194,12 @@ async def test_cancel_is_bounded_by_the_caller(service: MultiplayerService) -> N
     agent_id = await _agent(svc, room_id, "Researcher")
     execution_id = await _run(svc, room_id, agent_id)
     await svc.execute_agent_step(execution_id, "Assess it.", OWNER)
+    # A cancel settles the run durably now rather than setting a flag in the
+    # dispatching process's memory, so it needs a run that is still open: the one
+    # above answered and is terminal, and cancelling it is refused on any branch.
+    open_execution_id = await _run(svc, room_id, agent_id)
 
-    assert await svc.cancel_execution(execution_id, NARROW, require_member=True) is True
+    assert await svc.cancel_execution(open_execution_id, NARROW, require_member=True) is True
     await _assert_bounded_by_the_caller(svc, room_id, agent_id)
 
 

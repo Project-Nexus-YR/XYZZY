@@ -114,6 +114,8 @@ class EventType(StrEnum):
     APPROVAL_REQUESTED = "approval.requested"
     APPROVAL_GRANTED = "approval.granted"
     APPROVAL_REJECTED = "approval.rejected"
+    # Closed with the run it gated, because nobody decided it.
+    APPROVAL_EXPIRED = "approval.expired"
 
     # Notifications
     NOTIFICATION_CREATED = "notification.created"

@@ -273,6 +273,11 @@ class RunSettlement(StrEnum):
     AUTHORITY_REVOKED = "AUTHORITY_REVOKED"
     AGENT_REMOVED = "AGENT_REMOVED"
     APPROVAL_REFUSED = "APPROVAL_REFUSED"
+    # A reviewer never answered. Not ORPHANED — nothing was orphaned, the run was
+    # exactly where it said it was — and not PARKED, which is about a run that kept
+    # dying. The only thing that happened is that nobody decided, and a reader of
+    # this run is owed that rather than a borrowed name for something else.
+    APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
     # A run picked up max_attempts times that died every time. Parking it is what
     # keeps a stuck run from being swept forever without ever being describable.
     PARKED = "PARKED"

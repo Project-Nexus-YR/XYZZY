@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -1792,6 +1792,21 @@ class ExecutionInterventionRepo:
         )
         return [self._from_row(row) for row in rows]
 
+    async def steerers(self, execution_id: str) -> frozenset[str]:
+        """Everyone who has steered this run, whether or not a prompt has spent them.
+
+        A steer bounds every prompt of the turn it entered, so the set is the whole
+        history of this execution rather than the queue still waiting. It is read
+        here, from the rows themselves, so that no caller has to carry it: a cached
+        copy is exactly the authorization input frozen at write time that this
+        table's own ``intervened_by`` column exists to avoid.
+        """
+        rows = await self.db.fetch_all(
+            "SELECT DISTINCT intervened_by FROM execution_interventions WHERE execution_id = ?",
+            (execution_id,),
+        )
+        return frozenset(str(row["intervened_by"]) for row in rows)
+
     async def mark_consumed(self, intervention_ids: list[str]) -> None:
         """Retire the steers a step has just taken into its prompt."""
         if not intervention_ids:
@@ -1820,9 +1835,10 @@ class ExecutionInterventionRepo:
 class SuspendedTurnRepo:
     """The rest of a turn that stopped at a reviewer, held where any process finds it.
 
-    Records only, never authority: the prompt, what this turn's tools already
-    returned, and who has steered it. The step that resumes re-derives every
-    capability from durable rows, as every other step does.
+    Records only, never authority: the prompt and what this turn's tools already
+    returned. The step that resumes re-derives every capability from durable rows, as
+    every other step does — including who has steered the turn, which is read from
+    ``execution_interventions`` rather than copied here.
     """
 
     def __init__(self, db: Database) -> None:
@@ -1834,18 +1850,16 @@ class SuspendedTurnRepo:
         prompt: str,
         acting_as: str,
         observations: Sequence[str],
-        steerers: Iterable[str],
     ) -> None:
         await self.db.execute(
             "INSERT OR REPLACE INTO suspended_turns("
-            "execution_id, prompt, acting_as, observations, steerers, suspended_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "execution_id, prompt, acting_as, observations, suspended_at) "
+            "VALUES (?, ?, ?, ?, ?)",
             (
                 execution_id,
                 prompt,
                 acting_as,
                 json.dumps(list(observations)),
-                json.dumps(sorted(set(steerers))),
                 utcnow().isoformat(),
             ),
         )
@@ -1873,7 +1887,6 @@ class SuspendedTurnRepo:
             "prompt": row["prompt"],
             "acting_as": row["acting_as"],
             "observations": [str(item) for item in json.loads(row["observations"])],
-            "steerers": frozenset(str(item) for item in json.loads(row["steerers"])),
         }
 
     async def discard(self, execution_id: str) -> None:
@@ -4501,6 +4514,15 @@ class ApprovalRepo:
             "SELECT * FROM approvals WHERE room_id = ? AND status = 'PENDING' "
             "ORDER BY requested_at",
             (room_id,),
+        )
+        return [self._from_row(r) for r in rows]
+
+    async def list_pending_by_execution(self, execution_id: str) -> list[Approval]:
+        """The undecided approvals of one run, so settling it can close them too."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM approvals WHERE execution_id = ? AND status = 'PENDING' "
+            "ORDER BY requested_at",
+            (execution_id,),
         )
         return [self._from_row(r) for r in rows]
 

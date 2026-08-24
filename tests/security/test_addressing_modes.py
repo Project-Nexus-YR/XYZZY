@@ -219,13 +219,13 @@ async def test_a_harness_advertising_a_wider_audience_changes_nothing(
     svc = service
     room_id, agent_id = await _room_with_agent(svc)
     await svc.set_agent_addressing(agent_id, AddressingMode.OWNER_ONLY, OWNER)
-    before = (await svc.agent_capability_terms(agent_id, OWNER)).effective
+    before = (await svc.agent_capability_terms(agent_id, OWNER)).lendable()
 
     boastful = HarnessInfo("nexus", 1, frozenset({"coding", "security", "everything"}))
     assert boastful.advertised_capabilities  # the harness may claim what it likes
 
     assert await _mention_runs(svc, room_id, PLAIN) is False
-    assert (await svc.agent_capability_terms(agent_id, OWNER)).effective == before
+    assert (await svc.agent_capability_terms(agent_id, OWNER)).lendable() == before
 
 
 # ── Steering a run reads the record again ────────────────────────────────────

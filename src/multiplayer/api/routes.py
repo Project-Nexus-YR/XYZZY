@@ -684,11 +684,12 @@ async def agent_capabilities(
         terms = await svc.agent_capability_terms(agent_id, principal.user_id)
     except DomainError as exc:
         raise HTTPException(404, str(exc)) from exc
-    effective = terms.effective
+    # No run yet, so nothing is steering one: this is what the caller could lend.
+    lendable = terms.lendable()
     return {
         "terms": terms.as_dict(),
-        "effective": sorted(effective),
-        "tools": allowed_tools(effective),
+        "effective": sorted(lendable),
+        "tools": allowed_tools(lendable),
     }
 
 
