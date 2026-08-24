@@ -2124,9 +2124,12 @@ class MultiplayerService:
             sort_keys=True,
             separators=(",", ":"),
         )
+        # The snapshot is member-authored room history - the widest untrusted
+        # surface any prompt carries - so it enters screened and fenced.
         return (
             f"Branch prompt:\n{branch.initiating_prompt}\n\n"
-            f"Immutable bounded channel context (hash {branch.context_hash}):\n{snapshot}"
+            f"Immutable bounded channel context (hash {branch.context_hash}):\n"
+            f"{fenced(screen(snapshot, 'channel context'))}"
         )
 
     # ── Session & Execution ──────────────────────────────────────────────────
