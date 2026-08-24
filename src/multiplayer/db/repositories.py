@@ -3626,11 +3626,16 @@ class OntologyRepo:
         entities: list[OntologyEntity],
         relationships: list[OntologyRelationship],
     ) -> tuple[int, int]:
-        """Write assertions idempotently and return how many rows each table gained.
+        """Write assertions idempotently and return how many rows each write touched.
 
         Every timing writes through here, so the transaction discipline, the
         deterministic-ID conflict rule and the inheritance rule below are written
         once rather than per writer.
+
+        An entity is one assertion per source object, so a source row that moves
+        re-asserts over the row that describes it rather than landing beside it.
+        The conflict clause writes only when the projection genuinely differs and
+        stands later in the room's order, which keeps a repeated pass a no-op.
         """
         if not self.db.owns_current_transaction:
             raise RuntimeError("ontology materialization requires transaction ownership")
@@ -3644,7 +3649,19 @@ class OntologyRepo:
                 "extractor, asserted_at_sequence, evidence_event_sequences, "
                 "created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(room_id, kind, source_object_id) DO NOTHING",
+                "ON CONFLICT(room_id, kind, source_object_id) DO UPDATE SET "
+                "label = excluded.label, properties = excluded.properties, "
+                "evidence_ids = excluded.evidence_ids, source_ids = excluded.source_ids, "
+                "asserted_at_sequence = excluded.asserted_at_sequence, "
+                "evidence_event_sequences = excluded.evidence_event_sequences, "
+                "stale_at_sequence = NULL, updated_at = excluded.updated_at "
+                "WHERE excluded.asserted_at_sequence > ontology_entities.asserted_at_sequence "
+                "AND (ontology_entities.label <> excluded.label "
+                "OR ontology_entities.properties <> excluded.properties) "
+                # A reviewed assertion is a person's account of this object, so a
+                # later pass never rewrites it; the reader learns the row moved from
+                # the derived currency instead.
+                "AND ontology_entities.review_status = 'UNCONFIRMED'",
                 (
                     entity.entity_id,
                     entity.room_id,
@@ -4358,10 +4375,12 @@ class DecisionRepo:
         )
         return [self._from_row(r) for r in rows]
 
-    async def update_status(self, decision_id: str, status: DecisionStatus) -> None:
+    async def update_status(
+        self, decision_id: str, status: DecisionStatus, reviewed_by: str = ""
+    ) -> None:
         await self.db.execute(
-            "UPDATE decisions SET status = ? WHERE decision_id = ?",
-            (status.value, decision_id),
+            "UPDATE decisions SET status = ?, reviewed_by = ? WHERE decision_id = ?",
+            (status.value, reviewed_by, decision_id),
         )
         await self.db.commit()
 

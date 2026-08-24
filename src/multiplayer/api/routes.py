@@ -20,6 +20,8 @@ from ..domain.models import (
     ArtifactVersion,
     Branch,
     BranchMode,
+    Decision,
+    DecisionStatus,
     DomainError,
     Execution,
     IdempotencyConflict,
@@ -183,6 +185,16 @@ async def _authorized_task(
     return task
 
 
+async def _authorized_decision(
+    decision_id: str, principal: AuthenticatedUser, capability: RoomCapability
+) -> Decision:
+    decision = await _svc_or_404().repos.decisions.get(decision_id)
+    if decision is None:
+        raise HTTPException(404, "decision not found")
+    await _require_room(decision.room_id, principal, capability)
+    return decision
+
+
 async def _authorized_artifact(
     artifact_id: str, principal: AuthenticatedUser, capability: RoomCapability
 ) -> Artifact:
@@ -312,6 +324,10 @@ class CreateDecisionRequest(BaseModel):
     title: str
     content: str
     reason: str = ""
+
+
+class UpdateDecisionStatusRequest(BaseModel):
+    status: str
 
 
 class CreateMemoryRequest(BaseModel):
@@ -2015,6 +2031,27 @@ async def create_decision(
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"decision_id": dec.decision_id, "title": dec.title, "status": dec.status.value}
+
+
+@router.post("/decisions/{decision_id}/status")
+async def update_decision_status(
+    decision_id: str, req: UpdateDecisionStatusRequest, principal: CurrentUser
+) -> dict[str, Any]:
+    """Take, refuse or supersede a proposed decision."""
+    svc = _svc_or_404()
+    await _authorized_decision(decision_id, principal, RoomCapability.MUTATE)
+    status = _safe_enum(req.status.upper(), DecisionStatus, "decision status")
+    try:
+        dec = await svc.update_decision_status(
+            decision_id, status, reviewed_by=principal.user_id, require_member=True
+        )
+    except DomainError as e:
+        raise HTTPException(400, str(e)) from e
+    return {
+        "decision_id": dec.decision_id,
+        "status": dec.status.value,
+        "reviewed_by": dec.reviewed_by,
+    }
 
 
 @router.get("/rooms/{room_id}/decisions")

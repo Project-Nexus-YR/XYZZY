@@ -228,6 +228,13 @@ def test_naming_a_kind_reaches_every_supported_question() -> None:
         MultiplayerService._resolve_meta_kind(None, None)
 
 
+def test_free_text_kept_for_audit_is_bounded_and_stripped() -> None:
+    """It decides nothing, but it is attacker-chosen and it lands in a durable record."""
+    assert MultiplayerService._audit_question(None) is None
+    assert MultiplayerService._audit_question("what\x00 is\r\n the status") == "what is the status"
+    assert len(MultiplayerService._audit_question("x" * 5000) or "") == 500
+
+
 async def _seed_assertion_room(service: MultiplayerService) -> str:
     """A room carrying one governed assertion for each of the five new kinds."""
     org = await service.create_organization("Meta org", "meta-kinds-org", "owner")
@@ -242,7 +249,11 @@ async def _seed_assertion_room(service: MultiplayerService) -> str:
     settled = await service.create_decision(
         room.room_id, "Keep the current gateway", "content", created_by="owner"
     )
-    await service.repos.decisions.update_status(settled.decision_id, DecisionStatus.ACTIVE)
+    # Through the service verb a room actually has, not the repository beneath it:
+    # staging a made decision by hand proved a lifecycle the product did not ship.
+    await service.update_decision_status(
+        settled.decision_id, DecisionStatus.ACTIVE, reviewed_by="owner", require_member=True
+    )
     await service.run_ontology_extraction(room.room_id, OntologyExtractor.IMMEDIATE)
     await service.send_message(
         room.room_id,
@@ -359,6 +370,143 @@ async def test_seeded_empty_room_refuses_with_a_reason_and_writes_nothing() -> N
         assert answer["claims"] == [] and answer["unconfirmed"] == []
         # A Meta read has nothing to emit, because reads never write.
         assert await service.get_room_events(room.room_id) == before
+    finally:
+        await db.close()
+
+
+async def _seed_proposed_decision(service: MultiplayerService) -> tuple[str, str]:
+    """A room whose one decision is still proposed, already projected into the ontology."""
+    org = await service.create_organization("Lifecycle org", "lifecycle-org", "owner")
+    workspace = await service.create_workspace(org.org_id, "Engineering", "lifecycle", "owner")
+    room = await service.create_room(workspace.workspace_id, "Lifecycle", "owner")
+    await service.invite_room_member(room.room_id, "viewer", "viewer", "owner")
+    decision = await service.create_decision(
+        room.room_id, "Adopt the gateway", "content", created_by="owner"
+    )
+    await service.run_ontology_extraction(room.room_id, OntologyExtractor.IMMEDIATE)
+    return room.room_id, decision.decision_id
+
+
+def _decision_labels(answer: dict[str, Any]) -> set[str]:
+    return {
+        str(claim["label"])
+        for claim in [*answer["claims"], *answer["unconfirmed"]]
+        if claim["kind"] == "Decision"
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_decided_decision_leaves_the_open_list_and_joins_the_made_one() -> None:
+    """The split was real in the query and meaningless in the data: nothing drained it."""
+    db = Database(":memory:")
+    await db.connect()
+    service = MultiplayerService(db, RealtimeHub(), known_users=frozenset({"owner", "viewer"}))
+    try:
+        await service.initialize()
+        room_id, decision_id = await _seed_proposed_decision(service)
+
+        async def kinds() -> tuple[set[str], set[str]]:
+            return (
+                _decision_labels(
+                    await service.answer_decision_meta(
+                        room_id, kind=MetaQuestionKind.DECISIONS_OPEN, user_id="viewer"
+                    )
+                ),
+                _decision_labels(
+                    await service.answer_decision_meta(
+                        room_id, kind=MetaQuestionKind.DECISIONS_MADE, user_id="viewer"
+                    )
+                ),
+            )
+
+        still_open, already_made = await kinds()
+        assert still_open == {"Adopt the gateway"}
+        assert already_made == set()
+
+        decided = await service.update_decision_status(
+            decision_id, DecisionStatus.ACTIVE, reviewed_by="owner", require_member=True
+        )
+        assert decided.status is DecisionStatus.ACTIVE
+        assert decided.reviewed_by == "owner"
+        await service.run_ontology_extraction(room_id, OntologyExtractor.IMMEDIATE)
+
+        still_open, already_made = await kinds()
+        assert still_open == set()
+        assert already_made == {"Adopt the gateway"}
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_an_assertion_follows_the_decision_row_it_describes() -> None:
+    """Extraction that cannot update an assertion whose source row moved goes stale."""
+    db = Database(":memory:")
+    await db.connect()
+    service = MultiplayerService(db, RealtimeHub(), known_users=frozenset({"owner", "viewer"}))
+    try:
+        await service.initialize()
+        room_id, decision_id = await _seed_proposed_decision(service)
+
+        async def assertion() -> dict[str, Any]:
+            answer = await service.answer_decision_meta(
+                room_id, kind=MetaQuestionKind.STATUS, user_id="viewer"
+            )
+            return next(claim for claim in answer["claims"] if claim["kind"] == "Decision")
+
+        assert (await assertion())["properties"]["status"] == "PROPOSED"
+        assert (await assertion())["current"] is True
+
+        await service.update_decision_status(
+            decision_id, DecisionStatus.ACTIVE, reviewed_by="owner", require_member=True
+        )
+        # The transition alone is enough to stop the old assertion reading as current.
+        stale = await assertion()
+        assert stale["properties"]["status"] == "PROPOSED"
+        assert stale["current"] is False
+        assert stale["invalidating_events"] >= 1
+
+        result = await service.run_ontology_extraction(room_id, OntologyExtractor.IMMEDIATE)
+        assert result["entities_written"] == 1
+        followed = await assertion()
+        assert followed["properties"]["status"] == "ACTIVE"
+        assert followed["current"] is True
+        # Re-asserting replaces the row's account of itself, not the events behind it.
+        assert len(followed["evidence_event_sequences"]) == 2
+
+        # A pass over an unmoved row still writes nothing.
+        repeat = await service.run_ontology_extraction(room_id, OntologyExtractor.IMMEDIATE)
+        assert repeat["entities_written"] == 0
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_decision_transition_is_refused() -> None:
+    """A decision that could move anywhere is not a state machine."""
+    db = Database(":memory:")
+    await db.connect()
+    service = MultiplayerService(db, RealtimeHub(), known_users=frozenset({"owner", "viewer"}))
+    try:
+        await service.initialize()
+        room_id, decision_id = await _seed_proposed_decision(service)
+        before = await service.get_room_events(room_id)
+        with pytest.raises(DomainError, match="invalid decision transition"):
+            await service.update_decision_status(
+                decision_id, DecisionStatus.SUPERSEDED, reviewed_by="owner", require_member=True
+            )
+        # A refused transition writes neither the row nor an event.
+        decision = await service.repos.decisions.get(decision_id)
+        assert decision is not None and decision.status is DecisionStatus.PROPOSED
+        assert await service.get_room_events(room_id) == before
+
+        await service.update_decision_status(
+            decision_id, DecisionStatus.ACTIVE, reviewed_by="owner", require_member=True
+        )
+        for refused in (DecisionStatus.PROPOSED, DecisionStatus.REJECTED, DecisionStatus.ACTIVE):
+            with pytest.raises(DomainError, match="invalid decision transition"):
+                await service.update_decision_status(
+                    decision_id, refused, reviewed_by="owner", require_member=True
+                )
     finally:
         await db.close()
 
@@ -661,6 +809,61 @@ def test_every_kind_is_reachable_by_naming_it_over_the_route() -> None:
             client.get(f"/api/v1/rooms/{room_id}/meta?kind=STATUS", headers=OUTSIDER).status_code
             == 403
         )
+
+
+def test_one_meta_answer_gives_one_account_of_each_assertion_currency() -> None:
+    """One response called an assertion stale in claims[] and current in its own chain."""
+    app = create_app(
+        ":memory:",
+        auth_tokens={"owner-token": "owner", "viewer-token": "viewer"},
+    )
+    with TestClient(app) as client:
+        room_id, _workspace_id, identifiers = _seed_decision(client)
+        version_id = identifiers[0]
+        # A decision taken after publication invalidates the brief's assertion, so
+        # the answer has something to be consistent about.
+        proposed = client.post(
+            f"/api/v1/rooms/{room_id}/decisions",
+            headers=OWNER,
+            json={"title": "Revisit the identity provider", "content": "content"},
+        )
+        assert proposed.status_code == 200, proposed.text
+        moved = client.post(
+            f"/api/v1/decisions/{proposed.json()['decision_id']}/status",
+            headers=OWNER,
+            json={"status": "ACTIVE"},
+        )
+        assert moved.status_code == 200, moved.text
+
+        response = _ask(client, room_id, "Why was this decision made?", version_id=version_id)
+        assert response.status_code == 200, response.text
+        answer = response.json()
+
+        def currency(record: dict[str, Any]) -> tuple[bool, int]:
+            assert isinstance(record["current"], bool), record
+            assert isinstance(record["invalidating_events"], int), record
+            return record["current"], record["invalidating_events"]
+
+        listed = {
+            record["assertion_id"]: (record["current"], record["invalidating_events"])
+            for record in [*answer["claims"], *answer["unconfirmed"]]
+        }
+        decision = answer["decision"]
+        assert currency(decision) == listed[decision["entity_id"]]
+        assert decision["current"] is False
+        assert answer["evidence_chains"]
+        for chain in answer["evidence_chains"]:
+            claim = chain["claim"]
+            link = chain["relationships"]["claim_to_decision"]
+            assert currency(claim) == listed[claim["entity_id"]]
+            assert currency(link) == listed[link["relationship_id"]]
+            # Currency is per assertion, not per answer: the edge into the decision
+            # moved with it while the claim behind the edge did not.
+            assert link["current"] is False
+            assert claim["current"] is True
+            # Named only inside the chain, so the chain is where they must carry it.
+            currency(chain["agent_output"])
+            currency(chain["relationships"]["claim_to_agent_output"])
 
 
 def test_browser_meta_contract_exposes_scope_freshness_and_drilldown() -> None:

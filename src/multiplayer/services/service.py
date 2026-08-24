@@ -261,6 +261,17 @@ VALID_EXECUTION_TRANSITIONS: dict[ExecutionStatus, set[ExecutionStatus]] = {
 }
 
 
+# A decision is proposed, then taken or refused; a taken one is only ever
+# displaced by a later decision. Nothing returns to PROPOSED: reopening a settled
+# call is a new proposal, and rewriting the old row would erase that it was made.
+VALID_DECISION_TRANSITIONS: dict[DecisionStatus, set[DecisionStatus]] = {
+    DecisionStatus.PROPOSED: {DecisionStatus.ACTIVE, DecisionStatus.REJECTED},
+    DecisionStatus.ACTIVE: {DecisionStatus.SUPERSEDED},
+    DecisionStatus.SUPERSEDED: set(),
+    DecisionStatus.REJECTED: set(),
+}
+
+
 def _validate_transition(
     current: Any,
     target: Any,
@@ -291,6 +302,9 @@ _ASYNC_PASS_LIMIT = 200
 # threshold ever promotes it: only human review does.
 _INFERRED_CONFIDENCE = 0.6
 _UNCONFIRMED_TEMPLATE = "an unreviewed extraction suggests"
+# The cap the Meta route already applies to free text, restated where the text is
+# kept, because a service caller reaches the audit record without the route.
+_MAX_AUDITED_QUESTION = 500
 
 
 class AgentLaunchRefused(AuthorizationError):
@@ -4878,6 +4892,48 @@ class MultiplayerService:
         await self._broadcast_persisted_events([event])
         return decision
 
+    async def update_decision_status(
+        self,
+        decision_id: str,
+        status: DecisionStatus,
+        *,
+        reviewed_by: str = "",
+        require_member: bool = False,
+    ) -> Decision:
+        """Move a decision between states, and say so in the room's order.
+
+        Without this a decision could only ever be proposed, so the open list had
+        nothing that could drain it and the made list could never match a row. The
+        emitted event is the one the Decision invalidation class already listens
+        for, so the assertion over this row stops reading as current the moment the
+        row moves.
+        """
+        async with self.db.transaction():
+            decision = await self.repos.decisions.get(decision_id)
+            if decision is None:
+                raise DomainError(f"decision not found: {decision_id}")
+            if require_member:
+                await self._require_mutate_in_transaction(decision.room_id, reviewed_by)
+            _validate_transition(decision.status, status, VALID_DECISION_TRANSITIONS, "decision")
+            await self.repos.decisions.update_status(decision_id, status, reviewed_by)
+            decision = replace(decision, status=status, reviewed_by=reviewed_by)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=decision.room_id,
+                    sequence=0,
+                    event_type=(
+                        EventType.DECISION_SUPERSEDED
+                        if status is DecisionStatus.SUPERSEDED
+                        else EventType.DECISION_UPDATED
+                    ),
+                    payload={"decision_id": decision_id, "status": status.value},
+                    actor_id=reviewed_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
+        return decision
+
     async def list_room_decisions(self, room_id: str) -> list[Decision]:
         return await self.repos.decisions.list_by_room(room_id)
 
@@ -5435,6 +5491,10 @@ class MultiplayerService:
             EventType.TASK_CANCELLED,
             EventType.TASK_DELEGATED,
             EventType.DECISION_CREATED,
+            # A decision that moves state changes the row the assertion describes,
+            # so the pass that would otherwise never look again re-reads it here.
+            EventType.DECISION_UPDATED,
+            EventType.DECISION_SUPERSEDED,
             # An artifact version and a published synthesis are projected inside
             # their own committing transaction, by create_synthesis_in_transaction.
             # They stay in this allowlist so the cursor means "every structured
@@ -5448,6 +5508,13 @@ class MultiplayerService:
             EventType.MESSAGE_CREATED,
             EventType.AGENT_OUTPUT_CREATED,
             EventType.BRANCH_SYNTHESIS_COMPLETED,
+        }
+    )
+    _DECISION_EVENTS: frozenset[EventType] = frozenset(
+        {
+            EventType.DECISION_CREATED,
+            EventType.DECISION_UPDATED,
+            EventType.DECISION_SUPERSEDED,
         }
     )
     _TASK_ID_KEYS = ("task_id", "child_task_id", "parent_task_id")
@@ -5602,7 +5669,7 @@ class MultiplayerService:
         task_events: dict[str, list[int]] = {}
         decision_events: dict[str, list[int]] = {}
         for event in events:
-            if event.event_type is EventType.DECISION_CREATED:
+            if event.event_type in self._DECISION_EVENTS:
                 decision_id = str(event.payload.get("decision_id") or "")
                 if decision_id:
                     decision_events.setdefault(decision_id, []).append(event.sequence)
@@ -5693,6 +5760,13 @@ class MultiplayerService:
             decision = await self.repos.decisions.get(decision_id)
             if decision is None or decision.room_id != room_id:
                 continue
+            # A re-assertion replaces the row's account of itself, not its history:
+            # the events that produced the earlier assertion still evidence this one.
+            asserted = await self.repos.ontology.get_entity_by_source(
+                room_id, OntologyEntityKind.DECISION, decision_id
+            )
+            if asserted is not None:
+                sequences = [*sequences, *asserted.evidence_event_sequences]
             entities.append(
                 OntologyEntity(
                     entity_id=self._ontology_id("ont", room_id, "Decision", decision_id),
@@ -5929,6 +6003,20 @@ class MultiplayerService:
         return classify_meta_question(question)
 
     @staticmethod
+    def _audit_question(question: str | None) -> str | None:
+        """The copy of the free text that lands in the durable audit record.
+
+        It decides nothing, but it is attacker-chosen and it is kept, so it is
+        bounded to what the route already accepts and carries no character that
+        could rewrite a line of whatever reads the record back.
+        """
+        if question is None:
+            return None
+        return "".join(character for character in question if character.isprintable())[
+            :_MAX_AUDITED_QUESTION
+        ]
+
+    @staticmethod
     def _meta_assurance(
         derivation_kind: OntologyDerivationKind, review_status: OntologyReviewStatus
     ) -> OntologyAssurance:
@@ -6127,6 +6215,9 @@ class MultiplayerService:
         capability depends on a phrasing this workspace happens to recognize.
         """
         question_kind = self._resolve_meta_kind(question, kind)
+        # Classify the question as asked, record a bounded copy: shortening it first
+        # would let padding push a surveillance clause past the cut and match a form.
+        question = self._audit_question(question)
         if not 1 <= limit <= 10:
             raise DomainError("Meta evidence limit must be between 1 and 10")
         await self.get_room(room_id)
@@ -6416,7 +6507,7 @@ class MultiplayerService:
                         "provider_interventions": source["provider_interventions"],
                         "provider_evidence": source["provider_evidence"],
                     },
-                    "_assertions": (claim, claim_to_decision),
+                    "_assertions": (claim, output, claim_to_decision, claim_to_output),
                     "_reviews": (claim_review, decision_link_review),
                 }
             )
@@ -6460,7 +6551,7 @@ class MultiplayerService:
             )
         ]
         for chain in chains:
-            claim_entity, link = chain["_assertions"]
+            claim_entity, output_entity, link, output_link = chain["_assertions"]
             positions.append(
                 (
                     claim_entity.entity_id,
@@ -6470,12 +6561,42 @@ class MultiplayerService:
             )
             positions.append(
                 (
+                    output_entity.entity_id,
+                    output_entity.asserted_at_sequence,
+                    invalidation_class(output_entity.kind),
+                )
+            )
+            positions.append(
+                (
                     link.relationship_id,
                     link.asserted_at_sequence,
                     invalidation_class(claim_entity.kind, decision.kind),
                 )
             )
+            positions.append(
+                (
+                    output_link.relationship_id,
+                    output_link.asserted_at_sequence,
+                    invalidation_class(claim_entity.kind, output_entity.kind),
+                )
+            )
         currency = await self._meta_currency(room_id, user_id, head, positions)
+        # Currency is derived once and every record describing an assertion carries
+        # that one answer. A chain record left without it reported the same assertion
+        # as still current inside the same response that called it stale.
+        for chain in chains:
+            claim_entity, output_entity, link, output_link = chain["_assertions"]
+            links = chain["relationships"]
+            chain["claim"] = self._with_currency(chain["claim"], currency[claim_entity.entity_id])
+            chain["agent_output"] = self._with_currency(
+                chain["agent_output"], currency[output_entity.entity_id]
+            )
+            links["claim_to_decision"] = self._with_currency(
+                links["claim_to_decision"], currency[link.relationship_id]
+            )
+            links["claim_to_agent_output"] = self._with_currency(
+                links["claim_to_agent_output"], currency[output_link.relationship_id]
+            )
         # Retrieval is bounded, so the answer names only the evidence it retrieved.
         bounded_evidence = tuple(
             str(chain["exact_source_evidence"]["output_id"]) for chain in chains
@@ -6501,7 +6622,7 @@ class MultiplayerService:
             )
         ]
         for chain in chains:
-            claim_entity, link = chain["_assertions"]
+            claim_entity, _output_entity, link, _output_link = chain["_assertions"]
             claim_review, link_review = chain.pop("_reviews")
             del chain["_assertions"]
             records.append(
@@ -6573,7 +6694,9 @@ class MultiplayerService:
             "max_claims": limit,
         }
         envelope["decision"] = {
-            **self._ontology_entity_record(decision),
+            **self._with_currency(
+                self._ontology_entity_record(decision), currency[decision.entity_id]
+            ),
             "evidence_ids": [chain["exact_source_evidence"]["output_id"] for chain in chains],
             "source_ids": [
                 version.version_id,
