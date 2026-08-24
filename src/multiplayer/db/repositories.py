@@ -102,6 +102,7 @@ from ..domain.models import (
     weakest_derivation_kind,
     weakest_review_status,
 )
+from ..security.audit import GENESIS_HASH, event_chain_hash
 from ..security.authorization import RoomCapability, roles_with_capability
 from ..security.capabilities import Posture
 from .connection import Database, deserialize_datetime, serialize_datetime
@@ -1597,30 +1598,7 @@ class ExecutionRepo:
                 await AgentRunRepo(self.db).create_in_transaction(
                     replace(agent_run, execution_id=execution.execution_id)
                 )
-            cursor = await self.db.execute(
-                "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
-                "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
-                (event.room_id,),
-            )
-            row = await cursor.fetchone()
-            await cursor.close()
-            persisted = replace(event, sequence=int(row["seq"]) if row else 1)
-            await self.db.execute(
-                "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
-                "actor_id, actor_type, timestamp, schema_version) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    persisted.event_id,
-                    persisted.room_id,
-                    persisted.sequence,
-                    persisted.event_type.value,
-                    json.dumps(persisted.payload, default=str),
-                    persisted.actor_id,
-                    persisted.actor_type,
-                    serialize_datetime(persisted.timestamp),
-                    persisted.schema_version,
-                ),
-            )
+            persisted = await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
         return persisted
 
     async def get(self, execution_id: str) -> Execution | None:
@@ -2100,30 +2078,7 @@ class AgentOutputRepo:
                 self.db, output.branch_id, output.room_id, output.agent_id
             )
             for event in [*events, *settle_events, *branch_events]:
-                cursor = await self.db.execute(
-                    "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
-                    "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
-                    (event.room_id,),
-                )
-                row = await cursor.fetchone()
-                await cursor.close()
-                persisted = replace(event, sequence=int(row["seq"]) if row else 1)
-                await self.db.execute(
-                    "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
-                    "actor_id, actor_type, timestamp, schema_version) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        persisted.event_id,
-                        persisted.room_id,
-                        persisted.sequence,
-                        persisted.event_type.value,
-                        json.dumps(persisted.payload, default=str),
-                        persisted.actor_id,
-                        persisted.actor_type,
-                        serialize_datetime(persisted.timestamp),
-                        persisted.schema_version,
-                    ),
-                )
+                persisted = await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
                 persisted_events.append(persisted)
             if message is not None and message_event is not None:
                 # Last, so the log reads: output recorded, run completed, agent spoke.
@@ -2198,32 +2153,7 @@ class OutputSelectionRepo:
                 selection.branch_id,
             ),
         )
-        cursor = await self.db.execute(
-            "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
-            "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
-            (event.room_id,),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
-        persisted = replace(event, sequence=int(row["seq"]) if row else 1)
-        await self.db.execute(
-            "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
-            "actor_id, actor_type, timestamp, schema_version) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                persisted.event_id,
-                persisted.room_id,
-                persisted.sequence,
-                persisted.event_type.value,
-                json.dumps(persisted.payload, default=str),
-                persisted.actor_id,
-                persisted.actor_type,
-                serialize_datetime(persisted.timestamp),
-                persisted.schema_version,
-            ),
-        )
-
-        return persisted
+        return await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
 
     async def list_by_room(self, room_id: str) -> list[OutputSelection]:
         rows = await self.db.fetch_all(
@@ -3113,22 +3043,63 @@ class EventRepo:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    async def append(self, event: RoomEvent) -> RoomEvent:
+    async def _insert_chained(self, event: RoomEvent) -> RoomEvent:
+        """Insert the event with its hash chained onto its predecessor's.
+
+        The predecessor must already be visible: committed, or written earlier
+        inside the transaction the caller owns. The canonical transactional
+        append guarantees that; a direct append with a preallocated sequence is
+        on its caller to insert in order.
+        """
+        if event.sequence > 1:
+            prev = await self.db.fetch_one(
+                "SELECT event_hash FROM room_events WHERE room_id = ? AND sequence = ?",
+                (event.room_id, event.sequence - 1),
+            )
+            if prev is None or prev["event_hash"] is None:
+                raise RuntimeError(
+                    f"event chain for room {event.room_id} has no hashed predecessor "
+                    f"for sequence {event.sequence}"
+                )
+            prev_hash = str(prev["event_hash"])
+        else:
+            prev_hash = GENESIS_HASH
+        payload_json = json.dumps(event.payload, default=str)
+        timestamp = serialize_datetime(event.timestamp) or ""
+        event_hash = event_chain_hash(
+            prev_hash,
+            event.event_id,
+            event.room_id,
+            event.sequence,
+            event.event_type.value,
+            payload_json,
+            event.actor_id,
+            event.actor_type,
+            timestamp,
+            event.schema_version,
+        )
         await self.db.execute(
             "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
-            "actor_id, actor_type, timestamp, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "actor_id, actor_type, timestamp, schema_version, prev_hash, event_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.event_id,
                 event.room_id,
                 event.sequence,
                 event.event_type.value,
-                json.dumps(event.payload, default=str),
+                payload_json,
                 event.actor_id,
                 event.actor_type,
-                serialize_datetime(event.timestamp),
+                timestamp,
                 event.schema_version,
+                prev_hash,
+                event_hash,
             ),
         )
+        return event
+
+    async def append(self, event: RoomEvent) -> RoomEvent:
+        await self._insert_chained(event)
         await self.db.commit()
         return event
 
@@ -3150,44 +3121,12 @@ class EventRepo:
         row = await cursor.fetchone()
         await cursor.close()
         seq = int(row["seq"]) if row else 1
-        event = replace(event, sequence=seq)
-        await self.db.execute(
-            "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
-            "actor_id, actor_type, timestamp, schema_version) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                event.event_id,
-                event.room_id,
-                event.sequence,
-                event.event_type.value,
-                json.dumps(event.payload, default=str),
-                event.actor_id,
-                event.actor_type,
-                serialize_datetime(event.timestamp),
-                event.schema_version,
-            ),
-        )
-        return event
+        return await self._insert_chained(replace(event, sequence=seq))
 
     async def append_batch(self, events: list[RoomEvent]) -> None:
         """Insert multiple events in a single transaction."""
         for event in events:
-            await self.db.execute(
-                "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
-                "actor_id, actor_type, timestamp, schema_version) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    event.event_id,
-                    event.room_id,
-                    event.sequence,
-                    event.event_type.value,
-                    json.dumps(event.payload, default=str),
-                    event.actor_id,
-                    event.actor_type,
-                    serialize_datetime(event.timestamp),
-                    event.schema_version,
-                ),
-            )
+            await self._insert_chained(event)
         await self.db.commit()
 
     async def get_next_sequence(self, room_id: str) -> int:
@@ -3550,30 +3489,7 @@ class ArtifactRepo:
                 ),
             )
         for event in events:
-            cursor = await self.db.execute(
-                "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
-                "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 RETURNING seq",
-                (event.room_id,),
-            )
-            row = await cursor.fetchone()
-            await cursor.close()
-            persisted = replace(event, sequence=int(row["seq"]) if row else 1)
-            await self.db.execute(
-                "INSERT INTO room_events(event_id, room_id, sequence, event_type, payload, "
-                "actor_id, actor_type, timestamp, schema_version) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    persisted.event_id,
-                    persisted.room_id,
-                    persisted.sequence,
-                    persisted.event_type.value,
-                    json.dumps(persisted.payload, default=str),
-                    persisted.actor_id,
-                    persisted.actor_type,
-                    serialize_datetime(persisted.timestamp),
-                    persisted.schema_version,
-                ),
-            )
+            persisted = await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
             persisted_events.append(persisted)
         # A structured action projects its own assertions inside its committing
         # transaction, positioned at the ordered event that announced them, so a

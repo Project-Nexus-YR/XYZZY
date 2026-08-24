@@ -136,6 +136,7 @@ from ..harness.adapters import MODEL_PROVIDER_HARNESS_ID
 from ..model_providers import ModelProviderError
 from ..nexus_bridge.agent_bridge import NexusAgentBridge
 from ..realtime.hub import RealtimeHub
+from ..security.audit import GENESIS_HASH, event_chain_hash
 from ..security.authorization import (
     AuthorizationError,
     RoomCapability,
@@ -400,6 +401,7 @@ class MultiplayerService:
 
     async def initialize(self) -> None:
         await self._apply_migrations(Path(__file__).parent.parent / "migrations")
+        await self._backfill_event_chain()
         await self._backfill_legacy_artifact_provenance_hashes()
         await self._backfill_participant_handles()
         # Objects written before their kind joined the search allowlist.
@@ -407,6 +409,47 @@ class MultiplayerService:
         await self._seed_default_templates()
         await self._settle_orphaned_mention_runs()
         await self.sweep_expired_run_leases()
+
+    async def _backfill_event_chain(self) -> None:
+        """Hash events written before the chain existed, room by room, in order.
+
+        Only rows whose event_hash is NULL are touched, so a tampered stored
+        hash is never papered over by a fresh recomputation.
+        """
+        rooms = await self.db.fetch_all(
+            "SELECT DISTINCT room_id FROM room_events WHERE event_hash IS NULL"
+        )
+        for room_row in rooms:
+            room_id = str(room_row["room_id"])
+            async with self.db.transaction():
+                rows = await self.db.fetch_all(
+                    "SELECT event_id, sequence, event_type, payload, actor_id, actor_type, "
+                    "timestamp, schema_version, event_hash "
+                    "FROM room_events WHERE room_id = ? ORDER BY sequence",
+                    (room_id,),
+                )
+                prev_hash = GENESIS_HASH
+                for row in rows:
+                    if row["event_hash"] is not None:
+                        prev_hash = str(row["event_hash"])
+                        continue
+                    event_hash = event_chain_hash(
+                        prev_hash,
+                        str(row["event_id"]),
+                        room_id,
+                        int(row["sequence"]),
+                        str(row["event_type"]),
+                        str(row["payload"]),
+                        str(row["actor_id"]),
+                        str(row["actor_type"]),
+                        str(row["timestamp"]),
+                        int(row["schema_version"]),
+                    )
+                    await self.db.execute(
+                        "UPDATE room_events SET prev_hash = ?, event_hash = ? WHERE event_id = ?",
+                        (prev_hash, event_hash, str(row["event_id"])),
+                    )
+                    prev_hash = event_hash
 
     async def _apply_migrations(self, migrations_dir: Path) -> None:
         """Apply each pending migration and the row recording it as one commit.

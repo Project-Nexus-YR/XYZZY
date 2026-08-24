@@ -8,6 +8,7 @@ digest is stored, so a lost token is revoked, never recovered.
     python -m multiplayer.manage app.db token mint alice --label laptop
     python -m multiplayer.manage app.db token revoke <token-or-hash>
     python -m multiplayer.manage app.db token list
+    python -m multiplayer.manage app.db audit verify
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from .db.connection import Database, serialize_datetime
 from .db.repositories import UserRepo
 from .domain.models import User, utcnow
 from .realtime.hub import RealtimeHub
+from .security.audit import verify_event_chain
 from .security.auth import hash_token
 from .services.service import MultiplayerService
 
@@ -92,6 +94,16 @@ async def _run(args: argparse.Namespace) -> int:
                 state = "revoked" if row["revoked_at"] else "live"
                 label = row["label"] or "-"
                 print(f"{row['token_hash']}  {row['user_id']}  {label}  {state}")
+        elif args.command == "audit" and args.audit_command == "verify":
+            verified, breaks = await verify_event_chain(db)
+            for chain_break in breaks:
+                print(
+                    f"{chain_break.room_id} seq {chain_break.sequence} "
+                    f"{chain_break.event_id}: {chain_break.reason}"
+                )
+            print(f"{verified} events verified")
+            if breaks:
+                return 1
     except ValueError as exc:
         print(str(exc))
         return 1
@@ -117,6 +129,9 @@ def main() -> int:
     token_mint.add_argument("--label")
     token.add_parser("revoke").add_argument("token_or_hash")
     token.add_parser("list")
+
+    audit = commands.add_parser("audit").add_subparsers(dest="audit_command", required=True)
+    audit.add_parser("verify")
 
     return asyncio.run(_run(parser.parse_args()))
 
