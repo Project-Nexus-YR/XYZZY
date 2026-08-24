@@ -138,6 +138,7 @@ class EventType(StrEnum):
     TOOL_CALL_FAILED = "tool.call_failed"
     TOOL_CALL_REJECTED = "tool.call_rejected"
     ROOM_POLICY_UPDATED = "room.policy_updated"
+    ROOM_POSTURE_DECLARED = "room.posture_declared"
     WORKSPACE_POLICY_UPDATED = "workspace.policy_updated"
 
     # Session

@@ -9,7 +9,8 @@ rejected. Everything here is a pure function of durable records.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import StrEnum
 
 CAPABILITIES: frozenset[str] = frozenset(
     {
@@ -84,6 +85,23 @@ class BoundingPrincipals:
     def read_from(cls, principals: Iterable[str]) -> BoundingPrincipals:
         """Whatever the durable rows named. Rows that named nobody are an unknown."""
         return cls(frozenset(principals) or frozenset({UNKNOWN_PRINCIPAL}))
+
+    def also_bounded_by(self, principals: Iterable[str]) -> BoundingPrincipals:
+        """The same decision with further principals' grants over it. A union, only.
+
+        Some principals bound one call rather than the run it belongs to: a reviewer
+        releasing a parked tool call is answering for that call, and binding her into
+        every later call of the run is a reach nobody asked her for. She still has to
+        be read where that call is decided and again inside the transaction that
+        writes it, so she needs to reach the bound — just not the run's own set.
+
+        The one operation offered, and it adds. There is no expression here that drops
+        a principal, so a set built through this is never narrower than the durable
+        rows named, and since the terms are an intersection over the set, a wider set
+        is always a narrower grant. That is what keeps this incapable of being the
+        escalation it sits next to.
+        """
+        return BoundingPrincipals(self.principals | frozenset(principals))
 
     def __iter__(self) -> Iterator[str]:
         return iter(sorted(self.principals))
@@ -250,3 +268,38 @@ def decide(tool: str, effective: frozenset[str]) -> GatewayDecision:
         spec.required_capability,
         "approval required" if spec.requires_approval else "allowed",
     )
+
+
+class Posture(StrEnum):
+    """How much of what a channel already permits stops at a human.
+
+    Two, because two is what the records here can tell apart. ``GUARDED`` is what
+    every channel has always been: the five-way intersection decides what an agent
+    may do, and the per-tool floor decides what pauses. ``STRICT`` adds one rule —
+    every call pauses — and takes nothing away, because there is no tier below
+    ``GUARDED`` and the floor holds under both.
+    """
+
+    GUARDED = "GUARDED"
+    STRICT = "STRICT"
+
+
+STRICT_PAUSE_REASON = "strict posture: every call in this channel pauses for a human"
+
+
+def under_posture(decision: GatewayDecision, posture: Posture) -> GatewayDecision:
+    """Raise whether a permitted call pauses. It cannot reach ``allowed`` at all.
+
+    Not a branch that happens not to write ``allowed``: the only value returned other
+    than the decision itself is a copy naming ``requires_approval`` and ``reason``, so
+    what a posture may do to a decision is the whole of what this can express. A
+    posture is therefore structurally incapable of permitting anything the
+    intersection refused, which is the one property it must have.
+
+    A refused decision is returned untouched rather than offered to a reviewer.
+    "Ask a human" applied to a denial would be a widening through the back door: the
+    call would be permitted by whoever answered instead of by the records.
+    """
+    if posture is not Posture.STRICT or not decision.allowed or decision.requires_approval:
+        return decision
+    return replace(decision, requires_approval=True, reason=STRICT_PAUSE_REASON)

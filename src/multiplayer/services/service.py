@@ -146,12 +146,14 @@ from ..security.capabilities import (
     BoundingPrincipals,
     CapabilityTerms,
     GatewayDecision,
+    Posture,
     RunAuthorization,
     UnboundedTerms,
     allowed_tools,
     decide,
     may_address,
     policy_capabilities,
+    under_posture,
     user_capabilities,
 )
 from ..security.identity import (
@@ -985,6 +987,44 @@ class MultiplayerService:
                 )
             )
         await self._broadcast_persisted_events([event])
+
+    async def declare_room_posture(self, room_id: str, posture: Posture, declared_by: str) -> str:
+        """Say how much of this channel's work stops at a human. Never what it may do.
+
+        Administering the channel, because raising the bar and lowering it are the
+        same act seen from two sides and both are governance: the check is on the
+        write, so a posture cannot be reached through any door that is not this one.
+
+        Loosening is permitted, and the reason is that a posture which only rises
+        makes one mistaken STRICT permanent and the channel disposable; the harm a
+        one-way rule would prevent does not exist here, because the posture is read
+        once, when a call is decided, so loosening cannot reach a call already parked
+        at a reviewer — that call is released by the reviewer or by nobody.
+
+        Nothing is overwritten. The declaration is a row, so what governed an action
+        stays answerable from records that could not have changed since.
+        """
+        async with self.db.transaction():
+            await self._require_capability_in_transaction(
+                room_id, declared_by, RoomCapability.ADMINISTER
+            )
+            declaration_id = await self.repos.room_postures.declare(room_id, posture, declared_by)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.ROOM_POSTURE_DECLARED,
+                    payload={
+                        "declaration_id": declaration_id,
+                        "posture": posture.value,
+                        "declared_by": declared_by,
+                    },
+                    actor_id=declared_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
+        return declaration_id
 
     async def set_member_capabilities(
         self, room_id: str, user_id: str, allowed: list[str] | None, changed_by: str
@@ -2245,6 +2285,14 @@ class MultiplayerService:
         the steers that shaped it still bound what it may spend, and the authorization
         carries every one of them, so the derivation applies them without this door
         having to know any of them exist — or being able to name one if it wanted to.
+
+        The channel's posture is read here too, and here only, because this is the one
+        moment a call becomes a pause or an execution. It is read, never carried: the
+        declaration rows are consulted beside the terms rather than a value resolved
+        somewhere earlier being spent. What it may do to the decision is bounded by
+        :func:`under_posture` rather than by this door's discipline — it raises the
+        pause and cannot reach ``allowed``, so a channel's posture never changes what
+        that channel permits.
         """
         authorization = await self._authorization_for(
             execution.execution_id, agent.agent_id, session.room_id
@@ -2253,7 +2301,9 @@ class MultiplayerService:
         tool = str(result.get("tool", ""))
         raw_input = result.get("input")
         tool_input = raw_input if isinstance(raw_input, dict) else {}
-        decision = decide(tool, effective)
+        decision = under_posture(
+            decide(tool, effective), await self.repos.room_postures.current(session.room_id)
+        )
         request = ToolRequest(
             request_id=new_id("toolreq"),
             room_id=session.room_id,
@@ -2339,12 +2389,23 @@ class MultiplayerService:
         this tool narrowed, either of them taken out of the room. The authorization
         carries all of them, so the door a reviewer opens is bounded exactly as the
         gateway was, and takes no principal from its caller to be bounded by.
+
+        The reviewer about to release it bounds it here as well, through the same
+        helper the writer's own derivation uses, so this door refuses a call she may
+        not answer for cleanly instead of leaving it to be revoked inside the write.
+
+        The channel's posture is deliberately not applied. A posture decides whether a
+        call pauses, and this call has already paused and been answered; re-pausing it
+        would make an approval something a rule change could quietly revoke.
         """
-        authorization = await self._authorization_for(
-            request.execution_id,
-            request.agent_id,
-            request.room_id,
-            request.required_capability or "",
+        authorization = await self._bounded_by_this_calls_reviewers(
+            request,
+            await self._authorization_for(
+                request.execution_id,
+                request.agent_id,
+                request.room_id,
+                request.required_capability or "",
+            ),
         )
         effective = (await self._authorized_terms(authorization)).effective
         return decide(request.tool, effective), effective
@@ -2533,19 +2594,51 @@ class MultiplayerService:
         raise DomainError(f"tool not executable: {request.tool}")
 
     async def _run_authorization(self, request: ToolRequest) -> RunAuthorization:
-        """What the writer re-derives its terms from, read from durable records.
+        """What a stored call is decided and written against, read from durable records.
 
         It used to read the acting caller off ``agent_runs.acting_user_id``, which is
         the last human to have moved the run rather than the set of humans whose grant
         bounds it. By the time a reviewer released a parked call that column had been
         overwritten with the run's own principal, and the delegate who asked for the
         call was bounding nothing.
+
+        The run's own principals are read whole, by the one factory that reads them,
+        and this call's reviewers are added to that set beside them.
         """
-        return await self._authorization_for(
-            request.execution_id,
-            request.agent_id,
-            request.room_id,
-            request.required_capability or "",
+        return await self._bounded_by_this_calls_reviewers(
+            request,
+            await self._authorization_for(
+                request.execution_id,
+                request.agent_id,
+                request.room_id,
+                request.required_capability or "",
+            ),
+        )
+
+    async def _bounded_by_this_calls_reviewers(
+        self, request: ToolRequest, authorization: RunAuthorization
+    ) -> RunAuthorization:
+        """Put the humans who released this one call over it, and over nothing else.
+
+        A reviewer answers for the call she released and for no other, so her grant
+        belongs to that request's rows rather than to the run's. Recording her as a
+        caller of the run instead — which is what releasing a call used to do — made
+        an administrator scoped to ``retrieval`` strip ``writing`` from every later
+        call of a run she had touched once, and made answering an approval something
+        to avoid.
+
+        Adding can only narrow: the terms are an intersection over the set, so a wider
+        set is a smaller grant. There is no expression here that removes a principal
+        the durable rows named, which is what keeps a per-call bound from becoming a
+        way to spend more than the run's own principals hold. Both doors that decide a
+        stored call — the reviewer's and the writer's — reach the reviewers through
+        here, so neither can be the one that forgot them.
+        """
+        return replace(
+            authorization,
+            bounding=authorization.bounding.also_bounded_by(
+                await self.repos.tool_requests.reviewers(request.request_id)
+            ),
         )
 
     async def _require_run_authority_in_transaction(
@@ -5259,11 +5352,18 @@ class MultiplayerService:
             if pending is not None:
                 # The reviewer grants from their own capabilities, never above them:
                 # an approval is not a way to lend what the reviewer does not hold.
-                # Releasing a call is acting on the run, so she is written into its
-                # callers first and the derivation below reads her back out with
-                # everybody else — rather than being handed to it as the one identity
-                # this door happens to know about.
-                await self.repos.executions.record_caller(pending.execution_id, reviewer_id)
+                # She is written down first and the derivation below reads her back
+                # out with everybody else — rather than being handed to it as the one
+                # identity this door happens to know about.
+                #
+                # Against this call, not against the run. Releasing one call is not
+                # taking the run over: recording her as a caller of it put her grant
+                # over every call it made afterwards, so an administrator scoped to
+                # `retrieval` who approved a single read turned the run's later writes
+                # from paused into refused. It failed closed, so nobody obtained
+                # anything — but they approved one call and bounded a hundred, which
+                # is a reach, and one that teaches people not to answer approvals.
+                await self.repos.tool_requests.record_reviewer(pending.request_id, reviewer_id)
                 # Re-derived inside the transaction that grants rather than after it
                 # closed; the re-stamped effective set is an audit record, never an
                 # input, because the writer re-derives again inside its own.
@@ -5295,8 +5395,17 @@ class MultiplayerService:
         await self._broadcast_persisted_events([event])
         if pending is not None:
             if decision.allowed:
+                # Under the principal the turn was parked on, not under the reviewer.
+                # `agent_runs.advance` writes its acting human into the run's callers,
+                # so naming her here would put back — through the database, where it
+                # is harder to see — exactly the run-wide bound the line above stopped
+                # taking. It is the same principal the park named, which is the same
+                # one `_resume_suspended_turn` carries the rest of the turn under.
                 await self._advance_run_for_execution(
-                    pending.execution_id, HarnessState.STREAMING, reviewer_id, _STREAMING_LEASE
+                    pending.execution_id,
+                    HarnessState.STREAMING,
+                    pending.authorized_by,
+                    _STREAMING_LEASE,
                 )
                 resolved = await self._execute_tool_request(pending)
             else:
@@ -5529,8 +5638,15 @@ class MultiplayerService:
         if run is None or run.harness_state is HarnessState.SETTLED:
             return []
         if continue_turn:
+            # The same reach as the approve path, and refused for a stronger reason:
+            # this reviewer released nothing at all, so putting her name on the advance
+            # would bound every remaining call of the run by somebody who said no to
+            # one of them. The turn continues under the principal it was parked on.
             await self.repos.agent_runs.advance(
-                run.run_id, HarnessState.STREAMING, utcnow() + _STREAMING_LEASE, reviewer_id
+                run.run_id,
+                HarnessState.STREAMING,
+                utcnow() + _STREAMING_LEASE,
+                gated.authorized_by or run.acting_user_id,
             )
             return []
         execution = await self.repos.executions.get(execution_id)

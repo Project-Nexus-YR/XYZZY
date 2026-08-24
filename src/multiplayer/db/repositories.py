@@ -103,6 +103,7 @@ from ..domain.models import (
     weakest_review_status,
 )
 from ..security.authorization import RoomCapability, roles_with_capability
+from ..security.capabilities import Posture
 from .connection import Database, deserialize_datetime, serialize_datetime
 
 log = logging.getLogger(__name__)
@@ -118,6 +119,7 @@ class Repos:
         self.workspaces = WorkspaceRepo(db)
         self.bootstrap_contexts = BootstrapContextRepo(db)
         self.rooms = RoomRepo(db)
+        self.room_postures = RoomPostureRepo(db)
         self.room_members = RoomMemberRepo(db)
         self.agents = AgentRepo(db)
         self.agent_identities = AgentIdentityRepo(db)
@@ -659,6 +661,29 @@ class ToolRequestRepo:
         )
         await self.db.commit()
 
+    async def record_reviewer(self, request_id: str, reviewer_id: str) -> None:
+        """Write down the human releasing this one call, so its bound can read them.
+
+        Against the call, never against the run. What she may lend is not stored —
+        that is read from her room membership again every time this call is decided.
+        """
+        if not reviewer_id:
+            return
+        await self.db.execute(
+            "INSERT OR IGNORE INTO tool_request_reviewers(request_id, reviewer_id, reviewed_at) "
+            "VALUES (?, ?, ?)",
+            (request_id, reviewer_id, utcnow().isoformat()),
+        )
+        await self.db.commit()
+
+    async def reviewers(self, request_id: str) -> frozenset[str]:
+        """Every human who released this call, and nobody else's calls."""
+        rows = await self.db.fetch_all(
+            "SELECT reviewer_id FROM tool_request_reviewers WHERE request_id = ?",
+            (request_id,),
+        )
+        return frozenset(str(row["reviewer_id"]) for row in rows)
+
     def _from_row(self, row: dict[str, Any]) -> ToolRequest:
         resolved = row["resolved_at"]
         return ToolRequest(
@@ -679,6 +704,38 @@ class ToolRequestRepo:
             created_at=datetime.fromisoformat(row["created_at"]),
             resolved_at=datetime.fromisoformat(resolved) if resolved else None,
         )
+
+
+class RoomPostureRepo:
+    """Append-only declarations of how much of a channel's work stops at a human."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def declare(self, room_id: str, posture: Posture, declared_by: str) -> str:
+        """Say what pauses here from now on. A new row every time; never an edit."""
+        declaration_id = new_id("posture")
+        await self.db.execute(
+            "INSERT INTO room_postures(declaration_id, room_id, posture, declared_by, declared_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (declaration_id, room_id, posture.value, declared_by, utcnow().isoformat()),
+        )
+        await self.db.commit()
+        return declaration_id
+
+    async def current(self, room_id: str) -> Posture:
+        """The latest declaration at or before now. A channel that never spoke is GUARDED.
+
+        Derived at every read rather than kept anywhere. A posture resolved once and
+        spent later is the defect this repository has now lost fifteen rounds to, and
+        a stored one would be that defect with a new name on it.
+        """
+        row = await self.db.fetch_one(
+            "SELECT posture FROM room_postures WHERE room_id = ? "
+            "ORDER BY declared_at DESC, rowid DESC LIMIT 1",
+            (room_id,),
+        )
+        return Posture.GUARDED if row is None else Posture(str(row["posture"]))
 
 
 class RoomRepo:
