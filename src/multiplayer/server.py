@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .api.routes import router, set_authenticator, set_service
 from .db.connection import Database
 from .realtime.hub import RealtimeHub
@@ -79,7 +80,7 @@ def create_app(
     app = FastAPI(
         title="Multiplayer AI Workspace",
         description="Persistent shared workspace for humans and AI agents",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
 
