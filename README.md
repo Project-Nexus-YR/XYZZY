@@ -111,9 +111,22 @@ pip install -e ".[dev]"
 
 ## Running
 
-Every route below `/api/v1` needs a bearer token from `MULTIAI_AUTH_TOKENS`;
-`/api/v1/health` is the exception. Without `OPENAI_API_KEY` the server runs a
-credential-free simulator, which is enough for the whole workflow.
+Every route below `/api/v1` needs a bearer token; `/api/v1/health` is the
+exception. Without `OPENAI_API_KEY` the server runs a credential-free
+simulator, which is enough for the whole workflow.
+
+Credentials live in the database, hashed, one row per token, revocable
+without a restart. `MULTIAI_AUTH_TOKENS` is bootstrap only: its tokens are
+ingested at startup, and a token an operator revoked stays revoked across
+restarts. Mint and revoke real credentials with the operator CLI — the token
+is printed once at mint time and never stored:
+
+```bash
+python -m multiplayer.manage multiplayer.db user add alice --email alice@example.com
+python -m multiplayer.manage multiplayer.db token mint alice --label laptop
+python -m multiplayer.manage multiplayer.db token revoke <token-or-hash>
+python -m multiplayer.manage multiplayer.db token list
+```
 
 ```bash
 # Start the server (serves API + web UI). POSIX shells:
