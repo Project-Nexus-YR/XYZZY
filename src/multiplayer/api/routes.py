@@ -77,13 +77,13 @@ def _svc_or_404() -> MultiplayerService:
     return _svc
 
 
-def _current_user(
+async def _current_user(
     authorization: Annotated[str | None, Header()] = None,
 ) -> AuthenticatedUser:
     if _authenticator is None:
         raise HTTPException(503, "authentication service not ready")
     try:
-        return _authenticator.authenticate(authorization)
+        return await _authenticator.authenticate(authorization)
     except AuthenticationError as exc:
         raise HTTPException(
             401,

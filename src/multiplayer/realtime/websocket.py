@@ -71,7 +71,7 @@ async def websocket_endpoint(
 
     websocket_authorization, accepted_protocol = _websocket_authorization(websocket)
     try:
-        principal = authenticator.authenticate(websocket_authorization)
+        principal = await authenticator.authenticate(websocket_authorization)
     except AuthenticationError:
         await websocket.close(code=4401, reason="authentication required")
         return

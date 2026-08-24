@@ -20,7 +20,7 @@ from .api.routes import router, set_authenticator, set_service
 from .db.connection import Database
 from .realtime.hub import RealtimeHub
 from .realtime.websocket import websocket_endpoint
-from .security import AuthorizationError, TokenAuthenticator
+from .security import AuthorizationError, TokenAuthenticator, ingest_bootstrap_tokens
 from .services.service import MultiplayerService
 
 log = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ def create_app(
         if not isinstance(configured_tokens, dict):
             raise RuntimeError("MULTIAI_AUTH_TOKENS must be a JSON object")
         auth_tokens = {str(token): str(user_id) for token, user_id in configured_tokens.items()}
-    authenticator = TokenAuthenticator(auth_tokens)
+    authenticator = TokenAuthenticator(db)
     svc = MultiplayerService(db, hub, known_users=frozenset(auth_tokens.values()))
 
     async def sweep_run_leases() -> None:
@@ -64,6 +64,7 @@ def create_app(
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await db.connect()
         await svc.initialize()
+        await ingest_bootstrap_tokens(db, auth_tokens)
         set_service(svc)
         set_authenticator(authenticator)
         sweeper = asyncio.create_task(sweep_run_leases())
