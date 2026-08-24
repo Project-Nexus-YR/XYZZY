@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
+from .api.a2a import router as a2a_router
 from .api.routes import router, set_authenticator, set_service, set_sessions
 from .db.connection import Database
 from .realtime.hub import RealtimeHub
@@ -198,6 +199,10 @@ def create_app(
         return await call_next(request)
 
     app.include_router(router)
+    # The A2A surface is rooted rather than under /api/v1: its endpoint path and
+    # its well-known card path are both fixed by a specification this product
+    # does not get to renumber.
+    app.include_router(a2a_router)
 
     @app.exception_handler(AuthorizationError)
     async def forbidden(_request: Request, exc: AuthorizationError) -> JSONResponse:
