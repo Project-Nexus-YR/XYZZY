@@ -984,6 +984,7 @@ class MultiplayerService:
 
     async def leave_room(self, room_id: str, user_id: str) -> None:
         """Give up membership durably: the row and the event commit together."""
+        require_human_boundary("member.leave")
         async with self.db.transaction():
             member = await self.repos.room_members.get(room_id, user_id)
             if member is None:
@@ -1367,6 +1368,7 @@ class MultiplayerService:
         require_member: bool = False,
     ) -> AgentAddressing:
         """Who may point this agent. Room ADMINISTER, because it is a grant."""
+        require_human_boundary("agent.addressing")
         agent = await self.get_agent(agent_id)
         current = await self.repos.agent_addressing.get(agent_id)
         addressing = AgentAddressing(

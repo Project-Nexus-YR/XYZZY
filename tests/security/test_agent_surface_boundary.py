@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from multiplayer.db.connection import Database
-from multiplayer.domain.models import ToolRequest
+from multiplayer.domain.models import AddressingMode, ToolRequest
 from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.security import AuthorizationError
 from multiplayer.security.boundary import active_agent_turn, agent_turn
@@ -53,6 +53,8 @@ def _fenced_calls(svc: MultiplayerService) -> dict[str, Any]:
         "run.cancel": lambda: svc.cancel_execution("e", "u"),
         "run.intervene": lambda: svc.intervene_execution("e", "u", "go"),
         "run.reopen": lambda: svc.resume_agent_run("run", "u"),
+        "agent.addressing": lambda: svc.set_agent_addressing("a", AddressingMode.ANYONE, "u"),
+        "member.leave": lambda: svc.leave_room("r", "u"),
     }
 
 
