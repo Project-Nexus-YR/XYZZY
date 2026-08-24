@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Governance is structurally outside the agent surface: while a model-driven
-  turn executes, twenty governance methods - policies, postures, capability
+  turn executes, twenty-two governance methods - policies, postures, capability
   bounds, membership and roles, approvals, identity, agent and run control -
   refuse to run at all, whoever called them, through whatever path.
 - Untrusted input is screened before a model reads it: invisible Unicode
