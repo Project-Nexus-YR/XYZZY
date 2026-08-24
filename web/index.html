@@ -60,7 +60,8 @@ body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var
 .btn-sm{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 10px;border-radius:var(--radius);cursor:pointer;font-size:11px}
 .btn-sm:hover{border-color:var(--accent)}
 .approval-card{background:#422006;border:1px solid #92400e;border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
-.approval-card .action{font-size:12px;margin-bottom:8px}
+.approval-card .action{font-size:12px;margin-bottom:4px}
+.approval-card .reason{font-size:11px;color:var(--text2);margin-bottom:8px}
 .approval-card .btns{display:flex;gap:6px}
 .btn-approve{background:#14532d;color:#4ade80;border:1px solid #166534;padding:4px 12px;border-radius:var(--radius);cursor:pointer;font-size:11px}
 .btn-reject{background:#450a0a;color:#f87171;border:1px solid #991b1b;padding:4px 12px;border-radius:var(--radius);cursor:pointer;font-size:11px}
@@ -341,7 +342,7 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
 </section>
 
 <section class="context-view" data-context-view="artifacts"><div class="panel-section"><div class="panel-title">Published artifacts</div><div class="panel-copy">Open the shared work product, then inspect its selected inputs.</div></div><div class="panel-section" id="artifact-surface"></div></section>
-<section class="context-view" data-context-view="members"><div class="panel-section"><div class="panel-title">People and permissions</div><div class="panel-copy">Your channel role determines which actions are available.</div><div id="members-panel"></div></div><details class="records">
+<section class="context-view" data-context-view="members"><div class="panel-section"><div class="panel-title">People and permissions</div><div class="panel-copy">Your channel role determines which actions are available.</div><div id="posture-panel"></div><div id="members-panel"></div></div><details class="records">
   <summary>Workspace records</summary>
   <h3>Agents</h3><div class="panel-section" id="agents-panel"></div>
   <h3>Tasks</h3><div class="panel-section" id="tasks-panel"></div>
@@ -749,6 +750,7 @@ async function loadState() {
   document.getElementById('identity-avatar').textContent = (userName || userId || '?').slice(0,1).toUpperCase();
   document.getElementById('rail-avatar').textContent = (userName || userId || '?').slice(0,1).toUpperCase();
   applyPermissions();
+  renderPosture(state.room.posture);
   roomOntology = state.ontology || {entities: [], relationships: [], reviews: []};
   renderOntology(roomOntology);
 
@@ -853,6 +855,9 @@ function handleRealtimeEvent(msg) {
         break;
       case 'approval.requested': case 'approval.granted': case 'approval.rejected':
         loadState();
+        break;
+      case 'room.posture_declared':
+        loadState().then(() => appendSystemMessage(`Channel posture is now ${String(msg.payload.posture || '').toLowerCase()}`));
         break;
       case 'artifact.created': case 'artifact.version_created':
         loadState();
@@ -1195,6 +1200,7 @@ function renderApprovals(approvals) {
   panel.innerHTML = approvals.map(a => `
     <div class="approval-card">
       <div class="action">${escHtml(a.action)}</div>
+      <div class="reason">${escHtml(a.reason || 'awaiting a human')}</div>
       <div class="btns">
         <button class="btn-approve" onclick="approveAction('${a.approval_id}')">Approve</button>
         <button class="btn-reject" onclick="rejectAction('${a.approval_id}')">Reject</button>
@@ -1425,6 +1431,36 @@ async function reviewOntologyRelationship(relationshipId, action) {
     await loadState();
   } catch (err) {
     alert(`Ontology relationship review was not saved: ${errorMessage(err)}`);
+  }
+}
+
+// Said in the words of the person it stops, because a rule that parks a colleague's
+// tool call is not an administrator's private setting.
+const POSTURE_COPY = {
+  GUARDED: 'Guarded · only the tools that always need a human pause here',
+  STRICT: 'Strict · every tool call in this channel pauses for a human',
+};
+
+function renderPosture(posture) {
+  const current = POSTURE_COPY[posture] ? posture : 'GUARDED';
+  // Everyone in the channel reads it; only an admin gets the control, which is the
+  // same capability the route requires and the service re-checks as it writes.
+  const control = currentRoomRole === 'admin'
+    ? `<select id="posture-select" aria-label="Channel posture" onchange="declarePosture(this.value)"><option value="GUARDED"${current === 'GUARDED' ? ' selected' : ''}>Guarded</option><option value="STRICT"${current === 'STRICT' ? ' selected' : ''}>Strict</option></select>`
+    : '';
+  document.getElementById('posture-panel').innerHTML =
+    `<div class="card member-row" data-posture="${escHtml(current)}"><div><div class="title">Channel posture</div><div class="detail" id="posture-current">${escHtml(POSTURE_COPY[current])}</div></div>${control}</div>`;
+}
+
+async function declarePosture(posture) {
+  try {
+    await api('PATCH', `/rooms/${roomId}/posture`, {posture});
+    await loadState();
+    toast(`Channel posture is now ${posture.toLowerCase()}.`);
+  } catch (err) {
+    // The select shows a posture nobody declared until the snapshot corrects it.
+    await loadState();
+    toast(`Posture was not changed: ${errorMessage(err)}`, 'error');
   }
 }
 

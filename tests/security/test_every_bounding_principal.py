@@ -510,10 +510,10 @@ def _service_ast() -> ast.Module:
     return ast.parse(Path(source).read_text(encoding="utf-8"))
 
 
-def _functions_mentioning(name: str) -> set[str]:
-    """Every function in the service whose body names ``name`` at all."""
+def _functions_mentioning(name: str, tree: ast.Module | None = None) -> set[str]:
+    """Every function in the service — or in ``tree`` — whose body names ``name`` at all."""
     mentions: set[str] = set()
-    for node in ast.walk(_service_ast()):
+    for node in ast.walk(tree if tree is not None else _service_ast()):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
         for inner in ast.walk(node):
@@ -522,6 +522,20 @@ def _functions_mentioning(name: str) -> set[str]:
             elif isinstance(inner, ast.Attribute) and inner.attr == name:
                 mentions.add(node.name)
     return mentions
+
+
+def _functions_constructing_a_bounding_set(tree: ast.Module | None = None) -> set[str]:
+    """Every function that ends up holding one, by either route that makes one.
+
+    Naming the class is one route and it was the only one this guard could see. The
+    other is ``also_bounded_by``, which takes principals from its caller and hands
+    back a set built from them — the exact shape of all fourteen relocations, and
+    invisible to a guard that reads for the class name. Both are counted here so a
+    door that adds a principal it happens to know about has to be on the list below.
+    """
+    return _functions_mentioning("BoundingPrincipals", tree) | _functions_mentioning(
+        "also_bounded_by", tree
+    )
 
 
 def test_a_run_authorization_names_its_principals_only_as_one_set() -> None:
@@ -551,7 +565,7 @@ def test_one_durable_union_is_the_only_thing_that_fills_the_bounding_set() -> No
 
 def test_every_construction_of_a_bounding_set_is_a_recorded_decision() -> None:
     """The run's own set is read; the rest are gates asking about named principals."""
-    assert _functions_mentioning("BoundingPrincipals") == {
+    assert _functions_constructing_a_bounding_set() == {
         "_lendable_terms",  # the parameter every one of these hands it
         "_authorization_for",  # the run's own principals, read whole from the rows
         "_require_delegated_authority",  # may this caller act on somebody else's run
@@ -559,7 +573,46 @@ def test_every_construction_of_a_bounding_set_is_a_recorded_decision() -> None:
         "_invoke_mentioned_agent_in_transaction",  # may this member open a turn here
         "_execute_one_agent_step",  # is the run's own principal still spoken for
         "agent_capability_terms",  # a preview for a run that does not exist yet
+        "_bounded_by_this_calls_reviewers",  # the humans who released this one call
     }
+
+
+def test_the_second_maker_of_a_bounding_set_takes_no_principal_from_its_caller_either() -> None:
+    """``also_bounded_by`` is a construction site, so its callers are pinned like the factory's.
+
+    The factory is safe because there is no parameter through which a caller can hand
+    it a short set. This method is the opposite — principals are exactly what it takes
+    — so what makes it safe has to be that only one function reaches it, and that that
+    function takes no principal from *its* caller either: it is handed a request and
+    reads the reviewers of that request from the durable rows. Both halves are asserted,
+    because either one alone leaves the shape that lost fourteen rounds expressible.
+    """
+    assert _functions_mentioning("also_bounded_by") == {"_bounded_by_this_calls_reviewers"}
+    params = set(inspect.signature(MultiplayerService._bounded_by_this_calls_reviewers).parameters)
+    assert params == {"self", "request", "authorization"}
+
+
+_A_DOOR_THAT_NEVER_NAMES_THE_CLASS = """
+class MultiplayerService:
+    async def _a_door_written_next_year(self, request, authorization, reviewer_id):
+        return replace(
+            authorization, bounding=authorization.bounding.also_bounded_by([reviewer_id])
+        )
+"""
+
+
+def test_the_guard_sees_a_construction_that_never_names_the_class() -> None:
+    """The blind spot itself, pinned: this is how the reviewer's bound got in unseen.
+
+    A door can hold a bounding set built from principals it was handed without the
+    class name appearing anywhere in it, so a guard that reads for the class name
+    passes over it in silence. That is not hypothetical — it is what happened, and
+    reversing the fix makes this fail rather than making the suite quietly wider.
+    """
+    tree = ast.parse(_A_DOOR_THAT_NEVER_NAMES_THE_CLASS)
+
+    assert _functions_mentioning("BoundingPrincipals", tree) == set()
+    assert _functions_constructing_a_bounding_set(tree) == {"_a_door_written_next_year"}
 
 
 def test_a_bounding_set_with_nobody_in_it_is_refused() -> None:

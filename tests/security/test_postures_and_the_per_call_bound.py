@@ -39,6 +39,7 @@ from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
 from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.security.capabilities import (
     CAPABILITIES,
+    STRICT_PAUSE_REASON,
     TOOLS,
     BoundingPrincipals,
     Posture,
@@ -421,3 +422,51 @@ async def test_a_reviewers_narrower_grant_does_not_bound_a_later_call_in_the_sam
     assert REVIEWER not in await svc.repos.executions.bounding_principals(execution_id)
     assert await svc.repos.tool_requests.reviewers(write_row["request_id"]) == frozenset({REVIEWER})
     assert await svc.repos.tool_requests.reviewers(read_row["request_id"]) == frozenset()
+
+
+# ── The rule that parked a call is readable by the person it is waiting on ────
+
+
+@pytest.mark.asyncio
+async def test_the_snapshot_names_the_rule_that_parked_each_call(
+    service: MultiplayerService,
+) -> None:
+    """A pause nobody can account for is a pause nobody can answer honestly.
+
+    ``STRICT`` turns a read that would have run into a question for a human, and the
+    reviewer who finds it waiting has to be able to tell that from the floor, which
+    pauses ``task.create`` in every channel. Both causes are already on the call's own
+    row; this is the read that carries them out to the client, where the posture
+    itself is shown beside them.
+    """
+    svc = service
+    room_id = await _room(svc, await _workspace(svc))
+    template_id = await _deputy_template(svc)
+    await svc.declare_room_posture(room_id, Posture.STRICT, OWNER)
+    await _turn(svc, room_id, template_id, _AsksThenAnswers(READ))
+
+    state = await svc.get_room_state(room_id, user_id=OWNER)
+
+    assert state["room"]["posture"] == "STRICT"
+    [parked] = state["pending_approvals"]
+    assert parked["action"] == "channel.read_context: retrieval"
+    assert parked["reason"] == STRICT_PAUSE_REASON
+
+
+@pytest.mark.asyncio
+async def test_the_snapshot_gives_a_guarded_channels_floor_its_own_cause(
+    service: MultiplayerService,
+) -> None:
+    """The control: under ``GUARDED`` the cause is the floor's, not the posture's."""
+    svc = service
+    room_id = await _room(svc, await _workspace(svc))
+    template_id = await _deputy_template(svc)
+    await _turn(svc, room_id, template_id, _AsksThenAnswers(WRITE))
+
+    state = await svc.get_room_state(room_id, user_id=OWNER)
+
+    assert state["room"]["posture"] == "GUARDED"
+    [parked] = state["pending_approvals"]
+    assert parked["action"] == "task.create: writing"
+    assert parked["reason"] != STRICT_PAUSE_REASON
+    assert parked["reason"] == "approval required"

@@ -7566,6 +7566,16 @@ class MultiplayerService:
         decisions = await self.list_room_decisions(room_id)
         memories = await self.list_room_memories(room_id)
         pending_approvals = await self.list_pending_approvals(room_id)
+        # Why each parked call is parked, from the call's own row. A reader answering
+        # an approval can see whether the channel's posture stopped it or the tool's
+        # own floor did, which is the difference between "this room pauses everything"
+        # and "this action always pauses".
+        approval_reasons = {
+            approval.approval_id: gated.reason
+            for approval in pending_approvals
+            if (gated := await self.repos.tool_requests.get_by_approval(approval.approval_id))
+        }
+        posture = await self.repos.room_postures.current(room_id)
         runs = await self.repos.executions.list_by_room(room_id)
         branches = await self.repos.branches.list_by_room(room_id)
         outputs = await self.list_room_outputs(room_id)
@@ -7602,6 +7612,9 @@ class MultiplayerService:
                 "description": room.description,
                 "status": room.status.value,
                 "workspace_id": room.workspace_id,
+                # Derived from the declaration rows on this read, like every other
+                # reader of a posture. Nothing here is a value spent later.
+                "posture": posture.value,
             },
             "events_since": [
                 {
@@ -7775,6 +7788,7 @@ class MultiplayerService:
                     "approval_id": a.approval_id,
                     "action": a.action_description,
                     "agent_id": a.agent_id,
+                    "reason": approval_reasons.get(a.approval_id, ""),
                 }
                 for a in pending_approvals
             ],

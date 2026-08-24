@@ -49,6 +49,7 @@ from ..security import (
     TokenAuthenticator,
     allowed_tools,
 )
+from ..security.capabilities import Posture
 from ..services.service import MultiplayerService
 
 log = logging.getLogger(__name__)
@@ -251,6 +252,12 @@ class PolicyRequest(BaseModel):
     """A capability list, or null to lift the policy entirely."""
 
     allowed_capabilities: list[str] | None = None
+
+
+class PostureRequest(BaseModel):
+    """How much of this channel's work stops at a human. GUARDED or STRICT."""
+
+    posture: str
 
 
 class SpawnAgentRequest(BaseModel):
@@ -706,6 +713,29 @@ async def set_room_policy(
     except DomainError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"allowed_capabilities": req.allowed_capabilities}
+
+
+@router.patch("/rooms/{room_id}/posture")
+async def declare_room_posture(
+    room_id: str,
+    req: PostureRequest,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    """Say how much of this channel stops at a human. Governance, so ADMINISTER.
+
+    Gated the way the channel policy beside it is, and for the same reason: raising
+    the bar and lowering it are one act seen from two sides. The service checks the
+    capability again inside the transaction that writes, so this check is the door's
+    manners rather than the guarantee.
+    """
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.ADMINISTER)
+    posture = _safe_enum(req.posture.upper(), Posture, "posture")
+    try:
+        declaration_id = await svc.declare_room_posture(room_id, posture, principal.user_id)
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"posture": posture.value, "declaration_id": declaration_id}
 
 
 @router.patch("/rooms/{room_id}/members/{user_id}/capabilities")
