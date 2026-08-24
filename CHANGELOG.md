@@ -7,8 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Governance is structurally outside the agent surface: while a model-driven
+  turn executes, twenty governance methods - policies, postures, capability
+  bounds, membership and roles, approvals, identity, agent and run control -
+  refuse to run at all, whoever called them, through whatever path.
+- Untrusted input is screened before a model reads it: invisible Unicode
+  channels stripped, length bounded, member-authored and tool-returned
+  content fenced as data with its origin named. Deterministic; cannot fail
+  open.
+- The benchmark baseline's concessions are now verified against pinned
+  source commits of buzz and qm, with one claim withdrawn and two corrected.
+
 ### Fixed
 
+- `set_workspace_policy` bounds every room in the workspace but was gated on
+  bare membership; it now requires the workspace admin role, re-read inside
+  the transaction that writes. `remove_room_member` gets the same
+  in-transaction re-check its route already implied.
 - The migration transaction guard also catches a `COMMIT` that shares a line
   with another statement.
 
