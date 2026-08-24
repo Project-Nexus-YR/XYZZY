@@ -54,6 +54,7 @@ from ..domain.models import (
     MessageRole,
     Notification,
     NotificationStatus,
+    OidcAuthorization,
     OntologyDerivationKind,
     OntologyEntity,
     OntologyEntityKind,
@@ -81,6 +82,7 @@ from ..domain.models import (
     SearchHit,
     SearchObjectKind,
     Session,
+    SessionRefreshToken,
     SessionStatus,
     Task,
     TaskDependency,
@@ -94,6 +96,7 @@ from ..domain.models import (
     TurnLockScopeType,
     TurnLockStatus,
     User,
+    UserSession,
     UserStatus,
     Workspace,
     WorkspaceMember,
@@ -116,6 +119,7 @@ class Repos:
     def __init__(self, db: Database) -> None:
         self.db = db
         self.users = UserRepo(db)
+        self.user_sessions = UserSessionRepo(db)
         self.orgs = OrgRepo(db)
         self.workspaces = WorkspaceRepo(db)
         self.bootstrap_contexts = BootstrapContextRepo(db)
@@ -369,6 +373,281 @@ class UserRepo:
             avatar_url=row["avatar_url"],
             status=UserStatus(row["status"]),
             created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+
+class UserSessionRepo:
+    """Sessions, their refresh tokens, and the pending half of a login.
+
+    A session and the access credential that spends it are written together, and
+    revoked together, because a credential that outlives its session is exactly
+    the hole a revocation is supposed to close.
+
+    Nothing here decides policy. Whether a session is still alive is
+    ``UserSession.alive_at``, asked once by the authenticator; whether a refresh
+    may be spent is decided by the atomic claim in :meth:`claim_refresh`, which
+    is a write rather than a read for the same reason every other check-then-use
+    defect in this codebase was a read.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    @staticmethod
+    def _row_to_session(row: dict[str, Any]) -> UserSession:
+        return UserSession(
+            session_id=row["session_id"],
+            user_id=row["user_id"],
+            issuer=row["issuer"],
+            subject=row["subject"],
+            idp_session_id=row["idp_session_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            idle_expires_at=datetime.fromisoformat(row["idle_expires_at"]),
+            absolute_expires_at=datetime.fromisoformat(row["absolute_expires_at"]),
+            revoked_at=(datetime.fromisoformat(row["revoked_at"]) if row["revoked_at"] else None),
+            revoked_reason=row["revoked_reason"] or "",
+            idp_id_token=row["idp_id_token"] or "",
+            idp_refresh_token=row["idp_refresh_token"] or "",
+        )
+
+    async def create_in_transaction(
+        self,
+        session: UserSession,
+        access_token_hash: str,
+        refresh: SessionRefreshToken,
+        access_expires_at: datetime,
+    ) -> UserSession:
+        """Session, refresh credential and access credential, or none of them."""
+        await self.db.execute(
+            "INSERT INTO user_sessions(session_id, user_id, issuer, subject, idp_session_id, "
+            "created_at, idle_expires_at, absolute_expires_at, revoked_at, revoked_reason, "
+            "idp_id_token, idp_refresh_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, '', ?, ?)",
+            (
+                session.session_id,
+                session.user_id,
+                session.issuer,
+                session.subject,
+                session.idp_session_id,
+                serialize_datetime(session.created_at),
+                serialize_datetime(session.idle_expires_at),
+                serialize_datetime(session.absolute_expires_at),
+                session.idp_id_token,
+                session.idp_refresh_token,
+            ),
+        )
+        await self.db.execute(
+            "INSERT INTO user_tokens(token_hash, user_id, label, created_at, session_id, "
+            "expires_at) VALUES (?, ?, 'sso', ?, ?, ?)",
+            (
+                access_token_hash,
+                session.user_id,
+                serialize_datetime(session.created_at),
+                session.session_id,
+                serialize_datetime(access_expires_at),
+            ),
+        )
+        await self.issue_refresh_in_transaction(refresh)
+        return session
+
+    async def issue_refresh_in_transaction(self, refresh: SessionRefreshToken) -> None:
+        await self.db.execute(
+            "INSERT INTO session_refresh_tokens(token_hash, session_id, issued_at, expires_at, "
+            "consumed_at, replaced_by_hash) VALUES (?, ?, ?, ?, NULL, NULL)",
+            (
+                refresh.token_hash,
+                refresh.session_id,
+                serialize_datetime(refresh.issued_at),
+                serialize_datetime(refresh.expires_at),
+            ),
+        )
+
+    async def get(self, session_id: str) -> UserSession | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM user_sessions WHERE session_id = ?", (session_id,)
+        )
+        return None if row is None else self._row_to_session(row)
+
+    async def touch_idle(self, session_id: str, idle_expires_at: datetime) -> None:
+        """Push the idle clock forward, never backward.
+
+        The guard matters because requests race: two in the same instant would
+        otherwise let the one that computed its deadline first overwrite the
+        later one, quietly shortening a session that is being actively used.
+        """
+        await self.db.execute(
+            "UPDATE user_sessions SET idle_expires_at = ? "
+            "WHERE session_id = ? AND idle_expires_at < ? AND revoked_at IS NULL",
+            (serialize_datetime(idle_expires_at), session_id, serialize_datetime(idle_expires_at)),
+        )
+        await self.db.commit()
+
+    async def get_refresh(self, token_hash: str) -> SessionRefreshToken | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM session_refresh_tokens WHERE token_hash = ?", (token_hash,)
+        )
+        if row is None:
+            return None
+        return SessionRefreshToken(
+            token_hash=row["token_hash"],
+            session_id=row["session_id"],
+            issued_at=datetime.fromisoformat(row["issued_at"]),
+            expires_at=datetime.fromisoformat(row["expires_at"]),
+            consumed_at=(
+                datetime.fromisoformat(row["consumed_at"]) if row["consumed_at"] else None
+            ),
+            replaced_by_hash=row["replaced_by_hash"],
+        )
+
+    async def claim_refresh_in_transaction(
+        self, token_hash: str, replaced_by_hash: str, moment: datetime
+    ) -> bool:
+        """Spend a refresh token, once. True only for the caller that won it.
+
+        The claim is the UPDATE, not a preceding SELECT. Two clients presenting
+        the same token concurrently both read it unconsumed; only one can write
+        the row that says so, and the loser is told it replayed — which is the
+        correct answer, because one of them is holding a copy it should not have.
+        """
+        cursor = await self.db.execute(
+            "UPDATE session_refresh_tokens SET consumed_at = ?, replaced_by_hash = ? "
+            "WHERE token_hash = ? AND consumed_at IS NULL",
+            (serialize_datetime(moment), replaced_by_hash, token_hash),
+        )
+        return bool(cursor.rowcount)
+
+    async def revoke_in_transaction(self, session_id: str, reason: str, moment: datetime) -> bool:
+        """Kill a session and every credential minted for it, in one write."""
+        cursor = await self.db.execute(
+            "UPDATE user_sessions SET revoked_at = ?, revoked_reason = ? "
+            "WHERE session_id = ? AND revoked_at IS NULL",
+            (serialize_datetime(moment), reason, session_id),
+        )
+        revoked = bool(cursor.rowcount)
+        await self.db.execute(
+            "UPDATE user_tokens SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL",
+            (serialize_datetime(moment), session_id),
+        )
+        await self.db.execute(
+            "UPDATE session_refresh_tokens SET consumed_at = ? "
+            "WHERE session_id = ? AND consumed_at IS NULL",
+            (serialize_datetime(moment), session_id),
+        )
+        return revoked
+
+    async def live_session_ids(
+        self,
+        *,
+        user_id: str | None = None,
+        issuer: str | None = None,
+        subject: str | None = None,
+        idp_session_id: str | None = None,
+    ) -> list[str]:
+        """Every unrevoked session matching whichever identifiers were given.
+
+        Back-channel logout names a session by `sid`, or a person by `sub`, and
+        the caller does not get to guess which: an unnamed field is not a filter,
+        so nothing widens to "all sessions" because an argument was omitted.
+        """
+        clauses = ["revoked_at IS NULL"]
+        params: list[Any] = []
+        for column, value in (
+            ("user_id", user_id),
+            ("issuer", issuer),
+            ("subject", subject),
+            ("idp_session_id", idp_session_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if len(clauses) == 1:
+            raise ValueError("live_session_ids needs at least one identifier to match on")
+        rows = await self.db.fetch_all(
+            f"SELECT session_id FROM user_sessions WHERE {' AND '.join(clauses)}",
+            tuple(params),
+        )
+        return [str(row["session_id"]) for row in rows]
+
+    async def start_authorization(self, authorization: OidcAuthorization) -> None:
+        await self.db.execute(
+            "INSERT INTO oidc_authorizations(state, nonce, code_verifier, "
+            "browser_binding_hash, created_at, expires_at, consumed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, NULL)",
+            (
+                authorization.state,
+                authorization.nonce,
+                authorization.code_verifier,
+                authorization.browser_binding_hash,
+                serialize_datetime(authorization.created_at),
+                serialize_datetime(authorization.expires_at),
+            ),
+        )
+        await self.db.commit()
+
+    async def claim_authorization(
+        self, state: str, moment: datetime, binding_hash: str = ""
+    ) -> OidcAuthorization | None:
+        """Consume a pending login once, and only for the browser that opened it.
+
+        The binding is part of the claim rather than a check after it. Consuming
+        first and comparing afterwards lets anyone holding a state value burn a
+        victim's pending login: the attacker fails, but so does the victim, who
+        now has to start again for reasons nothing explains.
+        """
+        cursor = await self.db.execute(
+            "UPDATE oidc_authorizations SET consumed_at = ? "
+            "WHERE state = ? AND consumed_at IS NULL "
+            "AND (browser_binding_hash = '' OR browser_binding_hash = ?)",
+            (serialize_datetime(moment), state, binding_hash),
+        )
+        if not cursor.rowcount:
+            await self.db.commit()
+            return None
+        row = await self.db.fetch_one("SELECT * FROM oidc_authorizations WHERE state = ?", (state,))
+        await self.db.commit()
+        if row is None:
+            return None
+        return OidcAuthorization(
+            state=row["state"],
+            nonce=row["nonce"],
+            code_verifier=row["code_verifier"],
+            browser_binding_hash=row["browser_binding_hash"] or "",
+            created_at=datetime.fromisoformat(row["created_at"]),
+            expires_at=datetime.fromisoformat(row["expires_at"]),
+            consumed_at=datetime.fromisoformat(row["consumed_at"]),
+        )
+
+    async def remember_logout_token_in_transaction(
+        self, jti: str, issuer: str, moment: datetime
+    ) -> bool:
+        """True the first time this logout token is seen, False for a replay.
+
+        Deliberately has no commit of its own. Burning the jti in one transaction
+        and revoking in another means a failure between them loses the revocation
+        permanently: the retry is refused as a replay while the session it named
+        stays alive. A critic proved that by making the revocation raise, so the
+        two now succeed or fail together.
+        """
+        cursor = await self.db.execute(
+            "INSERT INTO oidc_logout_tokens(jti, issuer, seen_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(jti, issuer) DO NOTHING",
+            (jti, issuer, serialize_datetime(moment)),
+        )
+        return bool(cursor.rowcount)
+
+    async def supersede_access_tokens_in_transaction(
+        self, session_id: str, moment: datetime, keep_hash: str
+    ) -> None:
+        """Retire every access credential of this session but the one just minted.
+
+        Rotation that mints without retiring is accumulation: a critic refreshed
+        twice and held three live access tokens, the oldest still authenticating
+        for the session's whole absolute lifetime. Rotating a refresh token while
+        leaving the access token it replaced alive rotates nothing.
+        """
+        await self.db.execute(
+            "UPDATE user_tokens SET revoked_at = ? "
+            "WHERE session_id = ? AND token_hash <> ? AND revoked_at IS NULL",
+            (serialize_datetime(moment), session_id, keep_hash),
         )
 
 

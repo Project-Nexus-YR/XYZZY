@@ -45,6 +45,92 @@ class User:
     created_at: datetime = field(default_factory=utcnow)
 
 
+# ── The session a signed-in human holds ──────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class UserSession:
+    """One sign-in, alive only while both of its clocks still hold.
+
+    ``idle_expires_at`` moves forward while the session is used; an abandoned
+    browser stops being a way in. ``absolute_expires_at`` never moves; a session
+    used every minute still ends. Neither clock alone expresses both rules, and a
+    reader that consults one of them has decided the other does not apply.
+
+    ``subject`` and ``idp_session_id`` are the provider's ``sub`` and ``sid``.
+    They exist so a back-channel logout naming either can find what to kill —
+    without them the provider can say "this person is signed out" and be ignored.
+    """
+
+    session_id: str
+    user_id: str
+    issuer: str
+    subject: str
+    idp_session_id: str | None = None
+    created_at: datetime = field(default_factory=utcnow)
+    idle_expires_at: datetime = field(default_factory=utcnow)
+    absolute_expires_at: datetime = field(default_factory=utcnow)
+    revoked_at: datetime | None = None
+    revoked_reason: str = ""
+    # Held only to be replayed to the provider as id_token_hint when signing out.
+    # It is the provider's assertion that a login happened, never a credential
+    # this API accepts.
+    idp_id_token: str = ""
+    # Spent against the provider on every refresh, so a person disabled there
+    # loses this session at the next rotation rather than at the absolute clock.
+    idp_refresh_token: str = ""
+
+    def alive_at(self, moment: datetime) -> bool:
+        """Both clocks and the revocation, answered together.
+
+        Every caller needs all three, so there is one place that knows that, and
+        no caller is trusted to remember the third.
+        """
+        if self.revoked_at is not None:
+            return False
+        return moment < self.idle_expires_at and moment < self.absolute_expires_at
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRefreshToken:
+    """A refresh credential, spendable once.
+
+    ``consumed_at`` is the whole mechanism: a token presented with it already set
+    is a replay, and a replay is either theft or a bug in the client. Both are
+    answered by revoking the session rather than the token, because a token
+    family that keeps working after one of its members leaked is a family that
+    has not actually been contained.
+    """
+
+    token_hash: str
+    session_id: str
+    issued_at: datetime = field(default_factory=utcnow)
+    expires_at: datetime = field(default_factory=utcnow)
+    consumed_at: datetime | None = None
+    replaced_by_hash: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OidcAuthorization:
+    """The half of a login the browser is not trusted to carry.
+
+    ``state`` answers cross-site request forgery, ``nonce`` answers replay of an
+    ID token, and ``code_verifier`` answers an intercepted authorization code.
+    All three are read from this row rather than from the request that comes
+    back, and the row is consumable exactly once.
+    """
+
+    state: str
+    nonce: str
+    code_verifier: str
+    # The digest of a cookie set on the browser that started this login. State
+    # alone lives on the server and proves nothing about who came back.
+    browser_binding_hash: str = ""
+    created_at: datetime = field(default_factory=utcnow)
+    expires_at: datetime = field(default_factory=utcnow)
+    consumed_at: datetime | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class Organization:
     org_id: str

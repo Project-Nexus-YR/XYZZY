@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from enum import StrEnum
 from typing import Annotated, Any, TypeVar
+from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+import httpx
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from ..domain.meta import MetaQuestionKind
@@ -50,6 +54,8 @@ from ..security import (
     allowed_tools,
 )
 from ..security.capabilities import Posture
+from ..security.oidc import OidcError
+from ..security.sessions import SessionError, SessionService
 from ..services.service import MultiplayerService
 
 log = logging.getLogger(__name__)
@@ -59,6 +65,7 @@ router = APIRouter(prefix="/api/v1", tags=["multiplayer"])
 # ── Service reference (set at startup) ───────────────────────────────────────
 _svc: MultiplayerService | None = None
 _authenticator: TokenAuthenticator | None = None
+_sessions: SessionService | None = None
 
 
 def set_service(svc: MultiplayerService | None) -> None:
@@ -69,6 +76,18 @@ def set_service(svc: MultiplayerService | None) -> None:
 def set_authenticator(authenticator: TokenAuthenticator | None) -> None:
     global _authenticator
     _authenticator = authenticator
+
+
+def set_sessions(sessions: SessionService | None) -> None:
+    global _sessions
+    _sessions = sessions
+
+
+def _sessions_or_501() -> SessionService:
+    """SSO is optional. A deployment without a provider says so, rather than 500."""
+    if _sessions is None or not _sessions.provider.settings.configured:
+        raise HTTPException(501, "no identity provider is configured")
+    return _sessions
 
 
 def _svc_or_404() -> MultiplayerService:
@@ -432,6 +451,189 @@ async def health() -> dict[str, str]:
         log.exception("Readiness probe could not read the database")
         raise HTTPException(503, "database unavailable") from exc
     return {"status": "ok"}
+
+
+# ── Sign-in ──────────────────────────────────────────────────────────────────
+
+
+# __Host- is the strongest cookie the platform offers: it demands Secure, forbids
+# Domain, and requires Path=/, which together stop a related-domain attacker from
+# planting one. It also *requires* HTTPS, so a plain-http local run falls back to
+# the bare name rather than setting a cookie the browser will silently drop.
+SECURE_LOGIN_COOKIE = "__Host-xyzzy_login"
+LOGIN_BINDING_COOKIE = "xyzzy_login"
+
+
+def _binding_cookie_name(secure: bool) -> str:
+    return SECURE_LOGIN_COOKIE if secure else LOGIN_BINDING_COOKIE
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+
+
+def _issued(session: Any, access_token: str, refresh_token: str) -> dict[str, Any]:
+    """The one moment either credential exists in plaintext outside the caller."""
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "Bearer",
+        "session_id": session.session_id,
+        "user_id": session.user_id,
+        "idle_expires_at": session.idle_expires_at.isoformat(),
+        "absolute_expires_at": session.absolute_expires_at.isoformat(),
+    }
+
+
+@router.get("/auth/login")
+async def begin_login() -> RedirectResponse:
+    sessions = _sessions_or_501()
+    url, binding = await sessions.begin_login()
+    answer = RedirectResponse(url, status_code=307)
+    secure = sessions.provider.settings.redirect_uri.startswith("https://")
+    # SameSite=Lax rather than Strict: the browser arrives back at the callback
+    # by a cross-site redirect from the provider, and Strict would withhold the
+    # cookie exactly then, which is the one moment it is needed.
+    answer.set_cookie(
+        _binding_cookie_name(secure),
+        binding,
+        max_age=sessions.settings.login_window_seconds,
+        httponly=True,
+        samesite="lax",
+        secure=secure,
+        # Path=/ because __Host- requires it. A narrower path buys nothing here:
+        # cookies have no origin integrity, so path was never the protection.
+        path="/",
+    )
+    return answer
+
+
+@router.get("/auth/callback")
+async def complete_login(
+    request: Request,
+    response: Response,
+    state: Annotated[str, Query(min_length=1, max_length=512)],
+    code: Annotated[str, Query(min_length=1, max_length=4096)],
+) -> dict[str, Any]:
+    sessions = _sessions_or_501()
+    try:
+        issued = await sessions.complete_login(
+            state=state,
+            code=code,
+            # Exactly the cookie this deployment sets, never the other. Reading
+            # the plain name as a fallback on an HTTPS deployment undoes the
+            # __Host- guarantee: a related-domain attacker plants the weaker
+            # cookie and it is accepted as the binding.
+            binding=request.cookies.get(
+                _binding_cookie_name(
+                    sessions.provider.settings.redirect_uri.startswith("https://")
+                ),
+                "",
+            ),
+        )
+    except (SessionError, OidcError) as exc:
+        # One message for every way a login can fail. Which one it was is a fact
+        # about the provider's state, and telling the caller apart from an
+        # attacker is not possible at this point in the flow.
+        log.info("Login could not be completed: %s", exc)
+        raise HTTPException(400, "this sign-in could not be completed") from exc
+    response.headers.update(NO_STORE)
+    # The binding has done its job; leaving it on the browser is one more copy of
+    # a secret with nothing left to protect.
+    response.delete_cookie(
+        _binding_cookie_name(sessions.provider.settings.redirect_uri.startswith("https://")),
+        path="/",
+    )
+    return _issued(issued.session, issued.access_token, issued.refresh_token)
+
+
+@router.post("/auth/refresh")
+async def refresh_session(req: RefreshRequest, response: Response) -> dict[str, Any]:
+    sessions = _sessions_or_501()
+    try:
+        issued = await sessions.refresh(req.refresh_token)
+    except SessionError as exc:
+        raise HTTPException(401, str(exc)) from exc
+    response.headers.update(NO_STORE)
+    return _issued(issued.session, issued.access_token, issued.refresh_token)
+
+
+@router.post("/auth/logout")
+async def end_this_session(principal: CurrentUser) -> dict[str, Any]:
+    sessions = _sessions_or_501()
+    if principal.session_id is None:
+        raise HTTPException(400, "this credential is not a sign-in session")
+    return {"ended": await sessions.end_session(principal.session_id)}
+
+
+@router.post("/auth/logout-everywhere")
+async def end_every_session(principal: CurrentUser) -> dict[str, Any]:
+    sessions = _sessions_or_501()
+    return {"ended": await sessions.end_every_session(principal.user_id)}
+
+
+@router.post("/auth/backchannel-logout", status_code=204)
+async def backchannel_logout(request: Request) -> Response:
+    """The provider telling us a session is over, per Back-Channel Logout 1.0.
+
+    Form-encoded, unauthenticated, and trusted only because the token inside is
+    signed. The body is parsed here rather than through a form dependency so the
+    endpoint costs no extra runtime dependency to stand up.
+    """
+    sessions = _sessions_or_501()
+    body = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+    tokens = body.get("logout_token") or []
+    if len(tokens) != 1:
+        raise HTTPException(400, "exactly one logout_token is required")
+    try:
+        await sessions.accept_backchannel_logout(tokens[0])
+    except (OidcError, SessionError) as exc:
+        log.info("Back-channel logout refused: %s", exc)
+        raise HTTPException(400, "this logout token was refused") from exc
+    return Response(status_code=204)
+
+
+@router.get("/auth/frontchannel-logout", status_code=204)
+async def frontchannel_logout(
+    iss: Annotated[str, Query(max_length=512)] = "",
+    sid: Annotated[str, Query(max_length=512)] = "",
+) -> Response:
+    """Loaded by the provider in an iframe when a session ends elsewhere."""
+    sessions = _sessions_or_501()
+    try:
+        await sessions.accept_frontchannel_logout(issuer=iss, sid=sid)
+    except SessionError as exc:
+        raise HTTPException(400, "this logout could not be applied") from exc
+    return Response(status_code=204)
+
+
+@router.get("/auth/end-session")
+async def provider_end_session(
+    principal: CurrentUser,
+    redirect_to: Annotated[str, Query(max_length=2048)] = "",
+) -> dict[str, Any]:
+    """Where to send the browser so the provider ends its own session too."""
+    sessions = _sessions_or_501()
+    if redirect_to and not sessions.permits_redirect(redirect_to):
+        raise HTTPException(400, "that redirect target is not configured")
+    # Read before revoking: the hint the provider wants is held on the session,
+    # and Keycloak will not honour a post-logout redirect without it.
+    hint = ""
+    if principal.session_id is not None:
+        session = await sessions.repos.user_sessions.get(principal.session_id)
+        hint = session.idp_id_token if session else ""
+        await sessions.end_session(principal.session_id, "signed out at the provider")
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        url = await sessions.provider.end_session_url(
+            client,
+            id_token=hint or None,
+            state=secrets.token_urlsafe(16),
+            redirect_to=redirect_to,
+        )
+    return {"end_session_url": url}
 
 
 # ── Current principal ────────────────────────────────────────────────────────

@@ -19,11 +19,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .api.routes import router, set_authenticator, set_service
+from .api.routes import router, set_authenticator, set_service, set_sessions
 from .db.connection import Database
 from .realtime.hub import RealtimeHub
 from .realtime.websocket import websocket_endpoint
 from .security import AuthorizationError, TokenAuthenticator, ingest_bootstrap_tokens
+from .security.oidc import OidcProvider, settings_from_environment
+from .security.sessions import SessionService
+from .security.sessions import settings_from_environment as session_settings
 from .services.service import MultiplayerService
 
 log = logging.getLogger(__name__)
@@ -97,8 +100,16 @@ def create_app(
         if not isinstance(configured_tokens, dict):
             raise RuntimeError("XYZZY_AUTH_TOKENS must be a JSON object")
         auth_tokens = {str(token): str(user_id) for token, user_id in configured_tokens.items()}
-    authenticator = TokenAuthenticator(db)
     svc = MultiplayerService(db, hub, known_users=frozenset(auth_tokens.values()))
+    sessions = SessionService(
+        db=db,
+        repos=svc.repos,
+        provider=OidcProvider(settings=settings_from_environment()),
+        settings=session_settings(),
+    )
+    # The authenticator pushes the idle clock as a side effect of authenticating,
+    # which is the only way a clock that measures inactivity can be kept honest.
+    authenticator = TokenAuthenticator(db, sessions.note_used)
 
     async def sweep_run_leases() -> None:
         """A run is settled, holds a live lease, or is swept. Startup is not enough:
@@ -118,11 +129,13 @@ def create_app(
         await ingest_bootstrap_tokens(db, auth_tokens)
         set_service(svc)
         set_authenticator(authenticator)
+        set_sessions(sessions)
         sweeper = asyncio.create_task(sweep_run_leases())
         yield
         sweeper.cancel()
         with suppress(asyncio.CancelledError):
             await sweeper
+        set_sessions(None)
         set_authenticator(None)
         set_service(None)
         await db.close()
