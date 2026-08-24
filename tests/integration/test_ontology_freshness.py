@@ -174,6 +174,52 @@ async def test_currency_is_derived_from_the_log_not_from_the_cursor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_ontology_route_discloses_the_same_currency_as_the_meta_path() -> None:
+    """One reader, one room, one account of a fact — including the copy in room state.
+
+    The ontology route returned a superseded assertion byte-identical to a live one
+    while `/meta` reported it not current, and the silent copy is the one a
+    reconnecting client believes.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        service = await _service(db)
+        room_id = await _seed_room(service)
+        await service.run_ontology_extraction(room_id, OntologyExtractor.IMMEDIATE)
+        # One event of the task's own invalidation class.
+        tasks = await service.list_room_tasks(room_id)
+        await service.assign_task(tasks[0].task_id, "agent-1", requested_by="owner")
+
+        answer = await service.answer_decision_meta(room_id, "what is the status", user_id="viewer")
+        claims = {str(claim["assertion_id"]): claim for claim in answer["claims"]}
+        assert claims, "the Meta path answered with nothing to compare against"
+
+        ontology = await service.get_room_ontology(room_id)
+        records = {str(entity["entity_id"]): entity for entity in ontology["entities"]}
+        disclosed = ["current", "invalidating_events", "stale_at_sequence", "asserted_at_sequence"]
+        compared = 0
+        for assertion_id, claim in claims.items():
+            record = records.get(assertion_id)
+            if record is None:
+                continue
+            assert [record[field] for field in disclosed] == [claim[field] for field in disclosed]
+            compared += 1
+        assert compared, "no assertion appeared on both paths"
+        stale = [entity for entity in ontology["entities"] if not entity["current"]]
+        assert stale, "the assigned task is not current and the route did not say so"
+        assert all(entity["invalidating_events"] >= 1 for entity in stale)
+        current = [entity for entity in ontology["entities"] if entity["current"]]
+        assert current, "every assertion reported stale, so the field decides nothing"
+
+        # The copy embedded in room state is the same account, not a quieter one.
+        state = await service.get_room_state(room_id, user_id="viewer")
+        assert state["ontology"] == ontology
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_a_meta_read_over_a_backlog_changes_nothing_and_still_reports_the_lag() -> None:
     db = Database(":memory:")
     await db.connect()

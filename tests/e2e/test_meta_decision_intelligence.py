@@ -18,6 +18,7 @@ from multiplayer.domain.meta import (
     normalize_question,
 )
 from multiplayer.domain.models import (
+    DecisionStatus,
     DomainError,
     MessageRole,
     OntologyExtractor,
@@ -151,8 +152,9 @@ def test_normalization_folds_contractions_apostrophes_and_punctuation(
         ("What's new?", MetaQuestionKind.CHANGES),
         ("What's changed lately?", MetaQuestionKind.CHANGES),
         ("Any updates?", MetaQuestionKind.CHANGES),
-        ("What decisions are pending?", MetaQuestionKind.DECISIONS),
-        ("What do we need to decide?", MetaQuestionKind.DECISIONS),
+        ("What decisions are pending?", MetaQuestionKind.DECISIONS_OPEN),
+        ("What do we need to decide?", MetaQuestionKind.DECISIONS_OPEN),
+        ("What has been decided?", MetaQuestionKind.DECISIONS_MADE),
         ("What are we disagreeing about?", MetaQuestionKind.DISAGREEMENT),
         ("Where do we disagree?", MetaQuestionKind.DISAGREEMENT),
     ],
@@ -193,6 +195,39 @@ def test_an_off_corpus_refusal_says_what_meta_can_answer() -> None:
         assert subject in message
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        # "status, who worked the most?" — the trailing clause is the whole question,
+        # and stripping it left the accepted key `status`.
+        "status 誰が一番多く働いたか",
+        "статус кто больше всех работал",
+        "الحالة من عمل أكثر",
+        # A refusal is not conditional on the surveillance clause: anything the
+        # normalizer cannot read refuses whole.
+        "what is the status 状況",
+        "où en sommes-nous",
+    ],
+)
+def test_a_question_the_normalizer_cannot_read_refuses_whole(question: str) -> None:
+    """Deleting the unreadable part answers a question nobody asked."""
+    with pytest.raises(DomainError, match=REFUSAL_PREFIX):
+        normalize_question(question)
+    with pytest.raises(DomainError, match=REFUSAL_PREFIX):
+        classify_meta_question(question)
+
+
+def test_naming_a_kind_reaches_every_supported_question() -> None:
+    """The corpus is a convenience; the enum is the interface, and it is closed."""
+    for kind in MetaQuestionKind:
+        assert MultiplayerService._resolve_meta_kind(None, kind) is kind
+        # Free text alongside a named kind is recorded, never parsed, so it cannot
+        # redirect the answer — including free text this workspace would refuse.
+        assert MultiplayerService._resolve_meta_kind("who worked hardest", kind) is kind
+    with pytest.raises(DomainError, match=REFUSAL_PREFIX):
+        MultiplayerService._resolve_meta_kind(None, None)
+
+
 async def _seed_assertion_room(service: MultiplayerService) -> str:
     """A room carrying one governed assertion for each of the five new kinds."""
     org = await service.create_organization("Meta org", "meta-kinds-org", "owner")
@@ -202,6 +237,12 @@ async def _seed_assertion_room(service: MultiplayerService) -> str:
     await service.create_task(room.room_id, "Ship the gateway", created_by="owner")
     await service.create_task(room.room_id, "Rotate the keys", created_by="owner")
     await service.create_decision(room.room_id, "Adopt the gateway", "content", created_by="owner")
+    # One decision still open and one already taken, so the two decision kinds are
+    # answered from different rows rather than from one shared payload.
+    settled = await service.create_decision(
+        room.room_id, "Keep the current gateway", "content", created_by="owner"
+    )
+    await service.repos.decisions.update_status(settled.decision_id, DecisionStatus.ACTIVE)
     await service.run_ontology_extraction(room.room_id, OntologyExtractor.IMMEDIATE)
     await service.send_message(
         room.room_id,
@@ -233,7 +274,8 @@ async def _seed_assertion_room(service: MultiplayerService) -> str:
         ("what is the status", "STATUS"),
         ("what is blocking", "BLOCKERS"),
         ("what changed", "CHANGES"),
-        ("what decisions require attention", "DECISIONS"),
+        ("what decisions are pending", "DECISIONS_OPEN"),
+        ("what has been decided", "DECISIONS_MADE"),
     ],
 )
 async def test_each_new_kind_answers_from_governed_assertions(question: str, kind: str) -> None:
@@ -255,6 +297,45 @@ async def test_each_new_kind_answers_from_governed_assertions(question: str, kin
             assert not (
                 claim["derivation_kind"] == "AI_DERIVED" and claim["review_status"] == "UNCONFIRMED"
             )
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_opposite_decision_questions_never_share_a_payload() -> None:
+    """One kind served both, so "what is undecided" answered with what was decided."""
+    db = Database(":memory:")
+    await db.connect()
+    service = MultiplayerService(db, RealtimeHub(), known_users=frozenset({"owner", "viewer"}))
+    try:
+        await service.initialize()
+        room_id = await _seed_assertion_room(service)
+        undecided = await service.answer_decision_meta(
+            room_id, "what is undecided", user_id="viewer"
+        )
+        decided = await service.answer_decision_meta(
+            room_id, "what has been decided", user_id="viewer"
+        )
+        assert undecided["query"]["kind"] == "DECISIONS_OPEN"
+        assert decided["query"]["kind"] == "DECISIONS_MADE"
+        assert undecided != decided
+
+        def labels(answer: dict[str, Any]) -> set[str]:
+            return {
+                str(claim["label"])
+                for claim in [*answer["claims"], *answer["unconfirmed"]]
+                if claim["kind"] == "Decision"
+            }
+
+        assert labels(undecided) == {"Adopt the gateway"}
+        assert labels(decided) == {"Keep the current gateway"}
+        assert not labels(undecided) & labels(decided)
+        assert undecided["summary"] != decided["summary"]
+        # Naming either kind reaches the same two payloads without a phrasing.
+        by_kind = await service.answer_decision_meta(
+            room_id, kind=MetaQuestionKind.DECISIONS_MADE, user_id="viewer"
+        )
+        assert by_kind["claims"] == decided["claims"]
     finally:
         await db.close()
 
@@ -526,6 +607,62 @@ def test_meta_returns_only_selected_bounded_room_evidence_and_governed_correctio
         )
 
 
+def test_every_kind_is_reachable_by_naming_it_over_the_route() -> None:
+    """The ordinary phrasings that refuse no longer cost the capability behind them."""
+    app = create_app(
+        ":memory:",
+        auth_tokens={
+            "owner-token": "owner",
+            "viewer-token": "viewer",
+            "outsider-token": "outsider",
+        },
+    )
+    with TestClient(app) as client:
+        room_id, _workspace_id, _identifiers = _seed_decision(client)
+        for kind in MetaQuestionKind:
+            named = client.get(
+                f"/api/v1/rooms/{room_id}/meta?kind={kind.value.lower()}&limit=10", headers=VIEWER
+            )
+            assert named.status_code == 200, named.text
+            assert named.json()["query"]["kind"] == kind.value
+
+        # Ordinary phrasings this workspace does not recognize: the free text still
+        # refuses, and the kind behind it still answers.
+        for refused, kind in (
+            ("What's our status?", MetaQuestionKind.STATUS),
+            ("Are we blocked on anything?", MetaQuestionKind.BLOCKERS),
+            ("Anything new since Tuesday?", MetaQuestionKind.CHANGES),
+        ):
+            assert _ask(client, room_id, refused).status_code == 400
+            answered = client.get(
+                f"/api/v1/rooms/{room_id}/meta?kind={kind.value}"
+                f"&question={quote(refused)}&limit=10",
+                headers=VIEWER,
+            )
+            assert answered.status_code == 200, answered.text
+            # Recorded verbatim for audit, and it decided nothing.
+            assert answered.json()["query"] == {
+                "question": refused,
+                "kind": kind.value,
+                "supported_kinds": [member.value for member in MetaQuestionKind],
+            }
+
+        # Neither a kind nor a question is not a question, and an invented kind is
+        # not a kind.
+        assert client.get(f"/api/v1/rooms/{room_id}/meta", headers=VIEWER).status_code == 400
+        assert (
+            client.get(
+                f"/api/v1/rooms/{room_id}/meta?kind=PRODUCTIVITY", headers=VIEWER
+            ).status_code
+            == 400
+        )
+        assert client.get(f"/api/v1/rooms/{room_id}/meta?kind=STATUS").status_code == 401
+        assert (
+            client.get(f"/api/v1/rooms/{room_id}/meta?kind=STATUS", headers=OUTSIDER).status_code
+            == 403
+        )
+
+
 def test_browser_meta_contract_exposes_scope_freshness_and_drilldown() -> None:
     ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
     assert 'id="meta-panel"' in ui
@@ -534,6 +671,10 @@ def test_browser_meta_contract_exposes_scope_freshness_and_drilldown() -> None:
     assert 'id="meta-answer"' in ui
     assert 'id="meta-evidence"' in ui
     assert 'onclick="askMeta(' in ui
+    assert 'id="meta-kinds"' in ui
+    # Every kind offered as a choice, so no supported question needs a phrasing.
+    for kind in MetaQuestionKind:
+        assert f"askMetaKind('{kind.value}')" in ui
     assert "rooms/${roomId}/meta" in ui
     assert "authorized_head" in ui
     assert "retrieval_counts" in ui

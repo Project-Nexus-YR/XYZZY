@@ -9,6 +9,7 @@ from typing import Annotated, Any, TypeVar
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 
+from ..domain.meta import MetaQuestionKind
 from ..domain.models import (
     AddressingMode,
     AgentAddressing,
@@ -1231,17 +1232,27 @@ async def get_room_ontology(
 async def ask_room_meta(
     room_id: str,
     principal: CurrentUser,
-    question: str = Query(..., min_length=1, max_length=500),
+    kind: str | None = Query(None, min_length=1, max_length=100),
+    question: str | None = Query(None, min_length=1, max_length=500),
     version_id: str | None = Query(None, min_length=1, max_length=100),
     limit: int = Query(10, ge=1, le=10),
 ) -> dict[str, Any]:
-    """Answer a bounded decision question from this room's governed evidence graph."""
+    """Answer a bounded decision question from this room's governed evidence graph.
+
+    `kind` names one member of the closed set Meta answers; `question` is free text
+    that is recorded and never parsed when a kind is named. Either alone is enough,
+    so every supported question is reachable without guessing a phrasing.
+    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
+    question_kind = (
+        None if kind is None else _safe_enum(kind.upper(), MetaQuestionKind, "Meta question kind")
+    )
     try:
         return await svc.answer_decision_meta(
             room_id,
             question,
+            kind=question_kind,
             user_id=principal.user_id,
             version_id=version_id,
             limit=limit,

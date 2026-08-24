@@ -149,7 +149,7 @@ async def test_a_second_decision_brief_leaves_the_first_decision_not_current() -
         await service.synthesize_decision_brief(room_id, "Stay self-managed", "owner")
 
         answer = await service.answer_decision_meta(
-            room_id, "what decisions require attention", user_id="owner"
+            room_id, "what has been decided", user_id="owner"
         )
         decisions = [
             claim

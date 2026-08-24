@@ -17,6 +17,7 @@ from ..db.repositories import Repos
 from ..domain.events import EventType, RoomEvent
 from ..domain.meta import (
     DECISION_KINDS,
+    REFUSAL_PREFIX,
     MetaAnswerStatus,
     MetaQuestionKind,
     MetaRefusalReason,
@@ -51,6 +52,7 @@ from ..domain.models import (
     BranchSynthesisStatus,
     ClaimSource,
     Decision,
+    DecisionStatus,
     DomainError,
     Execution,
     ExecutionIntervention,
@@ -3407,6 +3409,10 @@ class MultiplayerService:
                 source_object_id=version.version_id,
                 label=title,
                 properties={
+                    # A published Decision Brief is a decision taken, and it says so
+                    # here: every Decision entity carries its status, so the question
+                    # "what has been decided" is a query rather than an inference.
+                    "status": DecisionStatus.ACTIVE.value,
                     "artifact_id": artifact.artifact_id,
                     "version_id": version.version_id,
                     "claim_ids": list(claim_ids),
@@ -5141,17 +5147,79 @@ class MultiplayerService:
     # ── Event History ────────────────────────────────────────────────────────
 
     async def get_room_ontology(self, room_id: str) -> dict[str, Any]:
+        """This room's assertions, each told with the currency the Meta path derives.
+
+        Without it a superseded assertion left here byte-identical to a live one,
+        and this is the account embedded in room state — the one a reconnecting
+        client believes.
+        """
         await self.get_room(room_id)
         entities = await self.repos.ontology.list_entities(room_id)
         relationships = await self.repos.ontology.list_relationships(room_id)
         reviews = await self.repos.ontology.list_reviews(room_id)
+        currency = self._ontology_currency(
+            await self.get_room_events(room_id), entities, relationships
+        )
         return {
-            "entities": [self._ontology_entity_record(entity) for entity in entities],
+            "entities": [
+                self._with_currency(
+                    self._ontology_entity_record(entity), currency[entity.entity_id]
+                )
+                for entity in entities
+            ],
             "relationships": [
-                self._ontology_relationship_record(relationship) for relationship in relationships
+                self._with_currency(
+                    self._ontology_relationship_record(relationship),
+                    currency[relationship.relationship_id],
+                )
+                for relationship in relationships
             ],
             "reviews": [self._ontology_review_record(review) for review in reviews],
         }
+
+    @staticmethod
+    def _ontology_currency(
+        events: list[RoomEvent],
+        entities: list[OntologyEntity],
+        relationships: list[OntologyRelationship],
+    ) -> dict[str, tuple[bool, int]]:
+        """Currency for a whole room, on the rule the Meta path already uses.
+
+        Same definition, different read shape: Meta bounds itself to ten claims and
+        asks the log once per invalidation class, while a whole room is counted in
+        memory over the room's own ordered events — the events a room-state reader
+        is handed in the same response.
+        """
+        kinds = {entity.entity_id: entity.kind for entity in entities}
+        positions: list[tuple[str, int, tuple[str, ...]]] = [
+            (entity.entity_id, entity.asserted_at_sequence, invalidation_class(entity.kind))
+            for entity in entities
+        ]
+        positions.extend(
+            (
+                relationship.relationship_id,
+                relationship.asserted_at_sequence,
+                invalidation_class(
+                    kinds[relationship.from_entity_id], kinds[relationship.to_entity_id]
+                ),
+            )
+            for relationship in relationships
+        )
+        currency: dict[str, tuple[bool, int]] = {}
+        for assertion_id, sequence, event_class in positions:
+            invalidating = sum(
+                1
+                for event in events
+                if event.sequence > sequence and event.event_type.value in event_class
+            )
+            currency[assertion_id] = (invalidating == 0, invalidating)
+        return currency
+
+    @staticmethod
+    def _with_currency(record: dict[str, Any], currency: tuple[bool, int]) -> dict[str, Any]:
+        """The two derived fields the Meta path reports, named the same way."""
+        current, invalidating = currency
+        return {**record, "current": current, "invalidating_events": invalidating}
 
     # ── Lazy ontology extraction ─────────────────────────────────────────────
 
@@ -5607,19 +5675,56 @@ class MultiplayerService:
             OntologyEntityKind.ARTIFACT,
             OntologyEntityKind.CLAIM,
         ),
-        MetaQuestionKind.DECISIONS: (OntologyEntityKind.DECISION,),
+        MetaQuestionKind.DECISIONS_OPEN: (OntologyEntityKind.DECISION,),
+        MetaQuestionKind.DECISIONS_MADE: (OntologyEntityKind.DECISION,),
+    }
+    # The two decision kinds ask the same entity kind opposite questions, so the
+    # query, not the prose, is what separates them: a decision is open while it is
+    # still proposed and made once it has been taken, superseded or rejected.
+    _META_ENTITY_STATUSES: dict[MetaQuestionKind, tuple[str, ...]] = {
+        MetaQuestionKind.DECISIONS_OPEN: (DecisionStatus.PROPOSED.value,),
+        MetaQuestionKind.DECISIONS_MADE: (
+            DecisionStatus.ACTIVE.value,
+            DecisionStatus.SUPERSEDED.value,
+            DecisionStatus.REJECTED.value,
+        ),
     }
     _META_RELATIONSHIP_KINDS: dict[MetaQuestionKind, tuple[OntologyRelationshipKind, ...]] = {
         MetaQuestionKind.STATUS: (OntologyRelationshipKind.OWNS,),
         MetaQuestionKind.BLOCKERS: (OntologyRelationshipKind.BLOCKS,),
-        MetaQuestionKind.DECISIONS: (OntologyRelationshipKind.SUPPORTS,),
+        MetaQuestionKind.DECISIONS_OPEN: (OntologyRelationshipKind.SUPPORTS,),
+        MetaQuestionKind.DECISIONS_MADE: (OntologyRelationshipKind.SUPPORTS,),
         MetaQuestionKind.DISAGREEMENT: (OntologyRelationshipKind.CONTRADICTS,),
     }
+    _DECISION_SCOPED_KINDS = frozenset(
+        {
+            MetaQuestionKind.STATUS,
+            MetaQuestionKind.DECISIONS_OPEN,
+            MetaQuestionKind.DECISIONS_MADE,
+        }
+    )
     _DISAGREEMENT_ENDPOINTS = frozenset({OntologyEntityKind.CLAIM, OntologyEntityKind.AGENT_OUTPUT})
 
     @staticmethod
     def _meta_question_kind(question: str) -> MetaQuestionKind:
         """Refuse first, match exactly second, refuse again otherwise."""
+        return classify_meta_question(question)
+
+    @staticmethod
+    def _resolve_meta_kind(question: str | None, kind: MetaQuestionKind | None) -> MetaQuestionKind:
+        """A named kind is taken as given; free text is matched exactly or refused.
+
+        The enum is the closed set of things this workspace answers, so naming a
+        kind cannot reach an activity, ranking or productivity figure — there is no
+        such kind to name. Free text supplied alongside a kind is recorded, never
+        parsed: it decides nothing, so it cannot decide wrongly.
+        """
+        if kind is not None:
+            return kind
+        if question is None:
+            raise DomainError(
+                f"{REFUSAL_PREFIX}; name a question kind or ask a question, and this asked neither"
+            )
         return classify_meta_question(question)
 
     @staticmethod
@@ -5751,14 +5856,16 @@ class MultiplayerService:
         if kind is MetaQuestionKind.CHANGES:
             latest = max(int(claim["asserted_at_sequence"]) for claim in claims)
             return f"{len(claims)} work objects changed, latest at sequence {latest}: {labels}"
-        if kind is MetaQuestionKind.DECISIONS:
-            return f"{len(claims)} decisions carry governed support: {labels}"
+        if kind is MetaQuestionKind.DECISIONS_OPEN:
+            return f"{len(claims)} decisions are still open: {labels}"
+        if kind is MetaQuestionKind.DECISIONS_MADE:
+            return f"{len(claims)} decisions have been made: {labels}"
         return f"{len(claims)} contradictions from {distinct_sources} distinct sources: {labels}"
 
     def _meta_envelope(
         self,
         *,
-        question: str,
+        question: str | None,
         kind: MetaQuestionKind,
         room_id: str,
         limit: int,
@@ -5805,14 +5912,20 @@ class MultiplayerService:
     async def answer_decision_meta(
         self,
         room_id: str,
-        question: str,
+        question: str | None = None,
         *,
+        kind: MetaQuestionKind | None = None,
         user_id: str,
         version_id: str | None = None,
         limit: int = 10,
     ) -> dict[str, Any]:
-        """Answer one bounded Meta question from current governed assertions."""
-        question_kind = self._meta_question_kind(question)
+        """Answer one bounded Meta question from current governed assertions.
+
+        The kind is the parameter; the question is free text, kept in the answer for
+        audit. A caller that names its kind reaches every supported question, so no
+        capability depends on a phrasing this workspace happens to recognize.
+        """
+        question_kind = self._resolve_meta_kind(question, kind)
         if not 1 <= limit <= 10:
             raise DomainError("Meta evidence limit must be between 1 and 10")
         await self.get_room(room_id)
@@ -5826,7 +5939,7 @@ class MultiplayerService:
         self,
         room_id: str,
         user_id: str,
-        question: str,
+        question: str | None,
         kind: MetaQuestionKind,
         limit: int,
     ) -> dict[str, Any]:
@@ -5850,6 +5963,7 @@ class MultiplayerService:
             user_id,
             self._META_ENTITY_KINDS.get(kind, ()),
             since_sequence=0 if kind is MetaQuestionKind.CHANGES else None,
+            statuses=self._META_ENTITY_STATUSES.get(kind, ()),
             limit=limit,
         )
         relationships = await self.repos.meta.relationships(
@@ -5977,7 +6091,7 @@ class MultiplayerService:
             or relationship.to_entity_id not in endpoints
         ):
             return False
-        if kind in {MetaQuestionKind.STATUS, MetaQuestionKind.DECISIONS}:
+        if kind in MultiplayerService._DECISION_SCOPED_KINDS:
             return relationship.to_entity_id in entity_ids
         if kind is MetaQuestionKind.DISAGREEMENT:
             return (
@@ -5992,7 +6106,7 @@ class MultiplayerService:
         self,
         room_id: str,
         user_id: str,
-        question: str,
+        question: str | None,
         question_kind: MetaQuestionKind,
         version_id: str | None,
         limit: int,
@@ -6473,6 +6587,11 @@ class MultiplayerService:
 
     @staticmethod
     def _ontology_entity_record(entity: OntologyEntity) -> dict[str, Any]:
+        """One assertion, including where in the room's order it stands.
+
+        The sequence fields are not decoration: dropping `stale_at_sequence` was
+        what let a superseded assertion read exactly like a live one.
+        """
         return {
             "entity_id": entity.entity_id,
             "kind": entity.kind.value,
@@ -6484,6 +6603,9 @@ class MultiplayerService:
             "evidence_ids": list(entity.evidence_ids),
             "source_ids": list(entity.source_ids),
             "review_status": entity.review_status.value,
+            "asserted_at_sequence": entity.asserted_at_sequence,
+            "evidence_event_sequences": list(entity.evidence_event_sequences),
+            "stale_at_sequence": entity.stale_at_sequence,
             "created_at": entity.created_at.isoformat(),
             "updated_at": entity.updated_at.isoformat(),
         }
@@ -6502,6 +6624,9 @@ class MultiplayerService:
             "evidence_ids": list(relationship.evidence_ids),
             "source_ids": list(relationship.source_ids),
             "review_status": relationship.review_status.value,
+            "asserted_at_sequence": relationship.asserted_at_sequence,
+            "evidence_event_sequences": list(relationship.evidence_event_sequences),
+            "stale_at_sequence": relationship.stale_at_sequence,
             "created_at": relationship.created_at.isoformat(),
             "updated_at": relationship.updated_at.isoformat(),
         }

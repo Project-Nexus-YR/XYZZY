@@ -1,16 +1,24 @@
 """The Meta read vocabulary: what may be asked, and when an answer is still current.
 
-Three passes, in this order, and the order is the design. Surveillance and
-productivity markers refuse first, so a question tripping them can never reach a
-kind. Then an exact match against a curated corpus of accepted forms. Anything
-else refuses. There is no nearest-kind fallback, ever: an ordered table of
-compiled patterns was measured against the refusal corpus and made 8 of 11
-questions answer with the *wrong* kind rather than refuse, and answering
-confidently about the wrong thing is worse than refusing.
+`MetaQuestionKind` is the interface. A caller names the kind it wants and gets
+that kind, so every supported question is reachable without guessing a phrasing
+and nothing is ever inferred from prose.
 
-The vocabulary widens in the two directions that keep that guarantee: harder
-normalization, which folds spellings of one question together and can never fold
-two questions together, and more hand-written forms, which leaves the set closed.
+Free text is a convenience on top of that, and it is deliberately narrow. Three
+passes, in this order, and the order is the design. A question carrying anything
+the normalizer cannot fold refuses first, because a normalizer that deletes the
+part it cannot read answers a question nobody asked. Then surveillance and
+productivity markers refuse, so a question tripping them can never reach a kind.
+Then an exact match against a curated corpus of accepted forms. Anything else
+refuses. There is no nearest-kind fallback, ever: an ordered table of compiled
+patterns was measured against the refusal corpus and made 8 of 11 questions
+answer with the *wrong* kind rather than refuse, and answering confidently about
+the wrong thing is worse than refusing.
+
+Refusing free text no longer costs a capability, so the corpus stays small and
+every accepted form is unambiguous about the one kind it wants. Two forms that
+mean opposite things — what is still undecided, and what has been decided — are
+two kinds with two queries, never one kind serving both.
 """
 
 from __future__ import annotations
@@ -25,10 +33,16 @@ REFUSAL_PREFIX = "unsupported Meta question"
 
 
 class MetaQuestionKind(StrEnum):
+    """The closed set of questions Meta answers, and the parameter a caller names."""
+
     STATUS = "STATUS"
     BLOCKERS = "BLOCKERS"
     CHANGES = "CHANGES"
-    DECISIONS = "DECISIONS"
+    # Opposite questions, so opposite kinds: an open decision is one still to be
+    # taken, a made one is settled. One kind serving both returned the same
+    # payload for both and answered the opposite of what was asked.
+    DECISIONS_OPEN = "DECISIONS_OPEN"
+    DECISIONS_MADE = "DECISIONS_MADE"
     DISAGREEMENT = "DISAGREEMENT"
     WHY_DECISION = "WHY_DECISION"
     DECISION_EVIDENCE = "DECISION_EVIDENCE"
@@ -80,18 +94,33 @@ _CONTRACTIONS = {
 }
 _TYPOGRAPHIC_APOSTROPHES = str.maketrans({"’": "'", "ʼ": "'"})
 _NOT_WORD = re.compile(r"[^a-z0-9_']+")
+# Everything outside this set is a character the steps below cannot fold — a
+# Japanese, Cyrillic or Arabic word, an accented Latin one — and the substitution
+# above would silently delete it.
+_UNFOLDABLE = re.compile(r"[^\x00-\x7f]")
 
 
 def normalize_question(question: str) -> str:
     """Fold spelling, so two writings of one question become one key.
 
-    Case, whitespace and punctuation carry no meaning here, and a contraction or a
-    possessive apostrophe is a spelling of the same words. Every step is a fixed
-    substitution: it can merge two spellings of one question, and unlike a pattern
-    it can never merge two different questions. `'s` always expands to `is`, so a
-    corpus key is a normalized spelling rather than a sentence.
+    Case, whitespace and ASCII punctuation carry no meaning here, and a contraction
+    or a possessive apostrophe is a spelling of the same words. Every step is a
+    fixed substitution over ASCII, and `'s` always expands to `is`, so a corpus key
+    is a normalized spelling rather than a sentence.
+
+    Dropping punctuation is a loss, so this does not claim never to merge two
+    questions — it claims only to lose nothing it cannot read. A character it
+    cannot fold refuses here: `status 誰が一番多く働いたか` folded to `status` and
+    was answered as a status question, which is a normalizer answering a question
+    nobody asked.
     """
-    folded = _NOT_WORD.sub(" ", question.lower().translate(_TYPOGRAPHIC_APOSTROPHES))
+    readable = question.lower().translate(_TYPOGRAPHIC_APOSTROPHES)
+    if _UNFOLDABLE.search(readable):
+        raise DomainError(
+            f"{REFUSAL_PREFIX}; it carries characters this workspace cannot read, and a "
+            "question it cannot read in full is one it will not answer in part"
+        )
+    folded = _NOT_WORD.sub(" ", readable)
     expanded = " ".join(_CONTRACTIONS.get(word, word) for word in folded.split())
     return " ".join(expanded.replace("'", "").split())
 
@@ -150,10 +179,10 @@ def _bears_surveillance_marker(normalized: str) -> bool:
 
 
 # Every accepted form, normalized. A form belongs to exactly one kind, so a new
-# form cannot silently widen a neighbouring kind. The five room-wide kinds carry
-# the ordinary ways a person asks them, written out one at a time: a larger
-# hand-written set is still a closed set, and it is the only way to widen this
-# vocabulary that cannot resolve a question to a kind nobody asked for.
+# form cannot silently widen a neighbouring kind, and a form that could belong to
+# two kinds belongs here to neither. This set is a convenience, not the interface:
+# a caller that names its kind reaches every capability without it, so the set can
+# stay small and unambiguous instead of growing towards every phrasing.
 ACCEPTED_QUESTIONS: dict[str, MetaQuestionKind] = {
     "status": MetaQuestionKind.STATUS,
     "status update": MetaQuestionKind.STATUS,
@@ -221,26 +250,25 @@ ACCEPTED_QUESTIONS: dict[str, MetaQuestionKind] = {
     "what are the updates": MetaQuestionKind.CHANGES,
     "show the changes": MetaQuestionKind.CHANGES,
     "list the changes": MetaQuestionKind.CHANGES,
-    "decisions": MetaQuestionKind.DECISIONS,
-    "any pending decisions": MetaQuestionKind.DECISIONS,
-    "what decisions require attention": MetaQuestionKind.DECISIONS,
-    "what decisions need attention": MetaQuestionKind.DECISIONS,
-    "which decisions need review": MetaQuestionKind.DECISIONS,
-    "which decisions require review": MetaQuestionKind.DECISIONS,
-    "what decisions are pending": MetaQuestionKind.DECISIONS,
-    "which decisions are pending": MetaQuestionKind.DECISIONS,
-    "what decisions are open": MetaQuestionKind.DECISIONS,
-    "what are the open decisions": MetaQuestionKind.DECISIONS,
-    "what decisions are waiting": MetaQuestionKind.DECISIONS,
-    "what do we need to decide": MetaQuestionKind.DECISIONS,
-    "what needs deciding": MetaQuestionKind.DECISIONS,
-    "what needs to be decided": MetaQuestionKind.DECISIONS,
-    "what still needs a decision": MetaQuestionKind.DECISIONS,
-    "what is undecided": MetaQuestionKind.DECISIONS,
-    "what decisions have been made": MetaQuestionKind.DECISIONS,
-    "what has been decided": MetaQuestionKind.DECISIONS,
-    "show the decisions": MetaQuestionKind.DECISIONS,
-    "list the decisions": MetaQuestionKind.DECISIONS,
+    # Only forms that say which of the two they want. "decisions", "show the
+    # decisions" and "which decisions need review" were dropped: each reads either
+    # way, and a form that reads either way is a guess the moment it is answered.
+    "any pending decisions": MetaQuestionKind.DECISIONS_OPEN,
+    "what decisions are pending": MetaQuestionKind.DECISIONS_OPEN,
+    "which decisions are pending": MetaQuestionKind.DECISIONS_OPEN,
+    "what decisions are open": MetaQuestionKind.DECISIONS_OPEN,
+    "what are the open decisions": MetaQuestionKind.DECISIONS_OPEN,
+    "what decisions are waiting": MetaQuestionKind.DECISIONS_OPEN,
+    "what do we need to decide": MetaQuestionKind.DECISIONS_OPEN,
+    "what needs deciding": MetaQuestionKind.DECISIONS_OPEN,
+    "what needs to be decided": MetaQuestionKind.DECISIONS_OPEN,
+    "what still needs a decision": MetaQuestionKind.DECISIONS_OPEN,
+    "what is undecided": MetaQuestionKind.DECISIONS_OPEN,
+    "what decisions have been made": MetaQuestionKind.DECISIONS_MADE,
+    "what has been decided": MetaQuestionKind.DECISIONS_MADE,
+    "what has already been decided": MetaQuestionKind.DECISIONS_MADE,
+    "what did we decide": MetaQuestionKind.DECISIONS_MADE,
+    "what decisions were made": MetaQuestionKind.DECISIONS_MADE,
     "disagreement": MetaQuestionKind.DISAGREEMENT,
     "any disagreement": MetaQuestionKind.DISAGREEMENT,
     "is there any disagreement": MetaQuestionKind.DISAGREEMENT,
@@ -282,7 +310,11 @@ DECISION_KINDS = frozenset({MetaQuestionKind.WHY_DECISION, MetaQuestionKind.DECI
 
 
 def classify_meta_question(question: str) -> MetaQuestionKind:
-    """Refuse first, match exactly second, refuse again otherwise."""
+    """Refuse the unreadable first, refuse the surveillance marker second, match exactly third.
+
+    Only for free text. A caller holding a `MetaQuestionKind` never comes through
+    here, so a refusal costs a phrasing rather than a capability.
+    """
     normalized = normalize_question(question)
     if _bears_surveillance_marker(normalized):
         raise DomainError(
@@ -295,9 +327,10 @@ def classify_meta_question(question: str) -> MetaQuestionKind:
         # subjects, never the accepted forms, which would publish the corpus.
         raise DomainError(
             f"{REFUSAL_PREFIX}; Meta answers where things stand, what is blocked, "
-            "what changed, which decisions are open, where the disagreement is, why "
-            "a decision was made, and what evidence supports it — ask for one of "
-            "those in ordinary words"
+            "what changed, which decisions are still open, which decisions have been "
+            "made, where the disagreement is, why a decision was made, and what "
+            "evidence supports it — ask for one of those in ordinary words, or name "
+            "the kind outright"
         )
     return kind
 

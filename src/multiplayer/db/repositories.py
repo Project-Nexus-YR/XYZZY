@@ -4064,6 +4064,7 @@ class MetaRepo:
         kinds: Sequence[OntologyEntityKind],
         *,
         since_sequence: int | None = None,
+        statuses: Sequence[str] = (),
         limit: int = 50,
     ) -> list[OntologyEntity]:
         if not kinds:
@@ -4074,6 +4075,13 @@ class MetaRepo:
         if since_sequence is not None:
             tail += " AND e.asserted_at_sequence > ?"
             params.append(since_sequence)
+        if statuses:
+            # Two questions that read the same entity kind and mean opposite things
+            # are separated here, before the limit, so neither is a filtered copy of
+            # the other's page.
+            status_placeholders = ", ".join("?" for _ in statuses)
+            tail += f" AND json_extract(e.properties, '$.status') IN ({status_placeholders})"
+            params.extend(statuses)
         tail += " ORDER BY e.asserted_at_sequence, e.entity_id LIMIT ?"
         params.append(limit)
         sql = self._authorized("SELECT e.* FROM ontology_entities e", "e", tail)

@@ -298,19 +298,24 @@ button,input,textarea{font:inherit}button:disabled{cursor:not-allowed;opacity:.4
 <section class="meta-panel context-view" data-context-view="meta" id="meta-panel" aria-labelledby="meta-title">
   <div class="meta-head">
     <h3 id="meta-title">Ask Meta</h3>
-    <p>Room-scoped intelligence from the published decision and its governed evidence.</p>
-    <div class="meta-presets">
-      <button onclick="askMeta('Why was this decision made?')">Why this decision?</button>
-      <button onclick="askMeta('What evidence supports this decision?')">Show supporting evidence</button>
-      <button onclick="askMeta()">Reload answer</button>
+    <p>Room-scoped intelligence from the published decision and its governed evidence. Pick what you want to know — every supported question is one of these — or type it in your own words.</p>
+    <div class="meta-presets" id="meta-kinds">
+      <button onclick="askMetaKind('STATUS')">Where things stand</button>
+      <button onclick="askMetaKind('BLOCKERS')">What is blocked</button>
+      <button onclick="askMetaKind('CHANGES')">What changed</button>
+      <button onclick="askMetaKind('DECISIONS_OPEN')">Still to decide</button>
+      <button onclick="askMetaKind('DECISIONS_MADE')">Already decided</button>
+      <button onclick="askMetaKind('DISAGREEMENT')">Where we disagree</button>
+      <button onclick="askMetaKind('WHY_DECISION')">Why this decision?</button>
+      <button onclick="askMetaKind('DECISION_EVIDENCE')">Show supporting evidence</button>
     </div>
   </div>
   <div class="meta-query">
-    <input id="meta-question" placeholder="Ask why or request supporting evidence" onkeydown="if(event.key==='Enter')askMeta()">
+    <input id="meta-question" placeholder="Ask in your own words, or pick a question above" onkeydown="if(event.key==='Enter')askMeta()">
     <button onclick="askMeta()">Ask</button>
   </div>
   <div class="meta-scope" id="meta-scope">Scope: current room · latest Decision Brief · maximum 10 claims</div>
-  <div class="meta-answer" id="meta-answer">Publish a Decision Brief, then ask why it was made or inspect its evidence.</div>
+  <div class="meta-answer" id="meta-answer">Pick a question above, or type one. Why and supporting evidence need a published Decision Brief.</div>
   <div class="meta-evidence" id="meta-evidence"></div>
 </section>
 
@@ -1789,13 +1794,26 @@ async function askMeta(preset = '') {
   if (preset) input.value = preset;
   const question = input.value.trim();
   if (!question) return;
+  return renderMeta(`question=${encodeURIComponent(question)}`);
+}
+
+// Naming the kind is the interface: the eight buttons cover everything Meta answers,
+// so no capability depends on typing a phrasing the server happens to recognize. A
+// question typed alongside one rides along for the audit record and decides nothing.
+async function askMetaKind(kind) {
+  const typed = document.getElementById('meta-question').value.trim();
+  const audit = typed ? `&question=${encodeURIComponent(typed)}` : '';
+  return renderMeta(`kind=${encodeURIComponent(kind)}${audit}`);
+}
+
+async function renderMeta(query) {
   const answer = document.getElementById('meta-answer');
   const evidence = document.getElementById('meta-evidence');
   answer.className = 'meta-answer';
   answer.textContent = 'Retrieving bounded room evidence…';
   evidence.innerHTML = '';
   try {
-    const result = await api('GET', `/rooms/${roomId}/meta?question=${encodeURIComponent(question)}&limit=10`);
+    const result = await api('GET', `/rooms/${roomId}/meta?${query}&limit=10`);
     if (!result.decision) {
       // The kinds answered from assertions rather than one decision brief.
       document.getElementById('meta-scope').innerHTML = `Scope <code>${escHtml(result.scope.room_id)}</code> · ${escHtml(result.query.kind)} · ` +
