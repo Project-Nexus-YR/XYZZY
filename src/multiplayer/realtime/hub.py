@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..domain.events import RoomEvent
+from ..domain.models import new_id
 
 log = logging.getLogger(__name__)
 
@@ -35,8 +36,16 @@ class RealtimeHub:
         self._lock = asyncio.Lock()
 
     async def subscribe(self, room_id: str, user_id: str) -> RealtimeSubscription:
+        # Minted the way every other id here is minted, and deliberately not from
+        # a clock. The previous spelling was the loop time to six decimals plus
+        # `id(self)`, and `self` is the one hub, so the whole identifier was a
+        # timestamp — on a platform whose loop clock advances every 15 ms, two
+        # sockets opening in one tick got the same string. The second overwrote
+        # the first in `_subscriptions`, which is the dictionary
+        # `revoke_room_access` searches, so the overwritten socket became
+        # unrevokable and kept receiving the room after its access was withdrawn.
         sub = RealtimeSubscription(
-            subscription_id=f"sub_{asyncio.get_event_loop().time():.6f}_{id(self)}",
+            subscription_id=new_id("sub"),
             room_id=room_id,
             user_id=user_id,
         )
