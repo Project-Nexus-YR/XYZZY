@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -303,6 +304,9 @@ _ASYNC_PASS_LIMIT = 200
 # threshold ever promotes it: only human review does.
 _INFERRED_CONFIDENCE = 0.6
 _UNCONFIRMED_TEMPLATE = "an unreviewed extraction suggests"
+# A confirmed assertion is a person's account and is never rewritten, so when the
+# row it describes moves the reader is told both, not only the older one.
+_DISAGREEMENT_TEMPLATE = "confirmed by a person; the source record has since changed"
 # The cap the Meta route already applies to free text, restated where the text is
 # kept, because a service caller reaches the audit record without the route.
 _MAX_AUDITED_QUESTION = 500
@@ -5562,9 +5566,7 @@ class MultiplayerService:
         entities = await self.repos.ontology.list_entities(room_id)
         relationships = await self.repos.ontology.list_relationships(room_id)
         reviews = await self.repos.ontology.list_reviews(room_id)
-        currency = self._ontology_currency(
-            await self.get_room_events(room_id), entities, relationships
-        )
+        currency = await self._ontology_currency(room_id, entities, relationships)
         return {
             "entities": [
                 self._with_currency(
@@ -5582,18 +5584,18 @@ class MultiplayerService:
             "reviews": [self._ontology_review_record(review) for review in reviews],
         }
 
-    @staticmethod
-    def _ontology_currency(
-        events: list[RoomEvent],
+    async def _ontology_currency(
+        self,
+        room_id: str,
         entities: list[OntologyEntity],
         relationships: list[OntologyRelationship],
     ) -> dict[str, tuple[bool, int]]:
-        """Currency for a whole room, on the rule the Meta path already uses.
+        """Currency for a whole room, on the rule and the read shape Meta already uses.
 
-        Same definition, different read shape: Meta bounds itself to ten claims and
-        asks the log once per invalidation class, while a whole room is counted in
-        memory over the room's own ordered events — the events a room-state reader
-        is handed in the same response.
+        Both surfaces now ask the log for the events that can invalidate an
+        assertion. Counting a fetched page of the room's own ordered events instead
+        made every assertion past that page report itself current for ever, and a
+        page is wrong again at whatever the next limit turns out to be.
         """
         kinds = {entity.entity_id: entity.kind for entity in entities}
         positions: list[tuple[str, int, tuple[str, ...]]] = [
@@ -5610,14 +5612,33 @@ class MultiplayerService:
             )
             for relationship in relationships
         )
-        currency: dict[str, tuple[bool, int]] = {}
+        return await self._currency(
+            positions,
+            lambda event_class, floor: self.repos.ontology.invalidating_sequences(
+                room_id, event_class, floor
+            ),
+        )
+
+    @staticmethod
+    async def _currency(
+        positions: list[tuple[str, int, tuple[str, ...]]],
+        invalidating: Callable[[tuple[str, ...], int], Awaitable[list[int]]],
+    ) -> dict[str, tuple[bool, int]]:
+        """Group by invalidation class, one read per class, then count per assertion.
+
+        The one derivation every surface goes through, because two of them written
+        separately is how the ontology route and the Meta path came to disagree.
+        """
+        grouped: dict[tuple[str, ...], list[tuple[str, int]]] = {}
         for assertion_id, sequence, event_class in positions:
-            invalidating = sum(
-                1
-                for event in events
-                if event.sequence > sequence and event.event_type.value in event_class
-            )
-            currency[assertion_id] = (invalidating == 0, invalidating)
+            grouped.setdefault(event_class, []).append((assertion_id, sequence))
+        currency: dict[str, tuple[bool, int]] = {}
+        for event_class, members in grouped.items():
+            floor = min(sequence for _assertion_id, sequence in members)
+            sequences = await invalidating(event_class, floor)
+            for assertion_id, sequence in members:
+                count = sum(1 for item in sequences if item > sequence)
+                currency[assertion_id] = (count == 0, count)
         return currency
 
     @staticmethod
@@ -5696,6 +5717,7 @@ class MultiplayerService:
             (
                 entities_written,
                 relationships_written,
+                reconciled,
             ) = await self.repos.ontology.materialize_in_transaction(entities, relationships)
             marked = await self.repos.ontology.mark_stale_in_transaction(
                 room_id, stale_ids, to_sequence
@@ -5723,6 +5745,20 @@ class MultiplayerService:
                         sequence=0,
                         event_type=EventType.ONTOLOGY_ASSERTION_SUPERSEDED,
                         payload={"assertion_ids": marked, "stale_at_sequence": to_sequence},
+                        actor_id=actor_id,
+                        actor_type="system",
+                    )
+                )
+            if reconciled:
+                # A reviewed assertion the pass may not rewrite is still an
+                # assertion whose row moved, so the log says so rather than the
+                # pass passing over it in silence.
+                events.append(
+                    RoomEvent(
+                        room_id=room_id,
+                        sequence=0,
+                        event_type=EventType.ONTOLOGY_ASSERTION_RECONCILED,
+                        payload={"assertion_ids": reconciled, "at_sequence": to_sequence},
                         actor_id=actor_id,
                         actor_type="system",
                     )
@@ -5759,6 +5795,7 @@ class MultiplayerService:
                 "entities_written": entities_written,
                 "relationships_written": relationships_written,
                 "superseded": marked,
+                "reconciled": reconciled,
             }
         await self._broadcast_persisted_events(persisted)
         return result
@@ -6112,8 +6149,11 @@ class MultiplayerService:
             DecisionStatus.REJECTED.value,
         ),
     }
+    # STATUS asked for OWNS and got `owner OWNS <task>` for every task in the answer,
+    # which is one person's work list — the shape the free-text pass refuses in
+    # aggregate. A kind may not reach what a phrasing cannot, so it is not asked for
+    # here and `_meta_edge_in_scope` refuses it however it is asked for.
     _META_RELATIONSHIP_KINDS: dict[MetaQuestionKind, tuple[OntologyRelationshipKind, ...]] = {
-        MetaQuestionKind.STATUS: (OntologyRelationshipKind.OWNS,),
         MetaQuestionKind.BLOCKERS: (OntologyRelationshipKind.BLOCKS,),
         MetaQuestionKind.DECISIONS_OPEN: (OntologyRelationshipKind.SUPPORTS,),
         MetaQuestionKind.DECISIONS_MADE: (OntologyRelationshipKind.SUPPORTS,),
@@ -6192,6 +6232,7 @@ class MultiplayerService:
         asserted_at_sequence: int,
         evidence_event_sequences: tuple[int, ...],
         stale_at_sequence: int | None,
+        source_disagreement: dict[str, Any] | None,
         currency: tuple[bool, int],
         review: OntologyReview | None,
     ) -> dict[str, Any]:
@@ -6202,11 +6243,17 @@ class MultiplayerService:
             "assertion_type": assertion_type,
             "kind": kind,
             "label": label,
-            # An unreviewed extraction is never rendered as a plain statement.
+            # An unreviewed extraction is never rendered as a plain statement, and
+            # neither is a reviewed one the source row has since contradicted.
             "text": f"{_UNCONFIRMED_TEMPLATE}: {label}"
             if assurance is OntologyAssurance.UNCONFIRMED_AI
+            else f"{label} ({_DISAGREEMENT_TEMPLATE})"
+            if source_disagreement is not None
             else label,
             "properties": properties,
+            # Null while the assertion and its row agree; otherwise the row's own
+            # current account, so a reader is never told only the frozen one.
+            "source_disagreement": source_disagreement,
             "assurance": assurance.value,
             "derivation_kind": derivation_kind.value,
             "confidence": confidence,
@@ -6233,19 +6280,12 @@ class MultiplayerService:
         positions: list[tuple[str, int, tuple[str, ...]]],
     ) -> dict[str, tuple[bool, int]]:
         """Derive currency per assertion, one grouped read per class, never per claim."""
-        grouped: dict[tuple[str, ...], list[tuple[str, int]]] = {}
-        for assertion_id, sequence, event_class in positions:
-            grouped.setdefault(event_class, []).append((assertion_id, sequence))
-        currency: dict[str, tuple[bool, int]] = {}
-        for event_class, members in grouped.items():
-            floor = min(sequence for _assertion_id, sequence in members)
-            sequences = await self.repos.meta.invalidating_sequences(
+        return await self._currency(
+            positions,
+            lambda event_class, floor: self.repos.meta.invalidating_sequences(
                 room_id, user_id, event_class, floor, head
-            )
-            for assertion_id, sequence in members:
-                invalidating = sum(1 for item in sequences if item > sequence)
-                currency[assertion_id] = (invalidating == 0, invalidating)
-        return currency
+            ),
+        )
 
     async def _meta_freshness(
         self,
@@ -6279,25 +6319,45 @@ class MultiplayerService:
         if not claims:
             return "no confirmed assertions in this room answer that question"
         labels = "; ".join(str(claim["label"]) for claim in claims)
+        # A confirmed assertion whose row has moved is counted by the row's account,
+        # and the prose says so, because a caveat only the payload carries is a
+        # caveat a reader of the sentence never gets.
+        disputed = sum(1 for claim in claims if claim["source_disagreement"] is not None)
+        caveat = (
+            f" ({disputed} confirmed by a person and since contradicted by the source record)"
+            if disputed
+            else ""
+        )
         if kind is MetaQuestionKind.STATUS:
             counts: dict[str, int] = {}
             for claim in claims:
                 if claim["assertion_type"] != "ENTITY":
                     continue
-                status = str(claim["properties"].get("status", "UNKNOWN"))
+                status = MultiplayerService._claim_status(claim)
                 counts[status] = counts.get(status, 0) + 1
             grouped = ", ".join(f"{status} {count}" for status, count in sorted(counts.items()))
-            return f"{len(claims)} governed assertions describe where things stand ({grouped})"
+            return (
+                f"{len(claims)} governed assertions describe where things stand ({grouped}){caveat}"
+            )
         if kind is MetaQuestionKind.BLOCKERS:
             return f"{len(claims)} blocking relationships: {labels}"
         if kind is MetaQuestionKind.CHANGES:
             latest = max(int(claim["asserted_at_sequence"]) for claim in claims)
-            return f"{len(claims)} work objects changed, latest at sequence {latest}: {labels}"
+            return (
+                f"{len(claims)} work objects changed, latest at sequence {latest}{caveat}: {labels}"
+            )
         if kind is MetaQuestionKind.DECISIONS_OPEN:
-            return f"{len(claims)} decisions are still open: {labels}"
+            return f"{len(claims)} decisions are still open{caveat}: {labels}"
         if kind is MetaQuestionKind.DECISIONS_MADE:
-            return f"{len(claims)} decisions have been made: {labels}"
+            return f"{len(claims)} decisions have been made{caveat}: {labels}"
         return f"{len(claims)} contradictions from {distinct_sources} distinct sources: {labels}"
+
+    @staticmethod
+    def _claim_status(claim: dict[str, Any]) -> str:
+        """The status a reader is entitled to, which is the source row's when they differ."""
+        disagreement = claim["source_disagreement"]
+        properties = claim["properties"] if disagreement is None else disagreement["properties"]
+        return str(properties.get("status", "UNKNOWN"))
 
     def _meta_envelope(
         self,
@@ -6460,6 +6520,7 @@ class MultiplayerService:
                     asserted_at_sequence=entity.asserted_at_sequence,
                     evidence_event_sequences=entity.evidence_event_sequences,
                     stale_at_sequence=entity.stale_at_sequence,
+                    source_disagreement=entity.source_disagreement,
                     currency=currency[entity.entity_id],
                     review=await self.repos.meta.latest_review(room_id, user_id, entity.entity_id),
                 )
@@ -6483,6 +6544,7 @@ class MultiplayerService:
                     asserted_at_sequence=item.asserted_at_sequence,
                     evidence_event_sequences=item.evidence_event_sequences,
                     stale_at_sequence=item.stale_at_sequence,
+                    source_disagreement=None,
                     currency=currency[item.relationship_id],
                     review=await self.repos.meta.latest_review(
                         room_id, user_id, item.relationship_id
@@ -6525,10 +6587,22 @@ class MultiplayerService:
         entity_ids: set[str],
         endpoints: dict[str, OntologyEntity],
     ) -> bool:
-        """An edge whose endpoints this reader may not see is not part of the answer."""
+        """An edge whose endpoints this reader may not see is not part of the answer.
+
+        Nor is an edge that names a person and the work attributed to them: a page
+        of those is a per-person work list whatever kind asked for it, and the
+        refusal pass already declines that shape in free text. Enforced over what
+        an answer may carry rather than over one table entry, so no kind can reach
+        it by being pointed at another relationship.
+        """
         if (
             relationship.from_entity_id not in endpoints
             or relationship.to_entity_id not in endpoints
+        ):
+            return False
+        if OntologyEntityKind.PERSON in (
+            endpoints[relationship.from_entity_id].kind,
+            endpoints[relationship.to_entity_id].kind,
         ):
             return False
         if kind in MultiplayerService._DECISION_SCOPED_KINDS:
@@ -6765,6 +6839,7 @@ class MultiplayerService:
                 asserted_at_sequence=decision.asserted_at_sequence,
                 evidence_event_sequences=decision.evidence_event_sequences,
                 stale_at_sequence=decision.stale_at_sequence,
+                source_disagreement=decision.source_disagreement,
                 currency=currency[decision.entity_id],
                 review=decision_review,
             )
@@ -6789,6 +6864,7 @@ class MultiplayerService:
                     asserted_at_sequence=claim_entity.asserted_at_sequence,
                     evidence_event_sequences=claim_entity.evidence_event_sequences,
                     stale_at_sequence=claim_entity.stale_at_sequence,
+                    source_disagreement=claim_entity.source_disagreement,
                     currency=currency[claim_entity.entity_id],
                     review=claim_review,
                 )
@@ -6809,6 +6885,7 @@ class MultiplayerService:
                     asserted_at_sequence=link.asserted_at_sequence,
                     evidence_event_sequences=link.evidence_event_sequences,
                     stale_at_sequence=link.stale_at_sequence,
+                    source_disagreement=None,
                     currency=currency[link.relationship_id],
                     review=link_review,
                 )
@@ -7078,6 +7155,9 @@ class MultiplayerService:
             "asserted_at_sequence": entity.asserted_at_sequence,
             "evidence_event_sequences": list(entity.evidence_event_sequences),
             "stale_at_sequence": entity.stale_at_sequence,
+            # Null while the assertion and its row agree; otherwise the row's own
+            # current account, kept beside the human's rather than instead of it.
+            "source_disagreement": entity.source_disagreement,
             "created_at": entity.created_at.isoformat(),
             "updated_at": entity.updated_at.isoformat(),
         }

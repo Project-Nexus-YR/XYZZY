@@ -9,8 +9,10 @@ from fastapi.testclient import TestClient
 
 from multiplayer.api import routes
 from multiplayer.db.connection import Database
+from multiplayer.domain.events import EventType
 from multiplayer.domain.meta import (
     ACCEPTED_QUESTIONS,
+    DECISION_KINDS,
     REFUSAL_PREFIX,
     MetaQuestionKind,
     _bears_surveillance_marker,
@@ -21,6 +23,7 @@ from multiplayer.domain.models import (
     DecisionStatus,
     DomainError,
     MessageRole,
+    OntologyEntityKind,
     OntologyExtractor,
     OntologyReviewAction,
 )
@@ -476,6 +479,162 @@ async def test_an_assertion_follows_the_decision_row_it_describes() -> None:
         # A pass over an unmoved row still writes nothing.
         repeat = await service.run_ontology_extraction(room_id, OntologyExtractor.IMMEDIATE)
         assert repeat["entities_written"] == 0
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_assertion_whose_row_moves_is_reconciled_not_skipped() -> None:
+    """Two rules collided, and the collision was resolved by abandoning one of them.
+
+    A reviewed assertion is a person's account and no later machine pass rewrites it.
+    An assertion also has to follow the row it describes. Confirming the assertion and
+    then moving the decision satisfied the first by dropping the second: the conflict
+    clause declined, the cursor advanced past the event, and nothing looked again — so
+    the open list said the decision was still open, the made list said no confirmed
+    assertion answered, and the decisions route said active, permanently and with no
+    caveat in the prose.
+
+    Both rules hold here. The human's label and properties are untouched, the row's
+    own account is recorded beside them, and a status question is answered from the
+    row.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    service = MultiplayerService(db, RealtimeHub(), known_users=frozenset({"owner", "viewer"}))
+    try:
+        await service.initialize()
+        room_id, decision_id = await _seed_proposed_decision(service)
+        entity = next(
+            item
+            for item in await service.repos.ontology.list_entities(room_id)
+            if item.source_object_id == decision_id
+        )
+        await service.review_ontology_entity(
+            room_id,
+            entity.entity_id,
+            OntologyReviewAction.CONFIRM,
+            "owner",
+            "Checked against the thread that proposed it.",
+        )
+        await service.update_decision_status(
+            decision_id, DecisionStatus.ACTIVE, reviewed_by="owner", require_member=True
+        )
+        result = await service.run_ontology_extraction(room_id, OntologyExtractor.IMMEDIATE)
+        # Not rewritten, and not passed over in silence either.
+        assert result["entities_written"] == 0
+        assert result["reconciled"] == [entity.entity_id]
+        assert EventType.ONTOLOGY_ASSERTION_RECONCILED.value in [
+            event.event_type.value for event in await service.get_room_events(room_id)
+        ]
+
+        preserved = await service.repos.ontology.get_entity(entity.entity_id)
+        assert preserved is not None
+        assert preserved.label == entity.label
+        assert preserved.properties == entity.properties
+        assert preserved.properties["status"] == "PROPOSED"
+        assert preserved.source_disagreement is not None
+        assert preserved.source_disagreement["properties"]["status"] == "ACTIVE"
+
+        # Three surfaces, one answer: the row is active, so the decision has been
+        # made, it is not on the open list, and the route agrees with both.
+        row = await service.repos.decisions.get(decision_id)
+        assert row is not None and row.status is DecisionStatus.ACTIVE
+        open_answer = await service.answer_decision_meta(
+            room_id, kind=MetaQuestionKind.DECISIONS_OPEN, user_id="viewer"
+        )
+        made_answer = await service.answer_decision_meta(
+            room_id, kind=MetaQuestionKind.DECISIONS_MADE, user_id="viewer"
+        )
+        assert _decision_labels(open_answer) == set()
+        assert _decision_labels(made_answer) == {"Adopt the gateway"}
+
+        # The disagreement is visible to a reader, in the record and in the prose.
+        claim = next(item for item in made_answer["claims"] if item["kind"] == "Decision")
+        assert claim["review_status"] == "CONFIRMED"
+        assert claim["properties"]["status"] == "PROPOSED"
+        assert claim["source_disagreement"]["properties"]["status"] == "ACTIVE"
+        assert claim["current"] is False
+        assert "source record has since changed" in claim["text"]
+        assert "contradicted by the source record" in made_answer["summary"]
+        record = next(
+            item
+            for item in (await service.get_room_ontology(room_id))["entities"]
+            if item["entity_id"] == entity.entity_id
+        )
+        assert record["source_disagreement"] == preserved.source_disagreement
+
+        # A pass over a row that has not moved again reconciles nothing.
+        assert (await service.run_ontology_extraction(room_id, OntologyExtractor.IMMEDIATE))[
+            "reconciled"
+        ] == []
+
+        # And a review that accepts what the row says settles the disagreement,
+        # rather than leaving a marker that contradicts an assertion now matching it.
+        corrected, _review = await service.review_ontology_entity(
+            room_id,
+            entity.entity_id,
+            OntologyReviewAction.CORRECT,
+            "owner",
+            "The decision was taken; adopting the row's account.",
+            corrected_properties=preserved.source_disagreement["properties"],
+        )
+        assert corrected.source_disagreement is None
+        settled = next(
+            item
+            for item in (await service.get_room_ontology(room_id))["entities"]
+            if item["entity_id"] == entity.entity_id
+        )
+        assert settled["source_disagreement"] is None
+        assert settled["properties"]["status"] == "ACTIVE"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_no_kind_returns_an_enumerable_per_person_work_list() -> None:
+    """Naming a kind must not reach what phrasing a question cannot.
+
+    `kind=STATUS` returned `owner OWNS <task>` for every task in the answer — a
+    per-person work list, the shape the free-text pass refuses in aggregate and the
+    shape this repository forbids outright. The rule now holds over what an answer
+    may carry, so it cannot be reintroduced by pointing a kind at another edge.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    service = MultiplayerService(db, RealtimeHub(), known_users=frozenset({"owner", "viewer"}))
+    try:
+        await service.initialize()
+        room_id = await _seed_assertion_room(service)
+        people = {
+            item.entity_id
+            for item in await service.repos.ontology.list_entities(room_id)
+            if item.kind is OntologyEntityKind.PERSON
+        }
+        attributions = [
+            item
+            for item in await service.repos.ontology.list_relationships(room_id)
+            if item.from_entity_id in people or item.to_entity_id in people
+        ]
+        assert attributions, "the room holds no person-to-work edge, so nothing was withheld"
+
+        withheld = {item.relationship_id for item in attributions}
+        for kind in MetaQuestionKind:
+            if kind in DECISION_KINDS:
+                # Those two answer over a published decision artifact this room has
+                # none of, and their chains carry no person endpoint to withhold.
+                continue
+            answer = await service.answer_decision_meta(room_id, kind=kind, user_id="viewer")
+            returned = {
+                str(item["assertion_id"]) for item in [*answer["claims"], *answer["unconfirmed"]]
+            }
+            assert not returned & withheld, f"{kind.value} enumerated one person's work"
+
+        # The kind still answers; it is the per-person shape that is gone.
+        status = await service.answer_decision_meta(
+            room_id, kind=MetaQuestionKind.STATUS, user_id="viewer"
+        )
+        assert status["claims"], "STATUS answered with nothing, so the assertion proves nothing"
     finally:
         await db.close()
 

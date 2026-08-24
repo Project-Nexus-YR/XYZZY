@@ -99,6 +99,7 @@ class EventType(StrEnum):
     ONTOLOGY_ASSERTION_CONFIRMED = "ontology.assertion_confirmed"
     ONTOLOGY_ASSERTION_CORRECTED = "ontology.assertion_corrected"
     ONTOLOGY_ASSERTION_SUPERSEDED = "ontology.assertion_superseded"
+    ONTOLOGY_ASSERTION_RECONCILED = "ontology.assertion_reconciled"
     ONTOLOGY_EXTRACTION_ADVANCED = "ontology.extraction.advanced"
 
     # Decisions

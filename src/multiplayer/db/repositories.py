@@ -3638,8 +3638,8 @@ class OntologyRepo:
         self,
         entities: list[OntologyEntity],
         relationships: list[OntologyRelationship],
-    ) -> tuple[int, int]:
-        """Write assertions idempotently and return how many rows each write touched.
+    ) -> tuple[int, int, list[str]]:
+        """Write assertions idempotently and return what each write touched.
 
         Every timing writes through here, so the transaction discipline, the
         deterministic-ID conflict rule and the inheritance rule below are written
@@ -3649,11 +3649,16 @@ class OntologyRepo:
         re-asserts over the row that describes it rather than landing beside it.
         The conflict clause writes only when the projection genuinely differs and
         stands later in the room's order, which keeps a repeated pass a no-op.
+
+        A reviewed assertion is exempt from that rewrite and is reconciled instead
+        of skipped: the third return value names the assertions whose disagreement
+        with their own row this pass recorded.
         """
         if not self.db.owns_current_transaction:
             raise RuntimeError("ontology materialization requires transaction ownership")
         entities_written = 0
         relationships_written = 0
+        reconciled: list[str] = []
         for entity in entities:
             cursor = await self.db.execute(
                 "INSERT INTO ontology_entities("
@@ -3695,6 +3700,8 @@ class OntologyRepo:
                 ),
             )
             entities_written += cursor.rowcount if cursor.rowcount > 0 else 0
+            if await self._reconcile_reviewed(entity):
+                reconciled.append(entity.entity_id)
         for relationship in relationships:
             relationship = await self._inherit_the_weakest(relationship, entities)
             if not relationship.source_object_id:
@@ -3731,7 +3738,40 @@ class OntologyRepo:
                 ),
             )
             relationships_written += cursor.rowcount if cursor.rowcount > 0 else 0
-        return entities_written, relationships_written
+        return entities_written, relationships_written, reconciled
+
+    async def _reconcile_reviewed(self, entity: OntologyEntity) -> bool:
+        """Record a reviewed assertion's disagreement with its own row.
+
+        The conflict clause above leaves a reviewed assertion alone, which is right
+        — a person's account is not overwritten by a later machine pass — but on its
+        own it also abandoned the rule that an assertion follows its row, and the
+        cursor moved on. Here the incoming projection *is* the row's own account, so
+        it is kept beside the human's rather than instead of it. Reviewing the
+        assertion against it is what takes it away again, in
+        `review_entity_in_transaction`; a pass only ever adds what the row says.
+
+        Guarded to write only on a change, so a repeated pass stays a no-op.
+        """
+        state = json.dumps({"label": entity.label, "properties": entity.properties}, sort_keys=True)
+        cursor = await self.db.execute(
+            "UPDATE ontology_entities SET source_disagreement = ?, updated_at = ? "
+            "WHERE room_id = ? AND kind = ? AND source_object_id = ? "
+            "AND review_status <> 'UNCONFIRMED' AND asserted_at_sequence < ? "
+            "AND (label <> ? OR properties <> ?) AND source_disagreement IS NOT ?",
+            (
+                state,
+                serialize_datetime(entity.updated_at),
+                entity.room_id,
+                entity.kind.value,
+                entity.source_object_id,
+                entity.asserted_at_sequence,
+                entity.label,
+                json.dumps(entity.properties, sort_keys=True),
+                state,
+            ),
+        )
+        return cursor.rowcount > 0
 
     async def _inherit_the_weakest(
         self,
@@ -3790,6 +3830,25 @@ class OntologyRepo:
                 if cursor.rowcount > 0:
                     marked.append(target_id)
         return marked
+
+    async def invalidating_sequences(
+        self, room_id: str, event_types: Sequence[str], after_sequence: int
+    ) -> list[int]:
+        """The events of one invalidation class that landed after a given sequence.
+
+        Asked of the log as a question about those events. Counting a fetched page
+        of the room's history instead answered only for the events that page
+        happened to hold, so every assertion past the page reported itself current.
+        """
+        if not event_types:
+            return []
+        placeholders = ", ".join("?" for _ in event_types)
+        rows = await self.db.fetch_all(
+            "SELECT sequence FROM room_events WHERE room_id = ? "
+            f"AND event_type IN ({placeholders}) AND sequence > ? ORDER BY sequence",
+            (room_id, *event_types, after_sequence),
+        )
+        return [int(row["sequence"]) for row in rows]
 
     async def get_cursor(
         self, room_id: str, extractor: OntologyExtractor
@@ -3933,6 +3992,11 @@ class OntologyRepo:
             review_status=status,
             updated_at=reviewed_at,
         )
+        # A review that brings the assertion into agreement with what the row says
+        # settles the disagreement; leaving the marker would tell the next reader the
+        # row still contradicts an assertion that now matches it.
+        if entity.source_disagreement == {"label": updated.label, "properties": updated.properties}:
+            updated = replace(updated, source_disagreement=None)
         after = self._entity_value(updated)
         review = OntologyReview(
             review_id=review_id,
@@ -3948,12 +4012,16 @@ class OntologyRepo:
         )
         await self.db.execute(
             "UPDATE ontology_entities SET label = ?, properties = ?, confidence = ?, "
-            "review_status = ?, updated_at = ? WHERE entity_id = ? AND room_id = ?",
+            "review_status = ?, source_disagreement = ?, updated_at = ? "
+            "WHERE entity_id = ? AND room_id = ?",
             (
                 updated.label,
                 json.dumps(updated.properties, sort_keys=True),
                 updated.confidence,
                 updated.review_status.value,
+                None
+                if updated.source_disagreement is None
+                else json.dumps(updated.source_disagreement, sort_keys=True),
                 serialize_datetime(updated.updated_at),
                 updated.entity_id,
                 updated.room_id,
@@ -4093,6 +4161,11 @@ class OntologyRepo:
         if not isinstance(properties, dict):
             raise ValueError("ontology entity properties are malformed")
         stale = row["stale_at_sequence"]
+        disagreement = row["source_disagreement"]
+        if disagreement is not None:
+            disagreement = json.loads(disagreement)
+            if not isinstance(disagreement, dict):
+                raise ValueError("ontology entity source disagreement is malformed")
         return OntologyEntity(
             entity_id=row["entity_id"],
             room_id=row["room_id"],
@@ -4109,6 +4182,7 @@ class OntologyRepo:
             asserted_at_sequence=int(row["asserted_at_sequence"]),
             evidence_event_sequences=cls._json_sequences(row["evidence_event_sequences"]),
             stale_at_sequence=None if stale is None else int(stale),
+            source_disagreement=disagreement,
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -4221,8 +4295,18 @@ class MetaRepo:
             # Two questions that read the same entity kind and mean opposite things
             # are separated here, before the limit, so neither is a filtered copy of
             # the other's page.
+            #
+            # The status is the row's, not the one frozen into a confirmed assertion:
+            # a confirmed decision whose row moved on to active is a decision that
+            # has been made, and answering from the human's copy put it on the open
+            # list for ever while the decisions route called it active.
             status_placeholders = ", ".join("?" for _ in statuses)
-            tail += f" AND json_extract(e.properties, '$.status') IN ({status_placeholders})"
+            tail += (
+                " AND COALESCE("
+                "json_extract(e.source_disagreement, '$.properties.status'), "
+                "json_extract(e.properties, '$.status')"
+                f") IN ({status_placeholders})"
+            )
             params.extend(statuses)
         tail += " ORDER BY e.asserted_at_sequence, e.entity_id LIMIT ?"
         params.append(limit)

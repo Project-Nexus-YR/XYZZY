@@ -10,13 +10,16 @@ of its own sequence, because that is exactly the defect a global cursor allowed.
 from __future__ import annotations
 
 import sqlite3
+from inspect import signature
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from multiplayer.db.connection import Database
+from multiplayer.db.repositories import EventRepo
 from multiplayer.domain.events import EventType
+from multiplayer.domain.meta import MetaQuestionKind
 from multiplayer.domain.models import MessageRole, OntologyExtractor
 from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.services.service import MultiplayerService
@@ -215,6 +218,70 @@ async def test_the_ontology_route_discloses_the_same_currency_as_the_meta_path()
         # The copy embedded in room state is the same account, not a quieter one.
         state = await service.get_room_state(room_id, user_id="viewer")
         assert state["ontology"] == ontology
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_currency_holds_past_the_page_a_room_history_read_returns() -> None:
+    """The invalidating events are asked for, not filtered out of a page of history.
+
+    `get_room_events` returns the room's *first* page, so deriving currency from it
+    made every invalidating event past that page invisible: the ontology route, and
+    the room-state payload a reconnecting client believes, reported a superseded
+    assertion current for ever while the Meta path reported it superseded. The two
+    surfaces had already been reconciled once; this is the same defect returning as
+    an event-count threshold, and nothing caught it because no test crossed the page.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        service = await _service(db)
+        room_id = await _seed_room(service)
+        await service.run_ontology_extraction(room_id, OntologyExtractor.IMMEDIATE)
+        task_entity = next(
+            entity
+            for entity in await service.repos.ontology.list_entities(room_id)
+            if entity.label == "Ship the gateway"
+        )
+
+        # Past whatever page the history read returns, rather than past a number,
+        # so this still crosses the boundary when the page size changes.
+        page = int(signature(EventRepo.list_since).parameters["limit"].default)
+        while await service.repos.events.get_latest_sequence(room_id) <= page:
+            await service.send_message(room_id, MessageRole.HUMAN, "owner", "filler")
+        tasks = await service.list_room_tasks(room_id)
+        await service.assign_task(tasks[0].task_id, "agent-1", requested_by="owner")
+        head = await service.repos.events.get_latest_sequence(room_id)
+        assert head > page > task_entity.asserted_at_sequence
+
+        ontology = await service.get_room_ontology(room_id)
+        record = next(
+            entity
+            for entity in ontology["entities"]
+            if entity["entity_id"] == task_entity.entity_id
+        )
+        assert record["current"] is False
+        assert record["invalidating_events"] >= 1
+
+        answer = await service.answer_decision_meta(
+            room_id, kind=MetaQuestionKind.STATUS, user_id="viewer"
+        )
+        claim = next(
+            item
+            for item in [*answer["claims"], *answer["unconfirmed"]]
+            if item["assertion_id"] == task_entity.entity_id
+        )
+        disclosed = ["current", "invalidating_events"]
+        assert [record[field] for field in disclosed] == [claim[field] for field in disclosed]
+
+        # The copy embedded in room state is the same account, not a quieter one.
+        state = await service.get_room_state(room_id, user_id="viewer")
+        assert state["ontology"] == ontology
+
+        # And past the page the field still decides something: an assertion whose
+        # own class saw no event since it was written is still current.
+        assert [entity["label"] for entity in ontology["entities"] if entity["current"]]
     finally:
         await db.close()
 

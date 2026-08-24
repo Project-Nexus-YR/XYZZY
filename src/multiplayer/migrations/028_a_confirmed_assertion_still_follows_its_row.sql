@@ -1,0 +1,23 @@
+-- Where a human's account of an object and the object's own row disagree.
+--
+-- Two rules collided. A reviewed assertion is a person's account, so a later
+-- machine pass never rewrites it. An assertion also has to follow the row it
+-- describes. Confirming a decision assertion and then moving the decision from
+-- proposed to active satisfied the first rule by abandoning the second: the
+-- conflict clause declined, the cursor advanced past the event, and nothing
+-- looked at that row again. The open list said the decision was still open, the
+-- made list said no confirmed assertion answered, and the decisions route said
+-- active — three surfaces, three answers, permanently.
+--
+-- This column is the reconciliation. It is NULL while the assertion and its row
+-- agree, and otherwise holds the row's own current projection — `{"label": ...,
+-- "properties": {...}}` — recorded by the pass that read the row. The human's
+-- label and properties are never touched, the disagreement is disclosed on every
+-- read surface, and a status question is answered from the row's account rather
+-- than from the one frozen at confirmation.
+--
+-- Nothing is backfilled. A NULL here means "no disagreement has been observed",
+-- which is what every existing row can honestly claim: no pass has declined for
+-- it yet, and the next pass that reads its source object records the truth.
+
+ALTER TABLE ontology_entities ADD COLUMN source_disagreement TEXT;
