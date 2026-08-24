@@ -1791,6 +1791,14 @@ class MultiplayerService:
         agent = await self.get_agent(agent_id)
         if agent.room_id != room_id:
             raise DomainError("agent is not in this room")
+        # The instance column says where the agent was created; membership says whether
+        # it is still there. Every other launch door reads membership, and this one did
+        # not, so a removed agent still got a durable session row and a room event
+        # announcing that it had started work.
+        if not await self.repos.agents.has_room_membership(agent_id, room_id):
+            raise AgentLaunchRefused(
+                agent_id, room_id, "not_a_member", f"agent {agent_id} is not in room {room_id}"
+            )
         session = Session(
             session_id=new_id("sess"), room_id=room_id, agent_id=agent_id, task_id=task_id
         )
