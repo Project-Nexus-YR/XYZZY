@@ -1,10 +1,10 @@
-# MultiAI
+# XYZZY
 
 A multiplayer AI workspace where multiple humans and AI agents collaborate in persistent shared rooms.
 
 ## Why
 
-Modern AI tools are single-player: one human, one chat, one context. Real work happens in teams. MultiAI lets multiple humans and AI agents share a room with a common event history, artifacts, tasks, and decisions — all persisted in SQLite with WebSocket-driven real-time synchronization.
+Modern AI tools are single-player: one human, one chat, one context. Real work happens in teams. XYZZY lets multiple humans and AI agents share a room with a common event history, artifacts, tasks, and decisions — all persisted in SQLite with WebSocket-driven real-time synchronization.
 
 ## Core Capabilities
 
@@ -87,7 +87,7 @@ tests/
 
 ## How It Uses NEXUS
 
-MultiAI includes an optional integration with [NEXUS](../NEXUS/), a lightweight agent runtime. The `NexusAgentBridge` adapts NEXUS into the multiplayer context:
+XYZZY includes an optional integration with [NEXUS](../NEXUS/), a lightweight agent runtime. The `NexusAgentBridge` adapts NEXUS into the multiplayer context:
 
 - **AgentExecutor** manages agent run lifecycle (create, reason, pause, resume, cancel)
 - **Budget** enforces token limits, wall time, and tool call limits
@@ -95,15 +95,15 @@ MultiAI includes an optional integration with [NEXUS](../NEXUS/), a lightweight 
 - **StateStore** persists agent state for checkpoint/restart
 
 When NEXUS is unavailable, the bridge runs the configured model provider directly. With an
-`OPENAI_API_KEY`, specialists use the OpenAI Responses API. Without a credential, MultiAI emits a
+`OPENAI_API_KEY`, specialists use the OpenAI Responses API. Without a credential, XYZZY emits a
 conspicuously labelled `SIMULATED WORKFLOW OUTPUT` so collaboration mechanics remain testable
 without presenting placeholder text as real analysis.
 
 ## Local Installation
 
 ```bash
-git clone https://github.com/Yasser-Ameur/MultiAI.git
-cd MultiAI
+git clone https://github.com/Yasser-Ameur/XYZZY.git
+cd XYZZY
 python -m venv .venv
 .venv\Scripts\activate        # Windows
 pip install -e ".[dev]"
@@ -116,7 +116,7 @@ exception. Without `OPENAI_API_KEY` the server runs a credential-free
 simulator, which is enough for the whole workflow.
 
 Credentials live in the database, hashed, one row per token, revocable
-without a restart. `MULTIAI_AUTH_TOKENS` is bootstrap only: its tokens are
+without a restart. `XYZZY_AUTH_TOKENS` is bootstrap only: its tokens are
 ingested at startup, and a token an operator revoked stays revoked across
 restarts. Mint and revoke real credentials with the operator CLI — the token
 is printed once at mint time and never stored:
@@ -130,10 +130,10 @@ python -m multiplayer.manage multiplayer.db token list
 
 ```bash
 # Start the server (serves API + web UI). POSIX shells:
-export MULTIAI_AUTH_TOKENS='{"local-dev-token":"user_local"}'
+export XYZZY_AUTH_TOKENS='{"local-dev-token":"user_local"}'
 export OPENAI_API_KEY="..."                 # optional; simulated when unset
-export MULTIAI_OPENAI_MODEL="gpt-5.4-mini" # optional; this is the default
-export MULTIAI_MODEL_TIMEOUT_SECONDS="45"  # optional
+export XYZZY_OPENAI_MODEL="gpt-5.4-mini" # optional; this is the default
+export XYZZY_MODEL_TIMEOUT_SECONDS="45"  # optional
 python -m multiplayer.server
 
 # Open browser
@@ -142,7 +142,7 @@ python -m multiplayer.server
 
 ```powershell
 # Windows PowerShell: `export` is not a PowerShell verb.
-$env:MULTIAI_AUTH_TOKENS = '{"local-dev-token":"user_local"}'
+$env:XYZZY_AUTH_TOKENS = '{"local-dev-token":"user_local"}'
 python -m multiplayer.server
 ```
 
@@ -151,10 +151,41 @@ agent output. Requests send only the selected specialist's name, role, template 
 user decision prompt, and any explicit human intervention. Responses API storage is disabled with
 `store: false`.
 
-`MULTIAI_AUTH_TOKENS` is a server-owned JSON map from opaque Bearer tokens to user IDs. Empty or
+`XYZZY_AUTH_TOKENS` is a server-owned JSON map from opaque Bearer tokens to user IDs. Empty or
 missing configuration denies every non-health request. The browser keeps its token in memory only.
 The server binds to `127.0.0.1:8000` and persists to `multiplayer.db` by default; pass an explicit
 database path as the first CLI argument when needed.
+
+### Deployment settings
+
+Every one of these has a working default, so a local run needs none of them. A
+deployment that terminates TLS in front of the server needs the first three.
+
+| Variable | Default | What it decides |
+| --- | --- | --- |
+| `XYZZY_HOST` | `127.0.0.1` | Interface to bind. Loopback by default: binding everything because nobody configured it is a deployment decision made by omission. |
+| `XYZZY_PORT` | `8000` | Port to bind. |
+| `XYZZY_CORS_ORIGINS` | the two loopback origins | Comma-separated browser origins allowed to call the API. `*` is refused: paired with credentials it would let any site spend a signed-in session. |
+| `XYZZY_RATE_LIMIT_PER_MINUTE` | `120` | Requests per minute per bearer token, or per peer address when there is no token. `/api/v1/health` is exempt so a monitor cannot spend a client's budget. |
+| `XYZZY_MAX_BODY_BYTES` | `1048576` | Largest declared request body. A chunked request declares no length, so this caps the honest case only. |
+| `XYZZY_LOG_LEVEL` | `INFO` | Root log level. |
+
+The rate limiter counts in process memory. It bounds one server's exposure, not a
+fleet's; two replicas behind a load balancer each allow the full budget.
+
+`GET /api/v1/health` is a readiness probe, not a liveness one: it reads from the
+database and answers 503 when it cannot, so a process holding an unopenable
+database is never reported ready.
+
+### Docker
+
+```bash
+docker build -t xyzzy .
+docker run -p 8000:8000 -v xyzzy-data:/data -e XYZZY_AUTH_TOKENS='{"local-dev-token":"user_local"}' xyzzy
+```
+
+The database is a file under `/data`. Without the volume the room history dies
+with the container.
 
 ## Running Tests
 
@@ -172,7 +203,8 @@ python -m pytest tests/regression/ -v
 
 ## Current Status
 
-The current repository gate is 673 passing tests plus Ruff format/check and strict `mypy src`.
+The current repository gate is 734 passing tests plus Ruff format/check and strict `mypy src`,
+run on every push and pull request by `.github/workflows/ci.yml`.
 The suite covers:
 - Unit tests for domain models
 - Integration tests for repositories, services, and API endpoints

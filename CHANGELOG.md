@@ -20,6 +20,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The benchmark baseline's concessions are now verified against pinned
   source commits of buzz and qm, with one claim withdrawn and two corrected.
 
+- The deployment settings a server needs are configuration rather than source:
+  `XYZZY_HOST`, `XYZZY_PORT`, `XYZZY_CORS_ORIGINS`, `XYZZY_RATE_LIMIT_PER_MINUTE`,
+  `XYZZY_MAX_BODY_BYTES` and `XYZZY_LOG_LEVEL`. A `*` origin is refused rather
+  than accepted, because paired with credentials it lets any site spend a
+  signed-in session.
+- A per-principal rate limit and a declared-body-size cap in front of every route
+  but the health probe. Both count in one process: they bound one server's
+  exposure, not a fleet's.
+- `.github/workflows/ci.yml` runs the four gates on every push and pull request,
+  on the 3.11 floor the project declares rather than the interpreter development
+  happens on.
+- A `Dockerfile` that runs as a non-root user, keeps the database on a mounted
+  volume, and health-checks itself against the readiness probe.
+
+### Changed
+
+- `GET /api/v1/health` reads from the database instead of returning a constant,
+  and answers 503 when it cannot. A process listening with a database it cannot
+  open is no longer reported ready.
+- The product is now XYZZY. The distribution is `xyzzy`, the environment
+  variables are `XYZZY_AUTH_TOKENS`, `XYZZY_OPENAI_MODEL` and
+  `XYZZY_MODEL_TIMEOUT_SECONDS`, and the WebSocket subprotocol is `xyzzy.v1`.
+  Provenance envelopes and branch context snapshots written from here on name
+  `xyzzy.artifact-provenance.v2` and `xyzzy.branch-context.v1`; envelopes
+  written before the rename keep the old identifier and their original hash.
+
 ### Fixed
 
 - `set_workspace_policy` bounds every room in the workspace but was gated on
