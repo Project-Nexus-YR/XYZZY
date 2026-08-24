@@ -2162,14 +2162,24 @@ class MultiplayerService:
             properties["input"] = {"type": "object"}
         return {"type": "object", "properties": properties, "required": ["action"]}
 
-    async def agent_capability_terms(self, agent_id: str, requested_by: str) -> UnboundedTerms:
+    async def agent_capability_terms(
+        self, room_id: str, agent_id: str, requested_by: str
+    ) -> UnboundedTerms:
         """What this member could lend this agent, for a run they have not opened yet.
 
         A preview, not a spend: there is no run, so this member is the whole of it.
+
+        The room is required and checked. Resolving the terms from the agent's own
+        room while the caller was authorized against a different one let anyone who
+        could read any room read any agent's channel and workspace policy anywhere -
+        the caller passed a room they owned and named an agent belonging to someone
+        else's workspace.
         """
         agent = await self.get_agent(agent_id)
+        if agent.room_id != room_id:
+            raise DomainError("agent is not in this room")
         return await self._lendable_terms(
-            agent, agent.room_id, BoundingPrincipals(frozenset({requested_by}))
+            agent, room_id, BoundingPrincipals(frozenset({requested_by}))
         )
 
     async def _require_delegated_authority(self, execution: Execution, acting_as: str) -> None:

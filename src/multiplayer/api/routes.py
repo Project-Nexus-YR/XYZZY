@@ -681,7 +681,7 @@ async def agent_capabilities(
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
     try:
-        terms = await svc.agent_capability_terms(agent_id, principal.user_id)
+        terms = await svc.agent_capability_terms(room_id, agent_id, principal.user_id)
     except DomainError as exc:
         raise HTTPException(404, str(exc)) from exc
     # No run yet, so nothing is steering one: this is what the caller could lend.
