@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+from contextlib import suppress
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -120,6 +121,10 @@ async def websocket_endpoint(
                     await websocket.close(code=4401, reason="authentication revoked")
                     return
                 except Exception:
+                    # Cannot re-check (e.g. shutdown closed the database): close
+                    # rather than leave the client on a silent, pingless socket.
+                    with suppress(Exception):
+                        await websocket.close(code=1011, reason="authentication check failed")
                     return
                 next_reauth = loop.time() + REAUTH_SECONDS
             try:
