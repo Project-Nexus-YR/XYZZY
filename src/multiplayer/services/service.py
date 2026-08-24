@@ -8,6 +8,7 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -398,7 +399,26 @@ class MultiplayerService:
         self._ontology_drains: set[str] = set()
 
     async def initialize(self) -> None:
-        migrations_dir = Path(__file__).parent.parent / "migrations"
+        await self._apply_migrations(Path(__file__).parent.parent / "migrations")
+        await self._backfill_legacy_artifact_provenance_hashes()
+        await self._backfill_participant_handles()
+        # Objects written before their kind joined the search allowlist.
+        await self.repos.search.backfill()
+        await self._seed_default_templates()
+        await self._settle_orphaned_mention_runs()
+        await self.sweep_expired_run_leases()
+
+    async def _apply_migrations(self, migrations_dir: Path) -> None:
+        """Apply each pending migration and the row recording it as one commit.
+
+        A crash mid-migration leaves the database exactly at the previous
+        migration: the script's statements and its schema_migrations row are one
+        transaction, so nothing half-applied is ever marked done, and nothing
+        applied is ever left unmarked to fail on replay. A migration that uses
+        the sanctioned rebuild recipe declares PRAGMA foreign_keys=OFF, which a
+        transaction would silently ignore, so that toggle is hoisted onto the
+        connection around the transaction.
+        """
         await self.db.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
             "name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
@@ -408,18 +428,24 @@ class MultiplayerService:
         for migration_file in sorted(migrations_dir.glob("*.sql")):
             if migration_file.name in applied:
                 continue
-            await self.db.execute_script(migration_file.read_text())
-            await self.db.execute(
-                "INSERT INTO schema_migrations(name, applied_at) VALUES (?, ?)",
-                (migration_file.name, utcnow().isoformat()),
+            body = migration_file.read_text()
+            wants_foreign_keys_off = "foreign_keys=OFF" in body
+            record = (
+                "INSERT INTO schema_migrations(name, applied_at) VALUES "
+                f"('{migration_file.name.replace(chr(39), chr(39) * 2)}', "
+                f"'{utcnow().isoformat()}');"
             )
-        await self._backfill_legacy_artifact_provenance_hashes()
-        await self._backfill_participant_handles()
-        # Objects written before their kind joined the search allowlist.
-        await self.repos.search.backfill()
-        await self._seed_default_templates()
-        await self._settle_orphaned_mention_runs()
-        await self.sweep_expired_run_leases()
+            if wants_foreign_keys_off:
+                await self.db.execute("PRAGMA foreign_keys=OFF")
+            try:
+                await self.db.execute_script(f"BEGIN IMMEDIATE;\n{body}\n{record}\nCOMMIT;")
+            except Exception as exc:
+                with suppress(Exception):
+                    await self.db.execute("ROLLBACK")
+                raise RuntimeError(f"migration {migration_file.name} failed") from exc
+            finally:
+                if wants_foreign_keys_off:
+                    await self.db.execute("PRAGMA foreign_keys=ON")
 
     async def _settle_orphaned_mention_runs(self) -> None:
         """Settle mention runs whose dispatcher died before it could claim them.
