@@ -143,6 +143,7 @@ from ..security.authorization import (
     RoomPolicy,
     capabilities_for_role,
 )
+from ..security.boundary import agent_turn, require_human_boundary
 from ..security.capabilities import (
     CAPABILITIES,
     BoundingPrincipals,
@@ -937,6 +938,7 @@ class MultiplayerService:
         role: str,
         invited_by: str,
     ) -> RoomMember:
+        require_human_boundary("member.invite")
         if role not in {"viewer", "editor"}:
             raise DomainError("invitation role must be viewer or editor")
         invited_user_id = self._validate_id(invited_user_id, "user id")
@@ -1045,6 +1047,7 @@ class MultiplayerService:
         self, room_id: str, allowed: list[str] | None, changed_by: str
     ) -> None:
         """Bound every run in this channel to a capability list. None lifts the bound."""
+        require_human_boundary("room.policy")
         stored = _policy_json(allowed)
         async with self.db.transaction():
             await self._require_capability_in_transaction(
@@ -1069,6 +1072,7 @@ class MultiplayerService:
         Administering the channel, because raising the bar and lowering it are the
         same act seen from two sides and both are governance: the check is on the
         write, so a posture cannot be reached through any door that is not this one.
+        require_human_boundary is that sentence for the agent surface.
 
         Loosening is permitted, and the reason is that a posture which only rises
         makes one mistaken STRICT permanent and the channel disposable; the harm a
@@ -1079,6 +1083,7 @@ class MultiplayerService:
         Nothing is overwritten. The declaration is a row, so what governed an action
         stays answerable from records that could not have changed since.
         """
+        require_human_boundary("room.posture")
         async with self.db.transaction():
             await self._require_capability_in_transaction(
                 room_id, declared_by, RoomCapability.ADMINISTER
@@ -1105,6 +1110,7 @@ class MultiplayerService:
         self, room_id: str, user_id: str, allowed: list[str] | None, changed_by: str
     ) -> None:
         """Bound what one member may lend to the agents they run. None restores the role default."""
+        require_human_boundary("member.capabilities")
         stored = _policy_json(allowed)
         async with self.db.transaction():
             await self._require_capability_in_transaction(
@@ -1130,6 +1136,7 @@ class MultiplayerService:
         self, workspace_id: str, allowed: list[str] | None, changed_by: str
     ) -> None:
         """Bound every channel in the workspace. Logged in each of its rooms."""
+        require_human_boundary("workspace.policy")
         stored = _policy_json(allowed)
         events: list[RoomEvent] = []
         async with self.db.transaction():
@@ -1160,6 +1167,7 @@ class MultiplayerService:
 
     async def remove_room_member(self, room_id: str, user_id: str, removed_by: str) -> None:
         """Revoke a non-admin member's access, including any live realtime subscription."""
+        require_human_boundary("member.remove")
         if user_id == removed_by:
             raise DomainError("use leave to remove yourself")
         async with self.db.transaction():
@@ -1209,6 +1217,7 @@ class MultiplayerService:
         harness_id: str = NEXUS_HARNESS_ID,
         addressing_mode: AddressingMode = AddressingMode.ANYONE,
     ) -> AgentInstance:
+        require_human_boundary("agent.spawn")
         template = await self.repos.agents.get_template(template_id)
         if not template:
             raise DomainError(f"agent template not found: {template_id}")
@@ -1395,6 +1404,7 @@ class MultiplayerService:
         self, agent_id: str, revoked_by: str, *, require_member: bool = False
     ) -> None:
         """Revoke once, not per run: no later run of this agent may launch."""
+        require_human_boundary("agent.identity.revoke")
         agent = await self.get_agent(agent_id)
         if require_member:
             await self.authorization.require(agent.room_id, revoked_by, RoomCapability.ADMINISTER)
@@ -1703,6 +1713,7 @@ class MultiplayerService:
         in-flight turn can still land. What stops it writing is the settled-run refusal
         inside complete_execution, not the credential.
         """
+        require_human_boundary("agent.remove")
         agent = await self.get_agent(agent_id)
         if agent.room_id != room_id:
             raise DomainError("agent is not in this room")
@@ -2507,6 +2518,11 @@ class MultiplayerService:
         return decide(request.tool, effective), effective
 
     async def _execute_tool_request(self, request: ToolRequest) -> ToolRequest:
+        """Everything below runs inside the agent-turn boundary."""
+        with agent_turn(request.execution_id):
+            return await self._execute_tool_request_inner(request)
+
+    async def _execute_tool_request_inner(self, request: ToolRequest) -> ToolRequest:
         """Run an authorised tool and audit the outcome. Never raises to the caller.
 
         The contract was not true. Only RunAuthorityRevoked and DomainError were
@@ -2924,6 +2940,13 @@ class MultiplayerService:
         return {**result, "error": error, "settlement": settlement.value}
 
     async def _execute_one_agent_step(
+        self, execution_id: str, continuation: _TurnContinuation
+    ) -> dict[str, Any]:
+        """Everything below runs inside the agent-turn boundary."""
+        with agent_turn(execution_id):
+            return await self._execute_one_agent_step_inner(execution_id, continuation)
+
+    async def _execute_one_agent_step_inner(
         self, execution_id: str, continuation: _TurnContinuation
     ) -> dict[str, Any]:
         """One prompt of a turn: authority, harness, and whatever the model chose.
@@ -5416,6 +5439,7 @@ class MultiplayerService:
     async def approve_action(
         self, approval_id: str, reviewer_id: str, comment: str = "", *, require_member: bool = False
     ) -> Approval:
+        require_human_boundary("approval.approve")
         async with self.db.transaction():
             approval = await self.repos.approvals.get(approval_id)
             if not approval:
@@ -5610,6 +5634,7 @@ class MultiplayerService:
         require_member: bool = False,
         continue_turn: bool = False,
     ) -> Approval:
+        require_human_boundary("approval.reject")
         """Refuse one gated tool call, and say what becomes of the run.
 
         Rejection used to resolve the request and stop, leaving the run
@@ -5806,6 +5831,7 @@ class MultiplayerService:
     async def interrupt_agent(
         self, agent_id: str, user_id: str, reason: str = "", *, require_member: bool = False
     ) -> None:
+        require_human_boundary("agent.interrupt")
         agent = await self.get_agent(agent_id)
         if require_member:
             await self._require_agent_run_authority(agent_id, user_id)

@@ -36,6 +36,7 @@ from multiplayer.db.connection import Database
 from multiplayer.domain.models import HarnessState, MessageRole, RunSettlement
 from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
 from multiplayer.realtime.hub import RealtimeHub
+from multiplayer.security import boundary
 from multiplayer.security.capabilities import RunAuthorization, UnboundedTerms
 from multiplayer.services.service import MultiplayerService
 
@@ -180,7 +181,13 @@ async def test_the_writer_transaction_carries_the_steerer_bound_too(
 
     async def narrow_the_steerer_after_dispatch(request: Any) -> RunAuthorization:
         authorization = await real_authorization(request)
-        await svc.set_member_capabilities(room_id, STEERER, [], OWNER)
+        # A concurrent human request runs with no turn context; the patch
+        # injects it mid-turn, so it steps outside the boundary explicitly.
+        token = boundary._agent_turn.set(None)
+        try:
+            await svc.set_member_capabilities(room_id, STEERER, [], OWNER)
+        finally:
+            boundary._agent_turn.reset(token)
         return authorization
 
     monkeypatch.setattr(svc, "_run_authorization", narrow_the_steerer_after_dispatch)
@@ -324,7 +331,7 @@ def test_the_unbounded_derivation_has_only_gates_and_a_preview_for_callers() -> 
         "_require_delegated_authority",  # may this caller steer somebody else's run
         "_require_agent_run_authority",  # may this caller steer this agent at all
         "_invoke_mentioned_agent_in_transaction",  # may this member open a turn here
-        "_execute_one_agent_step",  # may the run's own principal still be spoken for
+        "_execute_one_agent_step_inner",  # may the run's own principal still be spoken for
         "agent_capability_terms",  # a preview for a run that does not exist
     }
 

@@ -27,6 +27,7 @@ from multiplayer.harness import MODEL_PROVIDER_HARNESS_ID, NEXUS_HARNESS_ID
 from multiplayer.model_providers import OpenAIResponsesProvider
 from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
 from multiplayer.realtime.hub import RealtimeHub
+from multiplayer.security import boundary
 from multiplayer.services.service import MultiplayerService
 
 HARNESSES = [NEXUS_HARNESS_ID, MODEL_PROVIDER_HARNESS_ID]
@@ -209,7 +210,13 @@ async def test_a_capability_withdrawn_while_the_model_thinks_is_rejected_at_the_
         execution_id = await _run(svc, room_id, "Researcher", harness_id)
 
         async def withdraw() -> None:
-            await svc.set_member_capabilities(room_id, "owner", ["analysis"], "owner")
+            # A concurrent human request runs with no turn context; the test
+            # injects it mid-turn, so it steps outside the boundary explicitly.
+            token = boundary._agent_turn.set(None)
+            try:
+                await svc.set_member_capabilities(room_id, "owner", ["analysis"], "owner")
+            finally:
+                boundary._agent_turn.reset(token)
 
         transport.before_answering = withdraw
         await svc.execute_agent_step(execution_id, "Assess the deploy.", "owner")

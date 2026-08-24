@@ -29,11 +29,25 @@ from multiplayer.db.connection import Database
 from multiplayer.domain.models import HarnessState, MessageRole, RunSettlement
 from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
 from multiplayer.realtime.hub import RealtimeHub
+from multiplayer.security import boundary
 from multiplayer.services.service import MultiplayerService
 
 SECRET = "the rollback key is in the vault"
 
 _TERMINAL_TOOL_EVENTS = {"tool.call_completed", "tool.call_failed", "tool.call_rejected"}
+
+
+async def _as_human(coro: Any) -> Any:
+    """A concurrent human request runs with no turn context.
+
+    The stub model injects these calls mid-turn, so they step outside the
+    agent-surface boundary the way a genuinely concurrent request would be.
+    """
+    token = boundary._agent_turn.set(None)
+    try:
+        return await coro
+    finally:
+        boundary._agent_turn.reset(token)
 
 
 def _read_context() -> dict[str, Any]:
@@ -63,7 +77,7 @@ class _ReadsAgainAfterBeingRemoved:
         if len(self.prompts) == 2:
             # Said in the room after the agent's first read and before its second.
             await self.svc.send_message(self.room_id, MessageRole.HUMAN, "owner", SECRET)
-            await self.svc.remove_agent_from_room(self.agent_id, self.room_id, "owner")
+            await _as_human(self.svc.remove_agent_from_room(self.agent_id, self.room_id, "owner"))
             return _read_context()
         return {"action": "finish", "output": {"content": "answered"}}
 
@@ -83,7 +97,7 @@ class _ReactsAfterBeingRemoved:
         self.prompts.append(prompt)
         assert self.svc is not None
         if len(self.prompts) == 1:
-            await self.svc.remove_agent_from_room(self.agent_id, self.room_id, "owner")
+            await _as_human(self.svc.remove_agent_from_room(self.agent_id, self.room_id, "owner"))
             return {
                 "action": "tool",
                 "tool": "message.react",
@@ -120,8 +134,10 @@ class _ReadsWhileASteererIsNarrowed:
             return _read_context()
         if len(self.prompts) == 2:
             if self.narrow:
-                await self.svc.set_member_capabilities(
-                    self.room_id, "steerer", ["analysis", "research"], "owner"
+                await _as_human(
+                    self.svc.set_member_capabilities(
+                        self.room_id, "steerer", ["analysis", "research"], "owner"
+                    )
                 )
             return _read_context()
         return {"action": "finish", "output": {"content": "answered"}}

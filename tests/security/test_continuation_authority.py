@@ -30,6 +30,7 @@ from multiplayer.domain.models import (
 )
 from multiplayer.nexus_bridge.agent_bridge import NexusAgentBridge
 from multiplayer.realtime.hub import RealtimeHub
+from multiplayer.security import boundary
 from multiplayer.services.service import MultiplayerService
 
 
@@ -99,7 +100,14 @@ async def test_a_grant_withdrawn_between_two_tool_calls_stops_the_second(
 
     async def withdraw_after_the_tool_ran(request: ToolRequest) -> ToolRequest:
         resolved = await executed(request)
-        await svc.set_member_capabilities(room_id, "owner", [], "owner")
+        # The withdrawal belongs to a human's own request task; the test injects
+        # it inside the turn, so it steps outside the agent-surface boundary the
+        # way a concurrent request genuinely would be.
+        token = boundary._agent_turn.set(None)
+        try:
+            await svc.set_member_capabilities(room_id, "owner", [], "owner")
+        finally:
+            boundary._agent_turn.reset(token)
         return resolved
 
     monkeypatch.setattr(svc, "_execute_tool_request", withdraw_after_the_tool_ran)
