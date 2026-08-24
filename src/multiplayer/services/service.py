@@ -334,16 +334,19 @@ class _TurnContinuation:
     with what the tool returned, so ``observations`` are the gateway's own records of
     those calls, in order, and they are what the next prompt reasons over.
 
-    ``steer_bound`` is every steer that shaped any prompt of this turn, not only the
-    one that spent her text: the tool output the next prompt reads was fetched under
-    her bound, so dropping it between prompts would launder it. Authority itself is
-    never carried — it is re-derived from durable records at every prompt.
+    ``steerers`` is whoever has steered any prompt of this turn, not only the prompt
+    that spent their text: the tool output the next prompt reads was fetched under
+    their bound, so dropping them between prompts would launder it. It holds the
+    people, never what they held — a set cached here would be an authorization input
+    frozen at the moment it was computed, which is the same mistake migration 020
+    removed a column to end. Every prompt re-derives each steerer's grant from
+    durable records, so narrowing one of them narrows the rest of the turn.
     """
 
     prompt: str
     acting_as: str
     observations: list[str] = field(default_factory=list)
-    steer_bound: frozenset[str] | None = None
+    steerers: set[str] = field(default_factory=set)
 
 
 class MultiplayerService:
@@ -369,11 +372,6 @@ class MultiplayerService:
         self._dispatch_claim = new_id("dispatch")
         # One in-process lease per room, so two drains never do the same pass twice.
         self._ontology_drains: set[str] = set()
-        # Turns holding at a reviewer, by execution id. The decision that releases one
-        # arrives on this process, so this is where the rest of the turn waits. A
-        # restart loses it and the run keeps its approval lease until the sweep
-        # settles it, which is a described end rather than a silent one.
-        self._suspended_turns: dict[str, _TurnContinuation] = {}
 
     async def initialize(self) -> None:
         migrations_dir = Path(__file__).parent.parent / "migrations"
@@ -1437,7 +1435,7 @@ class MultiplayerService:
             return False
         # Nothing will prompt a settled run again, so the turn held for a reviewer is
         # not waiting any more either.
-        self._suspended_turns.pop(run.execution_id, None)
+        await self.repos.suspended_turns.discard(run.execution_id)
         await self._broadcast_persisted_events(events)
         return True
 
@@ -1520,6 +1518,11 @@ class MultiplayerService:
                     )
                 )
                 settled.append(run)
+            # These runs settle here rather than through _settle_run, so the turn any
+            # of them was holding at a reviewer is released here too, in the same
+            # transaction. Nothing prompts a settled run again.
+            for run in settled:
+                await self.repos.suspended_turns.discard(run.execution_id)
             events.append(
                 await self.repos.events.append_with_next_sequence_in_transaction(
                     RoomEvent(
@@ -1548,6 +1551,63 @@ class MultiplayerService:
                 )
             except Exception:
                 log.exception("Could not tell the harness that run %s was settled", run.run_id)
+
+    async def rejoin_agent_to_room(
+        self, agent_id: str, room_id: str, rejoined_by: str, *, require_member: bool = False
+    ) -> AgentRoomMembership:
+        """Put a removed agent back in a room, as a new membership beside the old one.
+
+        Rejoining had no path at all: ``add_room_membership`` is INSERT OR IGNORE, so
+        it silently no-opped against the removed row, and no verb reached it. The
+        only thing that did work was reversing the removal in the database, which
+        erased the departure — which is why the schema now refuses that and this
+        writes a new row naming the departure it follows instead. The record shows
+        the agent joined, left, and came back; nothing in it is overwritten.
+
+        ADMINISTER, the same grant removal takes: putting an agent back in a channel
+        is a membership change, and the removal it reverses was one.
+        """
+        agent = await self.get_agent(agent_id)
+        if agent.room_id != room_id:
+            raise DomainError("agent is not in this room")
+        async with self.db.transaction():
+            if require_member:
+                await self._require_capability_in_transaction(
+                    room_id, rejoined_by, RoomCapability.ADMINISTER
+                )
+            previous = await self.repos.agents.latest_membership(agent_id, room_id)
+            if previous is None:
+                raise DomainError(f"agent {agent_id} has never been a member of room {room_id}")
+            if previous.removed_at is None:
+                raise DomainError(f"agent {agent_id} is already in room {room_id}")
+            membership = AgentRoomMembership(
+                agent_id=agent_id,
+                room_id=room_id,
+                rejoined_from_membership_id=previous.membership_id,
+            )
+            await self.repos.agents.rejoin_room_membership_in_transaction(membership)
+            # The handle went back to the room with the membership, so the returning
+            # agent is addressed again rather than staying unmentionable.
+            handle = await self._issue_handle(room_id, ParticipantType.AGENT, agent_id, agent.name)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.AGENT_REJOINED_ROOM,
+                    payload={
+                        "agent_id": agent_id,
+                        "handle": handle,
+                        "rejoined_by": rejoined_by,
+                        "membership_id": membership.membership_id,
+                        "rejoined_from_membership_id": previous.membership_id,
+                        "left_at": previous.removed_at.isoformat(),
+                    },
+                    actor_id=rejoined_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
+        return membership
 
     async def record_session_update(
         self, run_id: str, credential: str, update: SessionUpdate
@@ -1924,10 +1984,18 @@ class MultiplayerService:
 
     @staticmethod
     def _step_schema(effective: frozenset[str]) -> dict[str, Any]:
-        """Offer only the tools this run may call, so the rest are unavailable."""
+        """Offer only the tools this run may call, so the rest are unavailable.
+
+        And only the actions the server acts on. "delegate" and "wait" were offered
+        and no branch handled either: a model that picked one ended its step having
+        neither answered nor called a tool, and the run was left STREAMING for the
+        lease sweep to mislabel a quarter of an hour later. Offering an action nobody
+        implements is the same defect as leaving a tool unguarded, pointed the other
+        way. A harness that answers outside this schema is still settled, below.
+        """
         offered = allowed_tools(effective)
         properties: dict[str, Any] = {
-            "action": {"type": "string", "enum": ["finish", "delegate", "wait"]},
+            "action": {"type": "string", "enum": ["finish"]},
             "output": {"type": "object"},
         }
         if offered:
@@ -1985,6 +2053,21 @@ class MultiplayerService:
             )
         return terms
 
+    async def _bounded_by_steerers(
+        self, execution: Execution, terms: CapabilityTerms, steerers: frozenset[str]
+    ) -> CapabilityTerms:
+        """Narrow these terms by every person who has steered this turn, as they stand now.
+
+        Each steerer's grant is read from durable records at the moment it is spent,
+        never carried from the prompt that accepted her text. A steer bounds every
+        prompt of the turn it entered, and narrowing her between two of them narrows
+        the second one too.
+        """
+        for steerer in sorted(steerers):
+            authority = (await self._delegated_terms(execution, steerer)).effective
+            terms = terms.bounded_by(authority)
+        return terms
+
     async def _handle_tool_request(
         self,
         execution: Execution,
@@ -1992,7 +2075,7 @@ class MultiplayerService:
         agent: AgentInstance,
         acting_as: str,
         result: dict[str, Any],
-        steer_bound: frozenset[str] | None = None,
+        steerers: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
         """Permission check, policy check, approval gate, execution, audit event.
 
@@ -2008,8 +2091,7 @@ class MultiplayerService:
         terms = await self._capability_terms(
             agent, session.room_id, execution.authorized_by, acting_as
         )
-        if steer_bound is not None:
-            terms = terms.bounded_by(steer_bound)
+        terms = await self._bounded_by_steerers(execution, terms, steerers)
         effective = terms.effective
         tool = str(result.get("tool", ""))
         raw_input = result.get("input")
@@ -2083,7 +2165,17 @@ class MultiplayerService:
         return decide(request.tool, effective), effective
 
     async def _execute_tool_request(self, request: ToolRequest) -> ToolRequest:
-        """Run an authorised tool and audit the outcome. Never raises to the caller."""
+        """Run an authorised tool and audit the outcome. Never raises to the caller.
+
+        The contract was not true. Only RunAuthorityRevoked and DomainError were
+        caught, so add_agent_reaction's membership check — a bare AuthorizationError,
+        which is a PermissionError and not a DomainError — escaped, leaving the
+        request PENDING_APPROVAL under a tool.call_started event that never got a
+        completion or a rejection: a call that started and, in the log, never ended.
+        Every exit below resolves the row and appends a terminal event, and the last
+        clause is a catch-all so an exception nobody anticipated cannot reopen the
+        same hole.
+        """
         await self._append_room_event(
             request.room_id,
             EventType.TOOL_CALL_STARTED,
@@ -2133,6 +2225,25 @@ class MultiplayerService:
                     str(revoked),
                 )
             return replace(request, status="REJECTED", reason=str(revoked))
+        except AuthorizationError as denied:
+            # A refusal, not a failure: the tool was not permitted to this agent at
+            # the moment it ran, which is what tool.call_rejected records.
+            await self.repos.tool_requests.resolve(
+                request.request_id, "REJECTED", str(denied), "{}"
+            )
+            await self._append_room_event(
+                request.room_id,
+                EventType.TOOL_CALL_REJECTED,
+                {
+                    "request_id": request.request_id,
+                    "tool": request.tool,
+                    "required_capability": request.required_capability,
+                    "reason": str(denied),
+                },
+                request.agent_id,
+                "agent",
+            )
+            return replace(request, status="REJECTED", reason=str(denied))
         except DomainError as exc:
             await self.repos.tool_requests.resolve(request.request_id, "FAILED", str(exc), "{}")
             await self._append_room_event(
@@ -2143,6 +2254,23 @@ class MultiplayerService:
                 "agent",
             )
             return replace(request, status="FAILED", reason=str(exc))
+        except Exception as exc:
+            # Nothing gets to end a started tool call by escaping. An error nobody
+            # named is still a failure, and it is recorded as one rather than
+            # unwinding past the audit trail.
+            log.exception(
+                "Tool %s failed unexpectedly for request %s", request.tool, request.request_id
+            )
+            error = f"{type(exc).__name__}: {exc}"
+            await self.repos.tool_requests.resolve(request.request_id, "FAILED", error, "{}")
+            await self._append_room_event(
+                request.room_id,
+                EventType.TOOL_CALL_FAILED,
+                {"request_id": request.request_id, "tool": request.tool, "error": error},
+                request.agent_id,
+                "agent",
+            )
+            return replace(request, status="FAILED", reason=error)
         result_json = json.dumps(output, default=str)
         await self.repos.tool_requests.resolve(
             request.request_id, "EXECUTED", "executed", result_json
@@ -2159,24 +2287,36 @@ class MultiplayerService:
     async def _run_tool(self, request: ToolRequest) -> dict[str, Any]:
         """The registry's executable side. Each tool is a small, auditable action."""
         tool_input = json.loads(request.input_json)
+        # Authority is established before any branch, reads included. This used to be
+        # derived after the read returned, so channel.read_context reached no re-check
+        # at all: an agent removed from the room mid-turn still read the room's
+        # messages back, including ones posted before it was ever mentioned. The
+        # continuation loop turned that one-shot window into a per-prompt one.
+        authorization = await self._run_authorization(request)
         if request.tool == "channel.read_context":
-            messages = await self.repos.messages.list_by_room(request.room_id, limit=20)
+            # A read has no writer of its own to check inside, so the check and the
+            # read are made one transaction here. Disclosure is the mutation a read
+            # performs, and it is gated in the same place a write's would be.
+            async with self.db.transaction():
+                await self._require_run_authority_in_transaction(
+                    authorization, "channel.read_context"
+                )
+                messages = await self.repos.messages.list_by_room(request.room_id, limit=20)
             return {
                 "messages": [
                     {"message_id": m.message_id, "content": m.content, "role": m.role.value}
                     for m in messages
                 ]
             }
-        # The authority re-check belongs inside each writer's own transaction, not
-        # wrapped around this dispatch: these calls open their own transactions, and
-        # Database.transaction() refuses to nest, so a check here would sit outside
-        # the write and relocate check-then-use rather than end it.
-        authorization = await self._run_authorization(request)
+        # Each writer below re-checks inside its own transaction rather than here:
+        # those calls open their own, and Database.transaction() refuses to nest, so
+        # a second check here would sit outside the write and relocate
+        # check-then-use rather than end it.
         if request.tool == "message.react":
-            # The channel the run belongs to is the boundary, checked here rather
-            # than left to the agent-membership check inside the reaction: that one
-            # raises AuthorizationError, which this layer does not catch, so a
-            # cross-channel message id would escape the "never raises" contract.
+            # The channel the run belongs to is the boundary, checked here so a
+            # cross-channel message id is refused as a domain error rather than as
+            # an authorization one: the reaction's own membership check is about who
+            # may react, not about which channel this run belongs to.
             message = await self.get_message(str(tool_input.get("message_id", "")))
             if message.room_id != request.room_id:
                 raise DomainError("message is not in this channel")
@@ -2239,12 +2379,21 @@ class MultiplayerService:
         terminal, so no capability makes it writable again, and an approval granted
         before it settled is not a door back in: complete_execution already refuses a
         settled run's output, and this is the same refusal for the tool writers.
+
+        Room membership is re-read here too. It is the gate every launch door already
+        consults, and a turn outlives the moment it was launched: an agent removed
+        between two prompts of the same turn is no longer in the room its next tool
+        call would act in, whether that call reads or writes.
         """
         run = await self.repos.agent_runs.get(authorization.run_id)
         if run is None or run.harness_state is HarnessState.SETTLED:
             raise RunAuthorityRevoked(authorization, stage)
         agent = await self.repos.agents.get_instance(authorization.agent_id)
         if agent is None:
+            raise RunAuthorityRevoked(authorization, stage)
+        if not await self.repos.agents.has_room_membership(
+            authorization.agent_id, authorization.room_id
+        ):
             raise RunAuthorityRevoked(authorization, stage)
         terms = await self._capability_terms(
             agent,
@@ -2293,11 +2442,12 @@ class MultiplayerService:
     ) -> dict[str, Any]:
         """Prompt, feed the tool result back, prompt again, until something ends it.
 
-        Exactly three things end it, and each is a state a reader can name: the model
-        answering (or choosing an action the server does not continue), a tool that
-        needs a human, which suspends the turn in the run's approval state, and the
-        run spending its last attempt, which parks it. None of them leaves the run
-        RUNNING with nobody about to prompt it.
+        Everything that ends it leaves a state a reader can name: the model answering,
+        a tool that needs a human, which suspends the turn in the run's approval
+        state, the run spending its last attempt, which parks it, a cancellation,
+        which settles it CANCELLED, and a step that neither answered nor called a
+        tool, which settles it FAILED. None of them leaves the run RUNNING with
+        nobody about to prompt it.
         """
         while True:
             result = await self._execute_one_agent_step(execution_id, turn)
@@ -2305,8 +2455,13 @@ class MultiplayerService:
             if not isinstance(request, dict):
                 return result
             if str(request.get("status")) == "PENDING_APPROVAL":
-                # The reviewer holds the turn now; approve_action resumes it here.
-                self._suspended_turns[execution_id] = turn
+                # The reviewer holds the turn now. It is parked durably rather than
+                # in this process's memory: the decision that releases it can be
+                # made on any process, and one that found nothing to resume left the
+                # run on a fresh STREAMING lease with nobody about to prompt it.
+                await self.repos.suspended_turns.save(
+                    execution_id, turn.prompt, turn.acting_as, turn.observations, turn.steerers
+                )
                 return result
             turn.observations.append(self._tool_observation(request))
             parked = await self._park_if_attempts_spent(execution_id, turn.acting_as, result)
@@ -2376,6 +2531,32 @@ class MultiplayerService:
             "settlement": RunSettlement.PARKED.value,
         }
 
+    async def _settle_turn_without_answer(
+        self,
+        execution: Execution,
+        acting_as: str,
+        result: dict[str, Any],
+        settlement: RunSettlement,
+        status: AgentStatus,
+        error: str,
+    ) -> dict[str, Any]:
+        """End a step that produced no answer, now, in a state a reader can name.
+
+        Two things reach here, and neither used to end anything. A turn cancelled
+        mid-continuation came back with a cancelled stop reason and no tool request,
+        so the loop returned and the run sat STREAMING with a NULL settlement until
+        the lease sweep called it PARKED — "turn stopped without an answer", which is
+        untrue of a run somebody cancelled, and non-resumable besides. And an action
+        the server does not continue fell through the dispatch below to the same
+        silence. Settling here is what makes the loop's promise true: nothing leaves
+        this method with the run RUNNING and nobody about to prompt it.
+        """
+        run = await self.repos.agent_runs.get_by_execution(execution.execution_id)
+        if run is not None and run.harness_state is not HarnessState.SETTLED:
+            await self._settle_run(run, settlement, acting_as or "system", error)
+            await self._set_agent_status_safe(execution.agent_id, status)
+        return {**result, "error": error, "settlement": settlement.value}
+
     async def _execute_one_agent_step(
         self, execution_id: str, continuation: _TurnContinuation
     ) -> dict[str, Any]:
@@ -2432,13 +2613,9 @@ class MultiplayerService:
         # A steer bounds every prompt of the turn it entered, so the bound this turn
         # already carries is the floor the new ones narrow, never a set they replace.
         steers = await self.repos.interventions.list_unconsumed(execution_id)
-        steer_bound = continuation.steer_bound
-        for steer in steers:
-            authority = (await self._delegated_terms(execution, steer.intervened_by)).effective
-            steer_bound = authority if steer_bound is None else steer_bound & authority
-        if steer_bound is not None:
-            terms = terms.bounded_by(steer_bound)
-        continuation.steer_bound = steer_bound
+        continuation.steerers.update(steer.intervened_by for steer in steers)
+        steerers = frozenset(continuation.steerers)
+        terms = await self._bounded_by_steerers(execution, terms, steerers)
 
         source_prompt = prompt
         provider_prompt = prompt
@@ -2548,9 +2725,18 @@ class MultiplayerService:
             await self._broadcast_persisted_events(persisted_events)
             await self._set_agent_status_safe(execution.agent_id, AgentStatus.FAILED)
             return result
+        if result.get("status") == "cancelled":
+            return await self._settle_turn_without_answer(
+                execution,
+                acting_as,
+                result,
+                RunSettlement.CANCELLED,
+                AgentStatus.IDLE,
+                "cancelled while the turn was in flight",
+            )
         if result.get("action") == "tool":
             return await self._handle_tool_request(
-                execution, session, agent, acting_as, result, steer_bound
+                execution, session, agent, acting_as, result, steerers
             )
         if result.get("action") == "finish":
             raw_output = result.get("result")
@@ -2623,7 +2809,16 @@ class MultiplayerService:
             await self._set_agent_status_safe(execution.agent_id, AgentStatus.COMPLETED)
             await self._set_agent_status_safe(execution.agent_id, AgentStatus.IDLE)
             result["output_id"] = output.output_id
-        return result
+            return result
+        return await self._settle_turn_without_answer(
+            execution,
+            acting_as,
+            result,
+            RunSettlement.FAILED,
+            AgentStatus.FAILED,
+            f"step returned {str(result.get('action', '')) or 'no action'}, "
+            "which is not an answer and not a tool call",
+        )
 
     async def execute_branch_run(
         self, branch_id: str, execution_id: str, acting_as: str = ""
@@ -4886,9 +5081,15 @@ class MultiplayerService:
         step would. The approval is committed, and failing it here would tell the
         reviewer her decision was lost when it was not.
         """
-        turn = self._suspended_turns.pop(execution_id, None)
-        if turn is None:
+        parked = await self.repos.suspended_turns.claim(execution_id)
+        if parked is None:
             return
+        turn = _TurnContinuation(
+            prompt=str(parked["prompt"]),
+            acting_as=str(parked["acting_as"]),
+            observations=list(parked["observations"]),
+            steerers=set(parked["steerers"]),
+        )
         if request is not None:
             response = self._tool_response(request)
             turn.observations.append(self._tool_observation(response["tool_request"]))
@@ -4991,7 +5192,7 @@ class MultiplayerService:
             # this run again. That is here.
             await self._resume_suspended_turn(approval.execution_id, pending)
         else:
-            self._suspended_turns.pop(approval.execution_id, None)
+            await self.repos.suspended_turns.discard(approval.execution_id)
         return approval
 
     async def _end_refused_approval_in_transaction(

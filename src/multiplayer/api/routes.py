@@ -1002,6 +1002,28 @@ async def remove_agent_from_room(
     return {"status": "removed"}
 
 
+@router.post("/rooms/{room_id}/agents/{agent_id}/memberships")
+async def rejoin_agent_to_room(
+    room_id: str,
+    agent_id: str,
+    principal: CurrentUser,
+) -> dict[str, str]:
+    """Put a removed agent back, as a new membership beside the departure it follows."""
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.ADMINISTER)
+    try:
+        membership = await svc.rejoin_agent_to_room(
+            agent_id, room_id, principal.user_id, require_member=True
+        )
+    except DomainError as e:
+        raise HTTPException(400, str(e)) from e
+    return {
+        "status": "rejoined",
+        "membership_id": membership.membership_id,
+        "rejoined_from_membership_id": membership.rejoined_from_membership_id or "",
+    }
+
+
 @router.get("/rooms/{room_id}/agents")
 async def list_room_agents(
     room_id: str,

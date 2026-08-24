@@ -193,10 +193,18 @@ class AgentInstance:
 
 @dataclass(frozen=True, slots=True)
 class AgentRoomMembership:
+    """One spell in a room. An agent that leaves and returns has two of these.
+
+    A rejoin names the departure it follows, as a resumed run names the run it
+    continues, so returning never erases the fact of having left.
+    """
+
     agent_id: str
     room_id: str
+    membership_id: str = field(default_factory=lambda: new_id("member"))
     joined_at: datetime = field(default_factory=utcnow)
     removed_at: datetime | None = None
+    rejoined_from_membership_id: str | None = None
 
 
 # ── Agent identity, addressing, and the run envelope ─────────────────────────

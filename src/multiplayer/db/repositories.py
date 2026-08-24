@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -18,6 +18,7 @@ from ..domain.models import (
     AgentIdentity,
     AgentInstance,
     AgentOutput,
+    AgentRoomMembership,
     AgentRun,
     AgentStatus,
     AgentTemplate,
@@ -102,7 +103,7 @@ from ..domain.models import (
     weakest_review_status,
 )
 from ..security.authorization import RoomCapability, roles_with_capability
-from .connection import Database, serialize_datetime
+from .connection import Database, deserialize_datetime, serialize_datetime
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +127,7 @@ class Repos:
         self.sessions = SessionRepo(db)
         self.executions = ExecutionRepo(db)
         self.interventions = ExecutionInterventionRepo(db)
+        self.suspended_turns = SuspendedTurnRepo(db)
         self.agent_outputs = AgentOutputRepo(db)
         self.output_selections = OutputSelectionRepo(db)
         self.branch_syntheses = BranchSynthesisRepo(db)
@@ -927,13 +929,58 @@ class AgentRepo:
         )
         await self.db.commit()
 
-    async def add_room_membership(self, membership: Any) -> None:
+    async def add_room_membership(self, membership: AgentRoomMembership) -> None:
         await self.db.execute(
-            "INSERT OR IGNORE INTO agent_room_memberships(agent_id, room_id, joined_at) "
-            "VALUES (?, ?, ?)",
-            (membership.agent_id, membership.room_id, serialize_datetime(membership.joined_at)),
+            "INSERT OR IGNORE INTO agent_room_memberships("
+            "membership_id, agent_id, room_id, joined_at, rejoined_from_membership_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                membership.membership_id,
+                membership.agent_id,
+                membership.room_id,
+                serialize_datetime(membership.joined_at),
+                membership.rejoined_from_membership_id,
+            ),
         )
         await self.db.commit()
+
+    async def latest_membership(self, agent_id: str, room_id: str) -> AgentRoomMembership | None:
+        """This agent's most recent spell in this room, live or ended."""
+        row = await self.db.fetch_one(
+            "SELECT * FROM agent_room_memberships WHERE agent_id = ? AND room_id = ? "
+            "ORDER BY joined_at DESC, rowid DESC LIMIT 1",
+            (agent_id, room_id),
+        )
+        if row is None:
+            return None
+        return AgentRoomMembership(
+            agent_id=row["agent_id"],
+            room_id=row["room_id"],
+            membership_id=row["membership_id"],
+            joined_at=datetime.fromisoformat(row["joined_at"]),
+            removed_at=deserialize_datetime(row["removed_at"]),
+            rejoined_from_membership_id=row["rejoined_from_membership_id"],
+        )
+
+    async def rejoin_room_membership_in_transaction(self, membership: AgentRoomMembership) -> None:
+        """Write the returning agent a new membership beside the departure it names.
+
+        A plain INSERT, not OR IGNORE: the guards on this table decide whether a
+        rejoin is legitimate, and a silence here would hide their answer, which is
+        exactly how the old INSERT OR IGNORE managed to no-op against a removed row.
+        """
+        await self.db.execute(
+            "INSERT INTO agent_room_memberships("
+            "membership_id, agent_id, room_id, joined_at, rejoined_from_membership_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                membership.membership_id,
+                membership.agent_id,
+                membership.room_id,
+                serialize_datetime(membership.joined_at),
+                membership.rejoined_from_membership_id,
+            ),
+        )
 
     async def remove_room_membership_in_transaction(
         self, agent_id: str, room_id: str, removed_at: datetime
@@ -1768,6 +1815,71 @@ class ExecutionInterventionRepo:
             else None,
             created_at=datetime.fromisoformat(row["created_at"]),
         )
+
+
+class SuspendedTurnRepo:
+    """The rest of a turn that stopped at a reviewer, held where any process finds it.
+
+    Records only, never authority: the prompt, what this turn's tools already
+    returned, and who has steered it. The step that resumes re-derives every
+    capability from durable rows, as every other step does.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def save(
+        self,
+        execution_id: str,
+        prompt: str,
+        acting_as: str,
+        observations: Sequence[str],
+        steerers: Iterable[str],
+    ) -> None:
+        await self.db.execute(
+            "INSERT OR REPLACE INTO suspended_turns("
+            "execution_id, prompt, acting_as, observations, steerers, suspended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                execution_id,
+                prompt,
+                acting_as,
+                json.dumps(list(observations)),
+                json.dumps(sorted(set(steerers))),
+                utcnow().isoformat(),
+            ),
+        )
+        await self.db.commit()
+
+    async def claim(self, execution_id: str) -> dict[str, Any] | None:
+        """Take the continuation, so exactly one caller carries the turn on.
+
+        The delete is what claims it. A second process reaching here after the first
+        deletes nothing and is told there is no turn to resume, rather than both
+        prompting the same run.
+        """
+        row = await self.db.fetch_one(
+            "SELECT * FROM suspended_turns WHERE execution_id = ?", (execution_id,)
+        )
+        if row is None:
+            return None
+        cursor = await self.db.execute(
+            "DELETE FROM suspended_turns WHERE execution_id = ?", (execution_id,)
+        )
+        await self.db.commit()
+        if cursor.rowcount != 1:
+            return None
+        return {
+            "prompt": row["prompt"],
+            "acting_as": row["acting_as"],
+            "observations": [str(item) for item in json.loads(row["observations"])],
+            "steerers": frozenset(str(item) for item in json.loads(row["steerers"])),
+        }
+
+    async def discard(self, execution_id: str) -> None:
+        """Nothing will prompt this run again, so nothing is waiting to resume it."""
+        await self.db.execute("DELETE FROM suspended_turns WHERE execution_id = ?", (execution_id,))
+        await self.db.commit()
 
 
 class AgentOutputRepo:

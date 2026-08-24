@@ -24,6 +24,9 @@ class EventType(StrEnum):
     USER_REMOVED_ROOM = "user.removed_room"
     AGENT_JOINED_ROOM = "agent.joined_room"
     AGENT_LEFT_ROOM = "agent.left_room"
+    # A distinct event from a first join: the room's record shows the agent left and
+    # came back, rather than showing it joining twice with nothing in between.
+    AGENT_REJOINED_ROOM = "agent.rejoined_room"
 
     # Messages
     MESSAGE_CREATED = "message.created"

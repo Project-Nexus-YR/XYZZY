@@ -177,11 +177,13 @@ async def test_a_run_whose_effective_set_excludes_the_tool_is_never_offered_it(
         result = await svc.execute_agent_step(execution_id, "Assess the deploy.", "owner")
 
         # No tool is offered, so "tool" is not one of the actions either, and the
-        # answer fails to decode rather than being flattened into a finish.
+        # answer fails to decode rather than being flattened into a finish. "finish"
+        # is the only action left: "delegate" and "wait" were offered while no branch
+        # handled either, which left the run open for the lease sweep to mislabel.
         assert _offered_tools(transport) == []
         assert transport.requests[-1]["text"]["format"]["schema"]["properties"]["action"][
             "enum"
-        ] == ["finish", "delegate", "wait"]
+        ] == ["finish"]
         assert result["status"] == "error"
         assert result["error"] == "model provider chose an action this run did not offer"
         execution = await svc.repos.executions.get(execution_id)
