@@ -420,6 +420,17 @@ def _safe_enum(value: str, enum_cls: type[EnumT], name: str) -> EnumT:
 
 @router.get("/health")
 async def health() -> dict[str, str]:
+    """Readiness, not liveness.
+
+    A process that is up holding a database it cannot read is not ready to serve,
+    and a probe that returns a constant cannot tell the two apart. This one reads.
+    """
+    svc = _svc_or_404()
+    try:
+        await svc.db.fetch_one("SELECT 1 AS ok")
+    except Exception as exc:
+        log.exception("Readiness probe could not read the database")
+        raise HTTPException(503, "database unavailable") from exc
     return {"status": "ok"}
 
 
