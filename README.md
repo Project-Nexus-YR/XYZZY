@@ -101,13 +101,36 @@ without presenting placeholder text as real analysis.
 
 ## Local Installation
 
+Python 3.11 or newer and nothing else. The database is a file, so there is no
+service to stand up first.
+
+macOS and Linux:
+
 ```bash
 git clone https://github.com/Yasser-Ameur/XYZZY.git
 cd XYZZY
-python -m venv .venv
-.venv\Scripts\activate        # Windows
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+Windows PowerShell:
+
+```powershell
+git clone https://github.com/Yasser-Ameur/XYZZY.git
+cd XYZZY
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+```
+
+macOS has shipped no `python` command since 12.3, and `/usr/bin/python3` is a
+stub that offers to install the Command Line Tools rather than an interpreter
+worth building against, so create the virtualenv with a real `python3` —
+`brew install python@3.13`, or the installer from python.org. Once `.venv` is
+activated, plain `python` is that virtualenv's interpreter and every command
+below works as written. Apple silicon needs nothing special: every dependency
+resolves to an arm64 wheel.
 
 ## Running
 
@@ -129,7 +152,7 @@ python -m multiplayer.manage multiplayer.db token list
 ```
 
 ```bash
-# Start the server (serves API + web UI). POSIX shells:
+# Start the server (serves API + web UI). POSIX shells - macOS zsh, Linux bash:
 export XYZZY_AUTH_TOKENS='{"local-dev-token":"user_local"}'
 export OPENAI_API_KEY="..."                 # optional; simulated when unset
 export XYZZY_OPENAI_MODEL="gpt-5.4-mini" # optional; this is the default
@@ -177,6 +200,86 @@ fleet's; two replicas behind a load balancer each allow the full budget.
 database and answers 503 when it cannot, so a process holding an unopenable
 database is never reported ready.
 
+### Signing in through an identity provider
+
+SSO is additive. With none of these set the server behaves exactly as before —
+bootstrap tokens and `manage token mint` — so a deployment without a provider is
+untouched.
+
+| Variable | What it decides |
+| --- | --- |
+| `XYZZY_OIDC_ISSUER` | The provider's issuer URL. Its configuration is discovered from `{issuer}/.well-known/openid-configuration`. |
+| `XYZZY_OIDC_CLIENT_ID` | This deployment's client id. |
+| `XYZZY_OIDC_CLIENT_SECRET` | Optional; omit for a public client relying on PKCE alone. |
+| `XYZZY_OIDC_REDIRECT_URI` | Where the provider sends the browser back. |
+| `XYZZY_OIDC_SCOPES` | Space separated; `openid profile email` by default. |
+| `XYZZY_OIDC_POST_LOGOUT_REDIRECTS` | Comma-separated allowlist. A redirect target taken from a request would be an open redirect. |
+| `XYZZY_SESSION_IDLE_SECONDS` | Idle clock, 1800 by default — Keycloak's. |
+| `XYZZY_SESSION_ABSOLUTE_SECONDS` | Absolute ceiling, 36000 by default — Keycloak's. |
+| `XYZZY_SESSION_ACCESS_SECONDS` | How long one access credential lives before it must be refreshed, 300 by default — Keycloak's. |
+| `XYZZY_OIDC_ALLOW_UNVERIFIABLE_SESSIONS` | Accept a login from a provider that issues no refresh token. Off by default, because such a session can never be re-checked; when on, it is capped at 15 minutes. |
+
+`GET /api/v1/auth/login` starts the flow, `GET /api/v1/auth/callback` finishes it
+and returns an access token and a refresh token, `POST /api/v1/auth/refresh`
+rotates them, `POST /api/v1/auth/logout` ends this session,
+`POST /api/v1/auth/logout-everywhere` ends all of them, and
+`POST /api/v1/auth/backchannel-logout` accepts the provider's logout token.
+Every one of them sits under the `/api/v1` prefix, so `XYZZY_OIDC_REDIRECT_URI`
+must too.
+
+Three things worth knowing before you deploy it. A refresh token is spendable
+once, and presenting a spent one revokes the entire session rather than that
+token — a replay means a copy exists somewhere it should not, and revoking only
+the copy leaves whoever holds the original inside. And an SSO login is keyed on
+the provider's issuer and subject, never on the email address, so it does **not**
+attach to an operator-created account that happens to share an email. Linking
+those is a deliberate act; inferring it from a string is how accounts get taken
+over. And there is no reuse grace window: a refresh
+whose answer is lost cannot be retried, and the person signs in again. A window
+was tried and removed, because it let a thief presenting the stolen predecessor
+take a working session and leave the victim's own next refresh to be judged the
+replay. Keycloak's default is no reuse either.
+
+Every refresh also spends the provider's own refresh token, so a person
+disabled, locked out, or password-reset upstream loses this session at the next
+rotation rather than at the absolute clock.
+
+### Talking to other agents
+
+XYZZY speaks Google's [A2A](https://a2a-protocol.org/) v0.3.0, so an agent built
+against somebody else's runtime can be asked for work here, and one of ours can
+ask it back.
+
+`GET /.well-known/agent-card.json` is the discovery document and needs no
+credential. It advertises the door and **no agents at all**: a room's membership
+is the access-control decision, so a public list of agents and their skills
+would publish the shape of a private workspace to anyone who fetched a URL. The
+authenticated `agent/getAuthenticatedExtendedCard` shows each caller only the
+agents that caller could actually address, which means no two callers share one
+document.
+
+`POST /a2a/v1` is the JSON-RPC 2.0 endpoint: `message/send`, `message/stream`,
+`tasks/get`, `tasks/cancel`, `tasks/resubscribe`,
+`agent/getAuthenticatedExtendedCard`, and the two `tasks/pushNotificationConfig`
+methods. The card advertises `pushNotifications: false` and those two refuse by
+name — a webhook fan-out would be a second delivery path with weaker guarantees
+than the durable ordered log clients already have. Streaming is
+Server-Sent-Events over that same log, not a parallel one.
+
+A2A addresses one agent per URL and this server fronts many rooms, so
+`message.metadata` carries `roomId` and `targetAgentId`. A caller who may not act
+in a room gets the same refusal whether the agent is real, filed elsewhere, or
+imaginary; a task you may not read answers exactly as a task that does not exist.
+
+Two rules about delegation are worth knowing before you wire agents to each
+other. What a delegate may spend is its asker's own authority intersected with
+its own, re-read from durable rows at the moment of spending — narrow the asker
+mid-task and the delegate narrows with it, and an asker that has left the room
+lends nothing. And the chain a delegation belongs to is read from the delegating
+agent's own open run rather than taken from the request, so an agent cannot
+start a fresh chain by declining to name its parent: a cycle is refused by name,
+and a chain deeper than four delegations is too.
+
 ### Docker
 
 ```bash
@@ -203,7 +306,7 @@ python -m pytest tests/regression/ -v
 
 ## Current Status
 
-The current repository gate is 734 passing tests plus Ruff format/check and strict `mypy src`,
+The current repository gate is 857 passing tests plus Ruff format/check and strict `mypy src`,
 run on every push and pull request by `.github/workflows/ci.yml`.
 The suite covers:
 - Unit tests for domain models
@@ -219,16 +322,14 @@ The suite covers:
 - **Live model credentials are not exercised in CI** — provider behavior is verified with a fake
   HTTP transport; a real Responses API run requires a server-side `OPENAI_API_KEY`
 - **Single-process** — no Redis/Postgres for horizontal scaling
-- **Token allowlist authentication** — deterministic Bearer identity and role authorization are
-  implemented, but external SSO/session lifecycle is not
 
 ## Roadmap
 
 - [x] OpenAI Responses API model-provider integration
 - [x] Persistent file-backed SQLite storage
 - [x] Opaque Bearer identity and room authorization
-- [ ] External SSO and production session lifecycle
-- [ ] Agent-to-agent messaging and negotiation
+- [x] External SSO and production session lifecycle
+- [x] Agent-to-agent messaging and negotiation
 - [ ] File upload and binary artifact support
 - [ ] Room templates and quickstart configurations
 - [ ] Agent marketplace and custom agent creation
