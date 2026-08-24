@@ -201,6 +201,46 @@ async def test_a_meta_read_over_a_backlog_changes_nothing_and_still_reports_the_
 
 
 @pytest.mark.asyncio
+async def test_an_extractor_with_no_cursor_row_reports_the_whole_log_as_lag() -> None:
+    """An extractor that has never run has drained nothing, so it is the furthest behind.
+
+    Nothing wakes the asynchronous drain, so a room whose structured pass has caught
+    up with head still has every message undrained. Taking the minimum over only the
+    cursor rows that happen to exist made that backlog invisible and reported the
+    room as entirely current — the one disclosure the deferred drain depends on.
+    """
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        service = await _service(db)
+        room_id = await _seed_room(service)
+        # Twice, so the structured pass also drains the events it emitted itself.
+        await service.run_ontology_extraction(room_id, OntologyExtractor.IMMEDIATE)
+        await service.run_ontology_extraction(room_id, OntologyExtractor.IMMEDIATE)
+        for text in (
+            "Ship the gateway is blocked by Rotate the keys",
+            "second",
+            "third",
+            "fourth",
+            "fifth",
+        ):
+            await service.send_message(room_id, MessageRole.HUMAN, "owner", text)
+        await service.run_ontology_extraction(room_id, OntologyExtractor.IMMEDIATE)
+
+        counts = await _counts(db, room_id)
+        assert counts["cursors"] == {"IMMEDIATE": counts["head"]}
+        assert not [
+            item
+            for item in await service.repos.ontology.list_relationships(room_id)
+            if item.extractor is OntologyExtractor.ASYNC
+        ]
+        answer = await service.answer_decision_meta(room_id, "what is the status", user_id="viewer")
+        assert answer["freshness"]["drain_lag_events"] == counts["head"]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_migration_017_guards_its_cursor_and_backfills_legacy_assertions() -> None:
     db = Database(":memory:")
     await db.connect()

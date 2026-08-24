@@ -5089,7 +5089,9 @@ class MultiplayerService:
         """The asynchronous drain, under one in-process lease per room.
 
         Inference is slow and fallible, so it never sits in a write path; the lease
-        keeps two drains for one room from doing the same pass twice.
+        keeps two drains for one room from doing the same pass twice. Nothing
+        schedules a call to it yet, and no read path may make one, so a room's
+        asynchronous backlog is disclosed by `drain_lag_events` rather than hidden.
         """
         if room_id in self._ontology_drains:
             return None
@@ -5518,7 +5520,11 @@ class MultiplayerService:
     ) -> dict[str, Any]:
         """Freshness, computed inside the authorized scope like every other aggregate."""
         cursors = await self.repos.meta.extraction_cursors(room_id, user_id)
-        drained_to = min(cursors.values()) if cursors else 0
+        # An extractor with no cursor row has drained nothing, so it is the furthest
+        # behind, not absent. Reading only the rows that exist made a room whose
+        # asynchronous drain had never run report that everything was current — and
+        # nothing wakes that drain today, so it is the ordinary case, not an edge.
+        drained_to = min(cursors.get(extractor.value, 0) for extractor in OntologyExtractor)
         positions = [
             int(claim["asserted_at_sequence"]) for claim in claims if not claim.get("hidden")
         ]

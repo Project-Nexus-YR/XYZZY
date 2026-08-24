@@ -11,6 +11,7 @@ from multiplayer.api import routes
 from multiplayer.db.connection import Database
 from multiplayer.domain.meta import (
     ACCEPTED_QUESTIONS,
+    REFUSAL_PREFIX,
     MetaQuestionKind,
     _bears_surveillance_marker,
     classify_meta_question,
@@ -118,6 +119,78 @@ def test_refusal_pass_is_not_shadowed_by_the_exact_match_pass(
 def test_normalization_is_stable_across_whitespace_case_and_punctuation(written: str) -> None:
     assert normalize_question(written) == "why was this decision made"
     assert classify_meta_question(written) is MetaQuestionKind.WHY_DECISION
+
+
+@pytest.mark.parametrize(
+    ("written", "normalized"),
+    [
+        ("What's the status?", "what is the status"),
+        ("What’s the status", "what is the status"),
+        ("Where's the disagreement", "where is the disagreement"),
+        ("WHAT-IS-THE-STATUS", "what is the status"),
+        ("what is the team's status", "what is the teams status"),
+        ("Aren't there any blockers?", "are not there any blockers"),
+    ],
+)
+def test_normalization_folds_contractions_apostrophes_and_punctuation(
+    written: str, normalized: str
+) -> None:
+    """One question written two ways is one key; two questions never become one."""
+    assert normalize_question(written) == normalized
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("What's the status?", MetaQuestionKind.STATUS),
+        ("How are things going?", MetaQuestionKind.STATUS),
+        ("Give me a status update", MetaQuestionKind.STATUS),
+        ("What's blocking us?", MetaQuestionKind.BLOCKERS),
+        ("Are there any blockers?", MetaQuestionKind.BLOCKERS),
+        ("What's in the way?", MetaQuestionKind.BLOCKERS),
+        ("What's new?", MetaQuestionKind.CHANGES),
+        ("What's changed lately?", MetaQuestionKind.CHANGES),
+        ("Any updates?", MetaQuestionKind.CHANGES),
+        ("What decisions are pending?", MetaQuestionKind.DECISIONS),
+        ("What do we need to decide?", MetaQuestionKind.DECISIONS),
+        ("What are we disagreeing about?", MetaQuestionKind.DISAGREEMENT),
+        ("Where do we disagree?", MetaQuestionKind.DISAGREEMENT),
+    ],
+)
+def test_meta_resolves_the_ordinary_phrasing_of_each_supported_kind(
+    question: str, expected: MetaQuestionKind
+) -> None:
+    """Thirteen phrasings a person actually types, every one of them refused before."""
+    assert classify_meta_question(question) is expected
+
+
+def test_every_accepted_form_is_already_normalized() -> None:
+    """A key normalization would rewrite is a key no question can ever reach."""
+    assert [form for form in ACCEPTED_QUESTIONS if normalize_question(form) != form] == []
+
+
+def test_no_accepted_form_survives_a_surveillance_marker() -> None:
+    """Widening the corpus cannot launder a productivity question into an answer."""
+    for form in ACCEPTED_QUESTIONS:
+        for marker in ("ranked by person", "by productivity", "for the top 5"):
+            with pytest.raises(DomainError, match="unsupported Meta question"):
+                classify_meta_question(f"{form} {marker}")
+
+
+def test_an_off_corpus_refusal_says_what_meta_can_answer() -> None:
+    """Useful enough to rephrase from, without publishing the corpus or the question."""
+    messages = set()
+    for question in ("what is the weather", "give me the payroll numbers", "read the codebase"):
+        with pytest.raises(DomainError) as raised:
+            classify_meta_question(question)
+        assert question not in str(raised.value)
+        messages.add(str(raised.value))
+    # One constant refusal, so it cannot leak which form a question nearly matched.
+    assert len(messages) == 1
+    message = messages.pop()
+    assert message.startswith(REFUSAL_PREFIX)
+    for subject in ("stand", "blocked", "changed", "decisions", "disagreement", "evidence"):
+        assert subject in message
 
 
 async def _seed_assertion_room(service: MultiplayerService) -> str:

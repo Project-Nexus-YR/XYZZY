@@ -7,6 +7,10 @@ else refuses. There is no nearest-kind fallback, ever: an ordered table of
 compiled patterns was measured against the refusal corpus and made 8 of 11
 questions answer with the *wrong* kind rather than refuse, and answering
 confidently about the wrong thing is worse than refusing.
+
+The vocabulary widens in the two directions that keep that guarantee: harder
+normalization, which folds spellings of one question together and can never fold
+two questions together, and more hand-written forms, which leaves the set closed.
 """
 
 from __future__ import annotations
@@ -49,9 +53,47 @@ class OntologyAssurance(StrEnum):
     UNCONFIRMED_AI = "UNCONFIRMED_AI"
 
 
+# Written out rather than inferred, because a rule that guesses which contraction
+# was meant is a pattern by another name. Every entry is a fixed substitution.
+_CONTRACTIONS = {
+    "what's": "what is",
+    "where's": "where is",
+    "who's": "who is",
+    "how's": "how is",
+    "that's": "that is",
+    "there's": "there is",
+    "it's": "it is",
+    "we're": "we are",
+    "we've": "we have",
+    "they're": "they are",
+    "i'm": "i am",
+    "let's": "let us",
+    "don't": "do not",
+    "doesn't": "does not",
+    "didn't": "did not",
+    "isn't": "is not",
+    "aren't": "are not",
+    "hasn't": "has not",
+    "haven't": "have not",
+    "can't": "cannot",
+    "won't": "will not",
+}
+_TYPOGRAPHIC_APOSTROPHES = str.maketrans({"’": "'", "ʼ": "'"})
+_NOT_WORD = re.compile(r"[^a-z0-9_']+")
+
+
 def normalize_question(question: str) -> str:
-    """Exactly the normalization the two decision kinds have always used."""
-    return " ".join(question.strip().lower().split()).rstrip("?!. ")
+    """Fold spelling, so two writings of one question become one key.
+
+    Case, whitespace and punctuation carry no meaning here, and a contraction or a
+    possessive apostrophe is a spelling of the same words. Every step is a fixed
+    substitution: it can merge two spellings of one question, and unlike a pattern
+    it can never merge two different questions. `'s` always expands to `is`, so a
+    corpus key is a normalized spelling rather than a sentence.
+    """
+    folded = _NOT_WORD.sub(" ", question.lower().translate(_TYPOGRAPHIC_APOSTROPHES))
+    expanded = " ".join(_CONTRACTIONS.get(word, word) for word in folded.split())
+    return " ".join(expanded.replace("'", "").split())
 
 
 def _phrases(*phrases: str) -> re.Pattern[str]:
@@ -108,27 +150,117 @@ def _bears_surveillance_marker(normalized: str) -> bool:
 
 
 # Every accepted form, normalized. A form belongs to exactly one kind, so a new
-# form cannot silently widen a neighbouring kind.
+# form cannot silently widen a neighbouring kind. The five room-wide kinds carry
+# the ordinary ways a person asks them, written out one at a time: a larger
+# hand-written set is still a closed set, and it is the only way to widen this
+# vocabulary that cannot resolve a question to a kind nobody asked for.
 ACCEPTED_QUESTIONS: dict[str, MetaQuestionKind] = {
     "status": MetaQuestionKind.STATUS,
+    "status update": MetaQuestionKind.STATUS,
     "what is the status": MetaQuestionKind.STATUS,
     "what is the current status": MetaQuestionKind.STATUS,
+    "what is the status here": MetaQuestionKind.STATUS,
+    "what is the status of this": MetaQuestionKind.STATUS,
+    "give me a status update": MetaQuestionKind.STATUS,
+    "give me the status": MetaQuestionKind.STATUS,
+    "how are things going": MetaQuestionKind.STATUS,
+    "how is it going": MetaQuestionKind.STATUS,
+    "how is this going": MetaQuestionKind.STATUS,
+    "how are we doing": MetaQuestionKind.STATUS,
+    "what is going on": MetaQuestionKind.STATUS,
+    "what is happening": MetaQuestionKind.STATUS,
     "where do things stand": MetaQuestionKind.STATUS,
+    "where does this stand": MetaQuestionKind.STATUS,
+    "where do we stand": MetaQuestionKind.STATUS,
+    "where are we": MetaQuestionKind.STATUS,
+    "where are we at": MetaQuestionKind.STATUS,
+    "what is the current state": MetaQuestionKind.STATUS,
+    "what is the state of things": MetaQuestionKind.STATUS,
+    "summarize the status": MetaQuestionKind.STATUS,
+    "catch me up": MetaQuestionKind.STATUS,
+    "bring me up to speed": MetaQuestionKind.STATUS,
     "blockers": MetaQuestionKind.BLOCKERS,
+    "any blockers": MetaQuestionKind.BLOCKERS,
     "what is blocking": MetaQuestionKind.BLOCKERS,
+    "what is blocking us": MetaQuestionKind.BLOCKERS,
+    "what is blocking this": MetaQuestionKind.BLOCKERS,
+    "what is blocking progress": MetaQuestionKind.BLOCKERS,
     "what is blocked": MetaQuestionKind.BLOCKERS,
+    "what is being blocked": MetaQuestionKind.BLOCKERS,
     "what are the blockers": MetaQuestionKind.BLOCKERS,
+    "what blockers are there": MetaQuestionKind.BLOCKERS,
+    "are there any blockers": MetaQuestionKind.BLOCKERS,
+    "is there anything blocking us": MetaQuestionKind.BLOCKERS,
+    "is anything blocked": MetaQuestionKind.BLOCKERS,
+    "show the blockers": MetaQuestionKind.BLOCKERS,
+    "list the blockers": MetaQuestionKind.BLOCKERS,
+    "what is in the way": MetaQuestionKind.BLOCKERS,
+    "what is stuck": MetaQuestionKind.BLOCKERS,
+    "what is holding us up": MetaQuestionKind.BLOCKERS,
+    "what is holding this up": MetaQuestionKind.BLOCKERS,
+    "what is slowing us down": MetaQuestionKind.BLOCKERS,
+    "what needs unblocking": MetaQuestionKind.BLOCKERS,
     "changes": MetaQuestionKind.CHANGES,
     "what changed": MetaQuestionKind.CHANGES,
     "what changed this week": MetaQuestionKind.CHANGES,
+    "what changed recently": MetaQuestionKind.CHANGES,
+    "what changed lately": MetaQuestionKind.CHANGES,
+    "what changed since last week": MetaQuestionKind.CHANGES,
+    "what has changed": MetaQuestionKind.CHANGES,
     "what has changed recently": MetaQuestionKind.CHANGES,
+    "what has changed lately": MetaQuestionKind.CHANGES,
+    # The normalized spelling of "what's changed lately"; `'s` always expands to `is`.
+    "what is changed lately": MetaQuestionKind.CHANGES,
+    "what is new": MetaQuestionKind.CHANGES,
+    "what is different": MetaQuestionKind.CHANGES,
+    "what happened recently": MetaQuestionKind.CHANGES,
+    "what happened this week": MetaQuestionKind.CHANGES,
+    "what moved recently": MetaQuestionKind.CHANGES,
+    "any updates": MetaQuestionKind.CHANGES,
+    "are there any updates": MetaQuestionKind.CHANGES,
+    "what are the updates": MetaQuestionKind.CHANGES,
+    "show the changes": MetaQuestionKind.CHANGES,
+    "list the changes": MetaQuestionKind.CHANGES,
     "decisions": MetaQuestionKind.DECISIONS,
+    "any pending decisions": MetaQuestionKind.DECISIONS,
     "what decisions require attention": MetaQuestionKind.DECISIONS,
+    "what decisions need attention": MetaQuestionKind.DECISIONS,
     "which decisions need review": MetaQuestionKind.DECISIONS,
+    "which decisions require review": MetaQuestionKind.DECISIONS,
+    "what decisions are pending": MetaQuestionKind.DECISIONS,
+    "which decisions are pending": MetaQuestionKind.DECISIONS,
+    "what decisions are open": MetaQuestionKind.DECISIONS,
+    "what are the open decisions": MetaQuestionKind.DECISIONS,
+    "what decisions are waiting": MetaQuestionKind.DECISIONS,
+    "what do we need to decide": MetaQuestionKind.DECISIONS,
+    "what needs deciding": MetaQuestionKind.DECISIONS,
+    "what needs to be decided": MetaQuestionKind.DECISIONS,
+    "what still needs a decision": MetaQuestionKind.DECISIONS,
+    "what is undecided": MetaQuestionKind.DECISIONS,
+    "what decisions have been made": MetaQuestionKind.DECISIONS,
+    "what has been decided": MetaQuestionKind.DECISIONS,
+    "show the decisions": MetaQuestionKind.DECISIONS,
+    "list the decisions": MetaQuestionKind.DECISIONS,
     "disagreement": MetaQuestionKind.DISAGREEMENT,
+    "any disagreement": MetaQuestionKind.DISAGREEMENT,
+    "is there any disagreement": MetaQuestionKind.DISAGREEMENT,
     "where is the disagreement": MetaQuestionKind.DISAGREEMENT,
-    "what is contested": MetaQuestionKind.DISAGREEMENT,
+    "what is the disagreement": MetaQuestionKind.DISAGREEMENT,
+    "where is there disagreement": MetaQuestionKind.DISAGREEMENT,
+    "what are we disagreeing about": MetaQuestionKind.DISAGREEMENT,
+    "where do we disagree": MetaQuestionKind.DISAGREEMENT,
     "where do the agents disagree": MetaQuestionKind.DISAGREEMENT,
+    "what do the agents disagree about": MetaQuestionKind.DISAGREEMENT,
+    "what is contested": MetaQuestionKind.DISAGREEMENT,
+    "what is disputed": MetaQuestionKind.DISAGREEMENT,
+    "what is in dispute": MetaQuestionKind.DISAGREEMENT,
+    "what is contradicted": MetaQuestionKind.DISAGREEMENT,
+    "what are the contradictions": MetaQuestionKind.DISAGREEMENT,
+    "where are the contradictions": MetaQuestionKind.DISAGREEMENT,
+    "what conflicts are there": MetaQuestionKind.DISAGREEMENT,
+    "where is the conflict": MetaQuestionKind.DISAGREEMENT,
+    "what is being argued about": MetaQuestionKind.DISAGREEMENT,
+    "show the disagreement": MetaQuestionKind.DISAGREEMENT,
     "why": MetaQuestionKind.WHY_DECISION,
     "why_decision": MetaQuestionKind.WHY_DECISION,
     "why decision": MetaQuestionKind.WHY_DECISION,
@@ -159,9 +291,13 @@ def classify_meta_question(question: str) -> MetaQuestionKind:
         )
     kind = ACCEPTED_QUESTIONS.get(normalized)
     if kind is None:
+        # What Meta answers, so the asker can rephrase instead of guessing — the
+        # subjects, never the accepted forms, which would publish the corpus.
         raise DomainError(
-            f"{REFUSAL_PREFIX}; ask about status, blockers, changes, decisions, "
-            "disagreement, why the decision was made, or what evidence supports it"
+            f"{REFUSAL_PREFIX}; Meta answers where things stand, what is blocked, "
+            "what changed, which decisions are open, where the disagreement is, why "
+            "a decision was made, and what evidence supports it — ask for one of "
+            "those in ordinary words"
         )
     return kind
 
@@ -190,6 +326,9 @@ _INVALIDATION_CLASSES: dict[OntologyEntityKind, tuple[EventType, ...]] = {
         EventType.DECISION_UPDATED,
         EventType.DECISION_SUPERSEDED,
         EventType.ARTIFACT_VERSION_CREATED,
+        # A publication emits one of two types, chosen by synthesis type, and the
+        # Decision Brief is the one that re-decides. Both belong to the class.
+        EventType.DECISION_BRIEF_SYNTHESIZED,
         EventType.SYNTHESIS_PUBLISHED,
         *_SUPERSEDED,
     ),
@@ -197,6 +336,7 @@ _INVALIDATION_CLASSES: dict[OntologyEntityKind, tuple[EventType, ...]] = {
         EventType.ARTIFACT_CREATED,
         EventType.ARTIFACT_UPDATED,
         EventType.ARTIFACT_VERSION_CREATED,
+        EventType.DECISION_BRIEF_SYNTHESIZED,
         EventType.SYNTHESIS_PUBLISHED,
         *_SUPERSEDED,
     ),
