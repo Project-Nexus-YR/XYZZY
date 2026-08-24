@@ -2504,6 +2504,13 @@ class MultiplayerService:
             result: dict[str, Any] = {"status": "error", "error": str(exc)}
         else:
             result = dict(turn.output)
+            # The NEXUS harness carries provenance inside the turn output; the model
+            # provider harness returns it in the TurnResult's own field, and the reader
+            # below looks only in the output. Without this an agent on that harness
+            # records no provider input, model or evidence at all - and provenance is
+            # the whole reason a synthesis claim can be drilled back to its source.
+            if turn.provenance and not result.get("provenance"):
+                result["provenance"] = dict(turn.provenance)
             if turn.stop_reason is StopReason.CANCELLED:
                 # A cancelled turn returns before the harness drains its queue, so
                 # the prompt never carried these steers. Leaving them unconsumed
