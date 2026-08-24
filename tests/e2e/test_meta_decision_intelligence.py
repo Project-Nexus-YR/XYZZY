@@ -496,8 +496,9 @@ async def test_a_confirmed_assertion_whose_row_moves_is_reconciled_not_skipped()
     caveat in the prose.
 
     Both rules hold here. The human's label and properties are untouched, the row's
-    own account is recorded beside them, and a status question is answered from the
-    row.
+    own account is disclosed beside them, and a status question is answered from the
+    row. Nothing about the disagreement is stored: it is compared when the answer is
+    built, so the pass that would have to clear it does not need to exist.
     """
     db = Database(":memory:")
     await db.connect()
@@ -533,8 +534,6 @@ async def test_a_confirmed_assertion_whose_row_moves_is_reconciled_not_skipped()
         assert preserved.label == entity.label
         assert preserved.properties == entity.properties
         assert preserved.properties["status"] == "PROPOSED"
-        assert preserved.source_disagreement is not None
-        assert preserved.source_disagreement["properties"]["status"] == "ACTIVE"
 
         # Three surfaces, one answer: the row is active, so the decision has been
         # made, it is not on the open list, and the route agrees with both.
@@ -562,7 +561,10 @@ async def test_a_confirmed_assertion_whose_row_moves_is_reconciled_not_skipped()
             for item in (await service.get_room_ontology(room_id))["entities"]
             if item["entity_id"] == entity.entity_id
         )
-        assert record["source_disagreement"] == preserved.source_disagreement
+        assert record["source_disagreement"] == {
+            "label": "Adopt the gateway",
+            "properties": {"status": "ACTIVE", "decision_id": decision_id},
+        }
 
         # A pass over a row that has not moved again reconciles nothing.
         assert (await service.run_ontology_extraction(room_id, OntologyExtractor.IMMEDIATE))[
@@ -570,16 +572,16 @@ async def test_a_confirmed_assertion_whose_row_moves_is_reconciled_not_skipped()
         ] == []
 
         # And a review that accepts what the row says settles the disagreement,
-        # rather than leaving a marker that contradicts an assertion now matching it.
+        # because the two now compare equal — not because anything was cleared.
         corrected, _review = await service.review_ontology_entity(
             room_id,
             entity.entity_id,
             OntologyReviewAction.CORRECT,
             "owner",
             "The decision was taken; adopting the row's account.",
-            corrected_properties=preserved.source_disagreement["properties"],
+            corrected_properties=record["source_disagreement"]["properties"],
         )
-        assert corrected.source_disagreement is None
+        assert corrected.properties["status"] == "ACTIVE"
         settled = next(
             item
             for item in (await service.get_room_ontology(room_id))["entities"]
@@ -1043,3 +1045,282 @@ def test_browser_meta_contract_exposes_scope_freshness_and_drilldown() -> None:
     assert "exact_source_evidence" in ui
     assert "provider_response_id" in ui
     assert "review_status" in ui
+
+
+def _seed_room(client: TestClient, slug: str, name: str) -> str:
+    org_id = client.post(
+        "/api/v1/organizations",
+        headers=OWNER,
+        json={"name": name, "slug": f"{slug}-org"},
+    ).json()["org_id"]
+    workspace_id = client.post(
+        f"/api/v1/organizations/{org_id}/workspaces",
+        headers=OWNER,
+        json={"name": "Engineering", "slug": slug},
+    ).json()["workspace_id"]
+    room_id = str(
+        client.post(
+            f"/api/v1/workspaces/{workspace_id}/rooms",
+            headers=OWNER,
+            json={"name": name},
+        ).json()["room_id"]
+    )
+    client.post(
+        f"/api/v1/rooms/{room_id}/members/invitations",
+        headers=OWNER,
+        json={"user_id": "viewer", "role": "viewer"},
+    )
+    return room_id
+
+
+def _extract(client: TestClient, room_id: str) -> Any:
+    response = client.post(
+        f"/api/v1/rooms/{room_id}/ontology/extractions",
+        headers=OWNER,
+        json={"extractor": "IMMEDIATE"},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _entity(client: TestClient, room_id: str, kind: str) -> dict[str, Any]:
+    response = client.get(f"/api/v1/rooms/{room_id}/ontology", headers=VIEWER)
+    assert response.status_code == 200, response.text
+    return next(item for item in response.json()["entities"] if item["kind"] == kind)
+
+
+def _claim(client: TestClient, room_id: str, meta_kind: str, entity_kind: str) -> dict[str, Any]:
+    response = client.get(f"/api/v1/rooms/{room_id}/meta?kind={meta_kind}", headers=VIEWER)
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    claim = next(item for item in answer["claims"] if item["kind"] == entity_kind)
+    claim["_summary"] = answer["summary"]
+    return claim
+
+
+def _row(client: TestClient, room_id: str, task_id: str) -> dict[str, Any]:
+    return next(
+        item
+        for item in client.get(f"/api/v1/rooms/{room_id}/tasks", headers=VIEWER).json()
+        if item["task_id"] == task_id
+    )
+
+
+def _decision_bucket(client: TestClient, room_id: str, meta_kind: str) -> set[str]:
+    response = client.get(f"/api/v1/rooms/{room_id}/meta?kind={meta_kind}", headers=VIEWER)
+    assert response.status_code == 200, response.text
+    answer = response.json()
+    return {
+        str(item["label"])
+        for item in [*answer["claims"], *answer["unconfirmed"]]
+        if item["kind"] == "Decision"
+    }
+
+
+def _a_task_the_row_contradicts(client: TestClient) -> tuple[str, str, str, str]:
+    """A task a person has reviewed as cancelled, whose row then went to assigned.
+
+    Every step is one of the product's own verbs over HTTP. A previous test in this
+    file staged its premise past the service and passed against behaviour the product
+    did not have.
+    """
+    room_id = _seed_room(client, "divergence", "Divergence")
+    task_id = str(
+        client.post(
+            f"/api/v1/rooms/{room_id}/tasks",
+            headers=OWNER,
+            json={"title": "Ship the gateway"},
+        ).json()["task_id"]
+    )
+    template_id = client.get("/api/v1/agent-templates", headers=OWNER).json()[0]["template_id"]
+    agent_id = str(
+        client.post(
+            f"/api/v1/rooms/{room_id}/agents",
+            headers=OWNER,
+            json={"template_id": template_id},
+        ).json()["agent_id"]
+    )
+    _extract(client, room_id)
+    entity_id = str(_entity(client, room_id, "Task")["entity_id"])
+    corrected = client.post(
+        f"/api/v1/rooms/{room_id}/ontology/entities/{entity_id}/reviews",
+        headers=OWNER,
+        json={
+            "action": "CORRECT",
+            "reason": "Called off in the standup; it was this agent's to do.",
+            "corrected_properties": {
+                "status": "CANCELLED",
+                "priority": "NORMAL",
+                "assigned_agent_id": agent_id,
+            },
+        },
+    )
+    assert corrected.status_code == 200, corrected.text
+    assigned = client.post(
+        f"/api/v1/tasks/{task_id}/assign", headers=OWNER, json={"agent_id": agent_id}
+    )
+    assert assigned.status_code == 200, assigned.text
+    # The pass that reads the moved row may not rewrite a person's account, and says
+    # so in the log. That observation is all a pass leaves behind.
+    assert _extract(client, room_id)["reconciled"] == [entity_id]
+    assert _row(client, room_id, task_id)["status"] == "ASSIGNED"
+    return room_id, task_id, entity_id, agent_id
+
+
+def test_a_standing_disagreement_is_disclosed_on_every_surface() -> None:
+    """While the two accounts really differ, no surface may quietly pick one."""
+    app = create_app(":memory:", auth_tokens={"owner-token": "owner", "viewer-token": "viewer"})
+    with TestClient(app) as client:
+        room_id, _task_id, entity_id, agent_id = _a_task_the_row_contradicts(client)
+        row_account = {
+            "label": "Ship the gateway",
+            "properties": {
+                "status": "ASSIGNED",
+                "priority": "NORMAL",
+                "assigned_agent_id": agent_id,
+            },
+        }
+
+        claim = _claim(client, room_id, "STATUS", "Task")
+        assert claim["review_status"] == "CORRECTED"
+        assert claim["properties"]["status"] == "CANCELLED"
+        assert claim["source_disagreement"] == row_account
+        assert "source record has since changed" in claim["text"]
+        assert "contradicted by the source record" in claim["_summary"]
+        # The status it reports is the row's, and it says so rather than leaving a
+        # reader to work out which of the two accounts they are looking at.
+        assert claim["status"] == "ASSIGNED"
+        assert claim["status_source"] == "SOURCE_ROW"
+
+        record = _entity(client, room_id, "Task")
+        assert record["entity_id"] == entity_id
+        assert record["source_disagreement"] == row_account
+
+
+def test_a_row_that_converges_back_leaves_no_trace_in_any_answer() -> None:
+    """The disagreement must not outlive the disagreement.
+
+    The row diverged from a reviewed assertion and then came back to it. Recorded, the
+    marker survived the convergence: the only write ever added it, the pass that would
+    have cleared it saw an unchanged row and skipped, and nothing short of another
+    human review could take it away. Compared when the answer is built, there is
+    nothing to take away.
+    """
+    app = create_app(":memory:", auth_tokens={"owner-token": "owner", "viewer-token": "viewer"})
+    with TestClient(app) as client:
+        room_id, task_id, entity_id, agent_id = _a_task_the_row_contradicts(client)
+        assert _claim(client, room_id, "STATUS", "Task")["source_disagreement"] is not None
+
+        cancelled = client.post(f"/api/v1/tasks/{task_id}/cancel", headers=OWNER)
+        assert cancelled.status_code == 200, cancelled.text
+        assert _row(client, room_id, task_id)["status"] == "CANCELLED"
+
+        def assert_no_trace() -> None:
+            claim = _claim(client, room_id, "STATUS", "Task")
+            assert claim["source_disagreement"] is None
+            assert claim["text"] == "Ship the gateway"
+            assert "source record has since changed" not in claim["text"]
+            assert "contradicted by the source record" not in claim["_summary"]
+            assert _entity(client, room_id, "Task")["source_disagreement"] is None
+
+        # No pass is needed to clear it, because there is nothing to clear.
+        assert_no_trace()
+        for index in range(30):
+            client.post(
+                f"/api/v1/rooms/{room_id}/messages",
+                headers=OWNER,
+                json={"content": f"unrelated note {index}"},
+            )
+        for _ in range(12):
+            assert _extract(client, room_id)["reconciled"] == []
+        assert_no_trace()
+        # The person's account is still theirs, and still the one under review.
+        record = _entity(client, room_id, "Task")
+        assert record["entity_id"] == entity_id
+        assert record["review_status"] == "CORRECTED"
+        assert record["properties"]["assigned_agent_id"] == agent_id
+
+
+def test_no_answer_reports_a_status_that_neither_source_holds() -> None:
+    """A third value existed: the marker's, after both sources had left it behind."""
+    app = create_app(":memory:", auth_tokens={"owner-token": "owner", "viewer-token": "viewer"})
+    with TestClient(app) as client:
+        room_id, task_id, _entity_id, _agent_id = _a_task_the_row_contradicts(client)
+
+        def held() -> tuple[str, str, dict[str, Any]]:
+            claim = _claim(client, room_id, "STATUS", "Task")
+            return (
+                str(_row(client, room_id, task_id)["status"]),
+                str(claim["properties"]["status"]),
+                claim,
+            )
+
+        # While they differ, the answer is grouped under one of the two.
+        row_status, human_status, claim = held()
+        assert (row_status, human_status) == ("ASSIGNED", "CANCELLED")
+        assert "ASSIGNED 1" in claim["_summary"]
+
+        cancelled = client.post(f"/api/v1/tasks/{task_id}/cancel", headers=OWNER)
+        assert cancelled.status_code == 200, cancelled.text
+
+        # Both sources now say cancelled, so nothing may be reported as assigned.
+        row_status, human_status, claim = held()
+        assert (row_status, human_status) == ("CANCELLED", "CANCELLED")
+        assert "CANCELLED 1" in claim["_summary"]
+        assert "ASSIGNED" not in claim["_summary"]
+        assert "contradicted by the source record" not in claim["_summary"]
+
+        # And the payload says which source the status it reports comes from.
+        assert claim["status"] in {row_status, human_status}
+        assert claim["status"] == "CANCELLED"
+        assert claim["status_source"] == "SOURCE_ROW"
+
+
+def test_the_bucket_a_decision_falls_into_follows_a_source_not_a_marker() -> None:
+    """Open or made is a question about the decision row, asked when it is answered."""
+    app = create_app(":memory:", auth_tokens={"owner-token": "owner", "viewer-token": "viewer"})
+    with TestClient(app) as client:
+        room_id = _seed_room(client, "buckets", "Buckets")
+        decision_id = str(
+            client.post(
+                f"/api/v1/rooms/{room_id}/decisions",
+                headers=OWNER,
+                json={"title": "Adopt the gateway", "content": "content"},
+            ).json()["decision_id"]
+        )
+        _extract(client, room_id)
+        entity_id = str(_entity(client, room_id, "Decision")["entity_id"])
+        # A person gets ahead of the row: they say it was taken, the row says proposed.
+        corrected = client.post(
+            f"/api/v1/rooms/{room_id}/ontology/entities/{entity_id}/reviews",
+            headers=OWNER,
+            json={
+                "action": "CORRECT",
+                "reason": "We took this call in the review; the row has not moved yet.",
+                "corrected_properties": {"status": "ACTIVE", "decision_id": decision_id},
+            },
+        )
+        assert corrected.status_code == 200, corrected.text
+
+        # The row still says proposed, so the decision is still open — and the
+        # person's account is disclosed against it rather than silently binned.
+        assert _decision_bucket(client, room_id, "DECISIONS_OPEN") == {"Adopt the gateway"}
+        assert _decision_bucket(client, room_id, "DECISIONS_MADE") == set()
+        open_claim = _claim(client, room_id, "DECISIONS_OPEN", "Decision")
+        assert open_claim["properties"]["status"] == "ACTIVE"
+        assert open_claim["status"] == "PROPOSED"
+        assert open_claim["status_source"] == "SOURCE_ROW"
+        assert open_claim["source_disagreement"]["properties"]["status"] == "PROPOSED"
+
+        # The row catches up. Both accounts now say the same thing, the bucket moves
+        # with the row, and there is nothing left over to disclose.
+        taken = client.post(
+            f"/api/v1/decisions/{decision_id}/status", headers=OWNER, json={"status": "ACTIVE"}
+        )
+        assert taken.status_code == 200, taken.text
+        assert _decision_bucket(client, room_id, "DECISIONS_OPEN") == set()
+        assert _decision_bucket(client, room_id, "DECISIONS_MADE") == {"Adopt the gateway"}
+        made_claim = _claim(client, room_id, "DECISIONS_MADE", "Decision")
+        assert made_claim["status"] == "ACTIVE"
+        assert made_claim["source_disagreement"] is None
+        assert _entity(client, room_id, "Decision")["source_disagreement"] is None

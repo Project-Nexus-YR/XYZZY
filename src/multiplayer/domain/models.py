@@ -896,11 +896,6 @@ class OntologyEntity:
     asserted_at_sequence: int = 0
     evidence_event_sequences: tuple[int, ...] = ()
     stale_at_sequence: int | None = None
-    # The source row's own current account of itself, recorded only while it
-    # disagrees with a reviewed assertion that a later pass may not rewrite.
-    # NULL is "no disagreement", so a reader is never told the row says something
-    # it does not.
-    source_disagreement: dict[str, Any] | None = None
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
 

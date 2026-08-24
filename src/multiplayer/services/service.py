@@ -5610,7 +5610,7 @@ class MultiplayerService:
         return {
             "entities": [
                 self._with_currency(
-                    self._ontology_entity_record(entity), currency[entity.entity_id]
+                    await self._ontology_entity_record(entity), currency[entity.entity_id]
                 )
                 for entity in entities
             ],
@@ -5887,6 +5887,49 @@ class MultiplayerService:
             entities, relationships = await self._project_inferred(room_id, relevant, to_sequence)
         return entities, relationships, [], to_sequence
 
+    @staticmethod
+    def _task_account(task: Task) -> dict[str, Any]:
+        """What a task row says about itself. One definition, projected and compared."""
+        return {
+            "label": task.title,
+            "properties": {
+                "status": task.status.value,
+                "priority": task.priority.value,
+                "assigned_agent_id": task.assigned_agent_id or "",
+            },
+        }
+
+    @staticmethod
+    def _decision_account(decision: Decision) -> dict[str, Any]:
+        """What a decision row says about itself."""
+        return {
+            "label": decision.title,
+            "properties": {
+                "status": decision.status.value,
+                "decision_id": decision.decision_id,
+            },
+        }
+
+    async def _source_account(self, entity: OntologyEntity) -> dict[str, Any] | None:
+        """The source row's own account of itself, read now; None when no row states it.
+
+        A pass projects this into an assertion. A read compares against it, so the two
+        are the same function: a shape that drifted between them would invent a
+        disagreement out of its own formatting. An assertion whose source is frozen —
+        a published version, an agent output — has no row that can move, and gets None.
+        """
+        if entity.kind is OntologyEntityKind.TASK:
+            task = await self.repos.tasks.get(entity.source_object_id)
+            if task is None or task.room_id != entity.room_id:
+                return None
+            return self._task_account(task)
+        if entity.kind is OntologyEntityKind.DECISION:
+            decision = await self.repos.decisions.get(entity.source_object_id)
+            if decision is None or decision.room_id != entity.room_id:
+                return None
+            return self._decision_account(decision)
+        return None
+
     async def _project_structured(
         self, room_id: str, events: list[RoomEvent], at_sequence: int
     ) -> tuple[list[OntologyEntity], list[OntologyRelationship]]:
@@ -5912,18 +5955,15 @@ class MultiplayerService:
             if task is None or task.room_id != room_id:
                 continue
             entity_id = self._ontology_id("ont", room_id, "Task", task_id)
+            account = self._task_account(task)
             entities.append(
                 OntologyEntity(
                     entity_id=entity_id,
                     room_id=room_id,
                     kind=OntologyEntityKind.TASK,
                     source_object_id=task_id,
-                    label=task.title,
-                    properties={
-                        "status": task.status.value,
-                        "priority": task.priority.value,
-                        "assigned_agent_id": task.assigned_agent_id or "",
-                    },
+                    label=account["label"],
+                    properties=account["properties"],
                     derivation_kind=OntologyDerivationKind.SYSTEM_MATERIALIZED,
                     confidence=1.0,
                     evidence_ids=(task_id,),
@@ -5992,14 +6032,15 @@ class MultiplayerService:
             )
             if asserted is not None:
                 sequences = [*sequences, *asserted.evidence_event_sequences]
+            account = self._decision_account(decision)
             entities.append(
                 OntologyEntity(
                     entity_id=self._ontology_id("ont", room_id, "Decision", decision_id),
                     room_id=room_id,
                     kind=OntologyEntityKind.DECISION,
                     source_object_id=decision_id,
-                    label=decision.title,
-                    properties={"status": decision.status.value, "decision_id": decision_id},
+                    label=account["label"],
+                    properties=account["properties"],
                     derivation_kind=OntologyDerivationKind.SYSTEM_MATERIALIZED,
                     confidence=1.0,
                     evidence_ids=(decision_id,),
@@ -6255,6 +6296,27 @@ class MultiplayerService:
             return OntologyAssurance.SYSTEM_MATERIALIZED
         return OntologyAssurance.UNCONFIRMED_AI
 
+    @staticmethod
+    def _source_disagreement(
+        label: str,
+        properties: dict[str, Any],
+        review_status: OntologyReviewStatus,
+        source_account: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """The row's account, disclosed only while it currently contradicts a reviewed one.
+
+        A reviewed assertion is a person's account and no later pass rewrites it, so
+        the two can come apart. Whether they are apart *now* is a question about the
+        row as it stands, asked here, when the answer is built. Recorded instead, it
+        outlived what it described: the pass in which the row converged back onto the
+        person's account changed nothing, so it wrote nothing, and the marker stood.
+        """
+        if source_account is None or review_status is OntologyReviewStatus.UNCONFIRMED:
+            return None
+        if source_account["label"] == label and source_account["properties"] == properties:
+            return None
+        return source_account
+
     def _meta_claim_record(
         self,
         *,
@@ -6272,12 +6334,21 @@ class MultiplayerService:
         asserted_at_sequence: int,
         evidence_event_sequences: tuple[int, ...],
         stale_at_sequence: int | None,
-        source_disagreement: dict[str, Any] | None,
+        source_account: dict[str, Any] | None,
         currency: tuple[bool, int],
         review: OntologyReview | None,
     ) -> dict[str, Any]:
         assurance = self._meta_assurance(derivation_kind, review_status)
         current, invalidating = currency
+        source_disagreement = self._source_disagreement(
+            label, properties, review_status, source_account
+        )
+        # The status a reader is shown is one some source actually holds: the row's
+        # while a row still states it, the assertion's when none does — named either
+        # way, and never a third value assembled from a marker. Resolved once here,
+        # so the prose, the counts and the payload cannot answer differently.
+        held = properties if source_account is None else source_account["properties"]
+        status = held.get("status")
         record: dict[str, Any] = {
             "assertion_id": assertion_id,
             "assertion_type": assertion_type,
@@ -6291,9 +6362,11 @@ class MultiplayerService:
             if source_disagreement is not None
             else label,
             "properties": properties,
-            # Null while the assertion and its row agree; otherwise the row's own
-            # current account, so a reader is never told only the frozen one.
+            # Compared as this answer was built: null while the assertion and its row
+            # agree, otherwise the row's own account beside the person's.
             "source_disagreement": source_disagreement,
+            "status": None if status is None else str(status),
+            "status_source": "ASSERTION" if source_account is None else "SOURCE_ROW",
             "assurance": assurance.value,
             "derivation_kind": derivation_kind.value,
             "confidence": confidence,
@@ -6394,10 +6467,8 @@ class MultiplayerService:
 
     @staticmethod
     def _claim_status(claim: dict[str, Any]) -> str:
-        """The status a reader is entitled to, which is the source row's when they differ."""
-        disagreement = claim["source_disagreement"]
-        properties = claim["properties"] if disagreement is None else disagreement["properties"]
-        return str(properties.get("status", "UNKNOWN"))
+        """The status a reader is entitled to, resolved from a source when the record was built."""
+        return str(claim["status"] or "UNKNOWN")
 
     def _meta_envelope(
         self,
@@ -6560,7 +6631,7 @@ class MultiplayerService:
                     asserted_at_sequence=entity.asserted_at_sequence,
                     evidence_event_sequences=entity.evidence_event_sequences,
                     stale_at_sequence=entity.stale_at_sequence,
-                    source_disagreement=entity.source_disagreement,
+                    source_account=await self._source_account(entity),
                     currency=currency[entity.entity_id],
                     review=await self.repos.meta.latest_review(room_id, user_id, entity.entity_id),
                 )
@@ -6584,7 +6655,7 @@ class MultiplayerService:
                     asserted_at_sequence=item.asserted_at_sequence,
                     evidence_event_sequences=item.evidence_event_sequences,
                     stale_at_sequence=item.stale_at_sequence,
-                    source_disagreement=None,
+                    source_account=None,
                     currency=currency[item.relationship_id],
                     review=await self.repos.meta.latest_review(
                         room_id, user_id, item.relationship_id
@@ -6722,7 +6793,7 @@ class MultiplayerService:
             chains.append(
                 {
                     "claim": {
-                        **self._ontology_entity_record(claim),
+                        **await self._ontology_entity_record(claim),
                         "published_text": source["text"],
                         "latest_review": (
                             self._ontology_review_record(claim_review)
@@ -6731,7 +6802,7 @@ class MultiplayerService:
                         ),
                     },
                     "agent_output": {
-                        **self._ontology_entity_record(output),
+                        **await self._ontology_entity_record(output),
                         "latest_review": (
                             self._ontology_review_record(output_review)
                             if output_review is not None
@@ -6879,7 +6950,7 @@ class MultiplayerService:
                 asserted_at_sequence=decision.asserted_at_sequence,
                 evidence_event_sequences=decision.evidence_event_sequences,
                 stale_at_sequence=decision.stale_at_sequence,
-                source_disagreement=decision.source_disagreement,
+                source_account=await self._source_account(decision),
                 currency=currency[decision.entity_id],
                 review=decision_review,
             )
@@ -6904,7 +6975,7 @@ class MultiplayerService:
                     asserted_at_sequence=claim_entity.asserted_at_sequence,
                     evidence_event_sequences=claim_entity.evidence_event_sequences,
                     stale_at_sequence=claim_entity.stale_at_sequence,
-                    source_disagreement=claim_entity.source_disagreement,
+                    source_account=await self._source_account(claim_entity),
                     currency=currency[claim_entity.entity_id],
                     review=claim_review,
                 )
@@ -6925,7 +6996,7 @@ class MultiplayerService:
                     asserted_at_sequence=link.asserted_at_sequence,
                     evidence_event_sequences=link.evidence_event_sequences,
                     stale_at_sequence=link.stale_at_sequence,
-                    source_disagreement=None,
+                    source_account=None,
                     currency=currency[link.relationship_id],
                     review=link_review,
                 )
@@ -6960,7 +7031,7 @@ class MultiplayerService:
         }
         envelope["decision"] = {
             **self._with_currency(
-                self._ontology_entity_record(decision), currency[decision.entity_id]
+                await self._ontology_entity_record(decision), currency[decision.entity_id]
             ),
             "evidence_ids": [chain["exact_source_evidence"]["output_id"] for chain in chains],
             "source_ids": [
@@ -7174,13 +7245,16 @@ class MultiplayerService:
         await self._broadcast_persisted_events([event])
         return updated, review
 
-    @staticmethod
-    def _ontology_entity_record(entity: OntologyEntity) -> dict[str, Any]:
+    async def _ontology_entity_record(self, entity: OntologyEntity) -> dict[str, Any]:
         """One assertion, including where in the room's order it stands.
 
         The sequence fields are not decoration: dropping `stale_at_sequence` was
         what let a superseded assertion read exactly like a live one.
+
+        It reads the source row rather than taking a record of it, so this surface
+        cannot report a disagreement the other two have stopped reporting.
         """
+        source_account = await self._source_account(entity)
         return {
             "entity_id": entity.entity_id,
             "kind": entity.kind.value,
@@ -7195,9 +7269,11 @@ class MultiplayerService:
             "asserted_at_sequence": entity.asserted_at_sequence,
             "evidence_event_sequences": list(entity.evidence_event_sequences),
             "stale_at_sequence": entity.stale_at_sequence,
-            # Null while the assertion and its row agree; otherwise the row's own
-            # current account, kept beside the human's rather than instead of it.
-            "source_disagreement": entity.source_disagreement,
+            # Compared as this record was built: null while the assertion and its row
+            # agree, otherwise the row's own account beside the human's.
+            "source_disagreement": self._source_disagreement(
+                entity.label, entity.properties, entity.review_status, source_account
+            ),
             "created_at": entity.created_at.isoformat(),
             "updated_at": entity.updated_at.isoformat(),
         }

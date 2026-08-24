@@ -1,0 +1,25 @@
+-- The disagreement is a comparison, not a column.
+--
+-- 028 answered a real collision — a human's reviewed assertion must not be
+-- overwritten by a later machine pass, and a reader must not be told something
+-- the source row contradicts — by recording that the two disagree. Recording it
+-- was the mistake. The write only ever added the marker: the pass in which the
+-- row converged back onto the human's account changed nothing, so it skipped,
+-- and only another human review could clear what no longer existed.
+--
+-- Three surfaces then lied. The claim text said the source record had since
+-- changed when it no longer differed. The summary counted a contradiction that
+-- had ended. And the status resolution preferred the marker, so a task that both
+-- the row and the human called cancelled was reported as assigned — a third
+-- value neither source held.
+--
+-- The comparison now happens where the answer is built, between the reviewed
+-- assertion and the row as it stands at that moment. There is nothing to clear,
+-- and no pass is required to clear it. What a pass saw and when it saw it is
+-- still recorded, in the ONTOLOGY_ASSERTION_RECONCILED event, which is an
+-- observation with a sequence rather than a fact a reader is answered from.
+--
+-- Nothing is lost by dropping the column: every value it held is recomputed from
+-- the row it was copied from.
+
+ALTER TABLE ontology_entities DROP COLUMN source_disagreement;

@@ -3761,37 +3761,36 @@ class OntologyRepo:
         return entities_written, relationships_written, reconciled
 
     async def _reconcile_reviewed(self, entity: OntologyEntity) -> bool:
-        """Record a reviewed assertion's disagreement with its own row.
+        """Report that this pass saw a reviewed assertion disagree with its own row.
 
         The conflict clause above leaves a reviewed assertion alone, which is right
         — a person's account is not overwritten by a later machine pass — but on its
         own it also abandoned the rule that an assertion follows its row, and the
-        cursor moved on. Here the incoming projection *is* the row's own account, so
-        it is kept beside the human's rather than instead of it. Reviewing the
-        assertion against it is what takes it away again, in
-        `review_entity_in_transaction`; a pass only ever adds what the row says.
+        cursor moved on. What the pass owes the log is that it looked and the two
+        differed; the caller writes that down as an observation with a sequence.
 
-        Guarded to write only on a change, so a repeated pass stays a no-op.
+        Nothing is written to the row. Whether the two still disagree is a question
+        about the row as it stands when an answer is built, so it is asked there. It
+        was asked here once, and the answer outlived the disagreement: a row that
+        diverged and then came back kept a marker no pass could clear.
         """
-        state = json.dumps({"label": entity.label, "properties": entity.properties}, sort_keys=True)
-        cursor = await self.db.execute(
-            "UPDATE ontology_entities SET source_disagreement = ?, updated_at = ? "
+        row = await self.db.fetch_one(
+            "SELECT label, properties FROM ontology_entities "
             "WHERE room_id = ? AND kind = ? AND source_object_id = ? "
-            "AND review_status <> 'UNCONFIRMED' AND asserted_at_sequence < ? "
-            "AND (label <> ? OR properties <> ?) AND source_disagreement IS NOT ?",
+            "AND review_status <> 'UNCONFIRMED' AND asserted_at_sequence < ?",
             (
-                state,
-                serialize_datetime(entity.updated_at),
                 entity.room_id,
                 entity.kind.value,
                 entity.source_object_id,
                 entity.asserted_at_sequence,
-                entity.label,
-                json.dumps(entity.properties, sort_keys=True),
-                state,
             ),
         )
-        return cursor.rowcount > 0
+        if row is None:
+            return False
+        return bool(
+            row["label"] != entity.label
+            or row["properties"] != json.dumps(entity.properties, sort_keys=True)
+        )
 
     async def _inherit_the_weakest(
         self,
@@ -4012,11 +4011,6 @@ class OntologyRepo:
             review_status=status,
             updated_at=reviewed_at,
         )
-        # A review that brings the assertion into agreement with what the row says
-        # settles the disagreement; leaving the marker would tell the next reader the
-        # row still contradicts an assertion that now matches it.
-        if entity.source_disagreement == {"label": updated.label, "properties": updated.properties}:
-            updated = replace(updated, source_disagreement=None)
         after = self._entity_value(updated)
         review = OntologyReview(
             review_id=review_id,
@@ -4032,16 +4026,13 @@ class OntologyRepo:
         )
         await self.db.execute(
             "UPDATE ontology_entities SET label = ?, properties = ?, confidence = ?, "
-            "review_status = ?, source_disagreement = ?, updated_at = ? "
+            "review_status = ?, updated_at = ? "
             "WHERE entity_id = ? AND room_id = ?",
             (
                 updated.label,
                 json.dumps(updated.properties, sort_keys=True),
                 updated.confidence,
                 updated.review_status.value,
-                None
-                if updated.source_disagreement is None
-                else json.dumps(updated.source_disagreement, sort_keys=True),
                 serialize_datetime(updated.updated_at),
                 updated.entity_id,
                 updated.room_id,
@@ -4181,11 +4172,6 @@ class OntologyRepo:
         if not isinstance(properties, dict):
             raise ValueError("ontology entity properties are malformed")
         stale = row["stale_at_sequence"]
-        disagreement = row["source_disagreement"]
-        if disagreement is not None:
-            disagreement = json.loads(disagreement)
-            if not isinstance(disagreement, dict):
-                raise ValueError("ontology entity source disagreement is malformed")
         return OntologyEntity(
             entity_id=row["entity_id"],
             room_id=row["room_id"],
@@ -4202,7 +4188,6 @@ class OntologyRepo:
             asserted_at_sequence=int(row["asserted_at_sequence"]),
             evidence_event_sequences=cls._json_sequences(row["evidence_event_sequences"]),
             stale_at_sequence=None if stale is None else int(stale),
-            source_disagreement=disagreement,
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -4316,14 +4301,19 @@ class MetaRepo:
             # are separated here, before the limit, so neither is a filtered copy of
             # the other's page.
             #
-            # The status is the row's, not the one frozen into a confirmed assertion:
-            # a confirmed decision whose row moved on to active is a decision that
-            # has been made, and answering from the human's copy put it on the open
-            # list for ever while the decisions route called it active.
+            # The bucket follows a source. The decision row states its own status, so
+            # that is what is read; the assertion's copy answers only when no row
+            # states it any more. A marker recorded by an earlier pass answers
+            # nothing: it went on saying "active" after the row had gone back to
+            # proposed, and the decision sat on the made list for ever.
+            #
+            # Only the decision kinds are asked for a status, so only the decision
+            # row is joined. The Python side resolves the same status the same way.
             status_placeholders = ", ".join("?" for _ in statuses)
             tail += (
                 " AND COALESCE("
-                "json_extract(e.source_disagreement, '$.properties.status'), "
+                "(SELECT d.status FROM decisions d WHERE d.decision_id = e.source_object_id "
+                "AND d.room_id = e.room_id), "
                 "json_extract(e.properties, '$.status')"
                 f") IN ({status_placeholders})"
             )

@@ -1343,7 +1343,7 @@ async def review_ontology_entity(
     except DomainError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {
-        "entity": svc._ontology_entity_record(entity),
+        "entity": await svc._ontology_entity_record(entity),
         "review": svc._ontology_review_record(review),
     }
 
