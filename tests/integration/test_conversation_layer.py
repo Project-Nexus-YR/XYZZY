@@ -428,7 +428,10 @@ async def test_an_invoked_mention_runs_and_its_answer_lands_in_the_thread(
     # The mention's own text was the prompt.
     outputs = await service.list_room_outputs(room_id)
     assert len(outputs) == 1
-    assert outputs[0].source_prompt == "@Architect please assess this"
+    # The mention's own text is the prompt - screened and fenced as data,
+    # because any member can author it.
+    assert "@Architect please assess this" in outputs[0].source_prompt
+    assert outputs[0].source_prompt.startswith("[begin untrusted room message")
 
     # The answer is a message in the mention's thread that points at the output.
     thread = await service.list_thread(mention.message_id)

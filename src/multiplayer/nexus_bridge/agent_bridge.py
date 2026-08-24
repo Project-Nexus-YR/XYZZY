@@ -20,6 +20,7 @@ from ..domain.models import (
 )
 from ..domain.synthesis import document_schema, spec_for, unavailable_sections
 from ..model_providers import ModelProviderError, model_provider_from_environment
+from ..security.screening import fenced, screen
 
 log = logging.getLogger(__name__)
 
@@ -218,9 +219,12 @@ class NexusAgentBridge:
                 "required": ["action"],
             }
 
-        # Inject interventions into the prompt
+        # Inject interventions into the prompt. A steer is an authorized human
+        # instruction, so it is screened for invisible characters, not fenced.
         if interventions:
-            intervention_text = "\n".join(f"- HUMAN INTERVENTION: {i}" for i in interventions)
+            intervention_text = "\n".join(
+                f"- HUMAN INTERVENTION: {screen(i, 'steer').text}" for i in interventions
+            )
             prompt = f"{prompt}\n\n{intervention_text}\n\nPlease incorporate these instructions."
 
         context = self._specialist_contexts.get(execution_id)
@@ -370,11 +374,13 @@ class NexusAgentBridge:
         """Send only the requested task and this specialist's configured context."""
         if context is None:
             return prompt
-        instructions = context.instructions.strip() or "Analyze from your assigned role."
+        instructions = screen(
+            context.instructions.strip() or "Analyze from your assigned role.", "instructions"
+        ).text
         return (
             "You are one specialist in a governed technical decision workflow.\n"
-            f"Specialist name: {context.name}\n"
-            f"Specialist role: {context.role}\n"
+            f"Specialist name: {screen(context.name, 'name').text}\n"
+            f"Specialist role: {screen(context.role, 'role').text}\n"
             f"Template instructions: {instructions}\n\n"
             "Work independently from the supplied decision prompt. Clearly distinguish known facts "
             "from AI-derived judgment. Give a recommendation, supporting reasons, material risks, "
@@ -536,8 +542,11 @@ class NexusAgentBridge:
         synthesis_type: str = "DECISION_BRIEF",
     ) -> str:
         spec = spec_for(synthesis_type)
+        # An output is a model's own prior text, downstream of whatever steered
+        # that turn, so it enters the synthesis as fenced data.
         source_blocks = "\n\n".join(
-            f"AgentOutput {item['output_id']} (agent {item['agent_id']}):\n{item['content']}"
+            f"AgentOutput {item['output_id']} (agent {item['agent_id']}):\n"
+            + fenced(screen(item["content"], f"agent output {item['output_id']}"))
             for item in outputs
         )
         return (

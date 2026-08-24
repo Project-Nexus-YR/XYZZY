@@ -166,6 +166,7 @@ from ..security.identity import (
     new_run_credential,
     verify_challenge_answer,
 )
+from ..security.screening import fenced, screen
 from ..services.presence import PresenceService
 
 log = logging.getLogger(__name__)
@@ -2871,10 +2872,15 @@ class MultiplayerService:
 
     @staticmethod
     def _prompt_with_tool_results(provider_prompt: str, observations: list[str]) -> str:
-        """The same turn, continued: what the tools this turn already called returned."""
+        """The same turn, continued: what the tools this turn already called returned.
+
+        A tool result can carry member-authored text - a channel read returns
+        whatever was said in the room - so the block is screened and fenced.
+        """
         results = "\n".join(f"- {observation}" for observation in observations)
+        block = fenced(screen(results, "tool results"))
         return (
-            f"{provider_prompt}\n\nTool results from this turn, in order:\n{results}\n\n"
+            f"{provider_prompt}\n\nTool results from this turn, in order:\n{block}\n\n"
             'Answer with action "finish" unless another tool call is genuinely required.'
         )
 
@@ -4935,9 +4941,10 @@ class MultiplayerService:
         # Dispatch belongs here, after the commit, beside the broadcast: a turn that
         # waited on a provider inside the write transaction would hold the room's
         # write lock for the length of the model call. The mention's own text is the
-        # prompt, because that is what the author addressed to the agent.
+        # prompt, because that is what the author addressed to the agent - screened
+        # and fenced, because any member can author it.
         for execution_id in invoked.values():
-            await self._dispatch_mention_run(execution_id, content)
+            await self._dispatch_mention_run(execution_id, fenced(screen(content, "room message")))
         return msg
 
     async def list_room_messages(
