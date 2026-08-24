@@ -308,7 +308,11 @@ _INFERRED_CONFIDENCE = 0.6
 _UNCONFIRMED_TEMPLATE = "an unreviewed extraction suggests"
 # A confirmed assertion is a person's account and is never rewritten, so when the
 # row it describes moves the reader is told both, not only the older one.
-_DISAGREEMENT_TEMPLATE = "confirmed by a person; the source record has since changed"
+# States the comparison, not a history. The code knows only that the reviewed
+# assertion and the source row differ now - not which of them moved, nor when.
+# Correcting only the assertion leaves the row untouched, and saying the record
+# "has since changed" asserts an edit that never happened.
+_DISAGREEMENT_TEMPLATE = "confirmed by a person; the source record does not agree"
 # The cap the Meta route already applies to free text, restated where the text is
 # kept, because a service caller reaches the audit record without the route.
 _MAX_AUDITED_QUESTION = 500
@@ -6478,9 +6482,7 @@ class MultiplayerService:
         # asynchronous drain had never run report that everything was current — and
         # nothing wakes that drain today, so it is the ordinary case, not an edge.
         drained_to = min(cursors.get(extractor.value, 0) for extractor in OntologyExtractor)
-        positions = [
-            int(claim["asserted_at_sequence"]) for claim in claims if not claim.get("hidden")
-        ]
+        positions = [int(claim["asserted_at_sequence"]) for claim in claims]
         return {
             "authorized_head": head,
             # Pending work a reader can see; it decides nothing they are shown.

@@ -554,7 +554,7 @@ async def test_a_confirmed_assertion_whose_row_moves_is_reconciled_not_skipped()
         assert claim["properties"]["status"] == "PROPOSED"
         assert claim["source_disagreement"]["properties"]["status"] == "ACTIVE"
         assert claim["current"] is False
-        assert "source record has since changed" in claim["text"]
+        assert "source record does not agree" in claim["text"]
         assert "contradicted by the source record" in made_answer["summary"]
         record = next(
             item
@@ -1167,6 +1167,50 @@ def _a_task_the_row_contradicts(client: TestClient) -> tuple[str, str, str, str]
     return room_id, task_id, entity_id, agent_id
 
 
+def test_a_disagreement_never_dates_a_change_it_did_not_observe() -> None:
+    """The disclosure states a comparison, because a comparison is all the code knows.
+
+    It used to read "the source record has since changed". Correct only the
+    assertion and the row is untouched - yet that sentence asserted an edit to the
+    source that never happened. True disagreement, truthful status, invented
+    history: the same family as the stored marker that outlived the disagreement it
+    described.
+    """
+    app = create_app(":memory:", auth_tokens={"owner-token": "owner", "viewer-token": "viewer"})
+    with TestClient(app) as client:
+        room_id = _seed_room(client, "invented", "Invented history")
+        task_id = str(
+            client.post(
+                f"/api/v1/rooms/{room_id}/tasks",
+                headers=OWNER,
+                json={"title": "Ship the gateway"},
+            ).json()["task_id"]
+        )
+        _extract(client, room_id)
+        entity_id = str(_entity(client, room_id, "Task")["entity_id"])
+        before = _row(client, room_id, task_id)
+
+        corrected = client.post(
+            f"/api/v1/rooms/{room_id}/ontology/entities/{entity_id}/reviews",
+            headers=OWNER,
+            json={
+                "action": "CORRECT",
+                "reason": "The thread calls it the identity gateway.",
+                "corrected_label": "Ship the identity gateway",
+            },
+        )
+        assert corrected.status_code == 200, corrected.text
+
+        # Only the assertion moved. The row is the same one we started with.
+        assert _row(client, room_id, task_id) == before
+
+        claim = _claim(client, room_id, "STATUS", "Task")
+        assert claim["source_disagreement"] is not None, "they do differ, and that is disclosed"
+        assert "does not agree" in claim["text"]
+        assert "has since changed" not in claim["text"]
+        assert "since" not in claim["text"], "no sentence may date a change it did not observe"
+
+
 def test_a_standing_disagreement_is_disclosed_on_every_surface() -> None:
     """While the two accounts really differ, no surface may quietly pick one."""
     app = create_app(":memory:", auth_tokens={"owner-token": "owner", "viewer-token": "viewer"})
@@ -1185,7 +1229,7 @@ def test_a_standing_disagreement_is_disclosed_on_every_surface() -> None:
         assert claim["review_status"] == "CORRECTED"
         assert claim["properties"]["status"] == "CANCELLED"
         assert claim["source_disagreement"] == row_account
-        assert "source record has since changed" in claim["text"]
+        assert "source record does not agree" in claim["text"]
         assert "contradicted by the source record" in claim["_summary"]
         # The status it reports is the row's, and it says so rather than leaving a
         # reader to work out which of the two accounts they are looking at.
@@ -1219,7 +1263,7 @@ def test_a_row_that_converges_back_leaves_no_trace_in_any_answer() -> None:
             claim = _claim(client, room_id, "STATUS", "Task")
             assert claim["source_disagreement"] is None
             assert claim["text"] == "Ship the gateway"
-            assert "source record has since changed" not in claim["text"]
+            assert "source record does not agree" not in claim["text"]
             assert "contradicted by the source record" not in claim["_summary"]
             assert _entity(client, room_id, "Task")["source_disagreement"] is None
 
