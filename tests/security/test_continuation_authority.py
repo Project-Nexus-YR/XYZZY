@@ -128,7 +128,8 @@ async def test_a_grant_withdrawn_between_two_tool_calls_stops_the_second(
     assert "no effective capability" in execution.error
     run = await _the_run(svc)
     assert run["harness_state"] == HarnessState.SETTLED.value
-    assert run["settlement"] == RunSettlement.FAILED.value
+    # The agent did not fail; the authority it was running under went away.
+    assert run["settlement"] == RunSettlement.AUTHORITY_REVOKED.value
 
 
 @pytest.mark.asyncio

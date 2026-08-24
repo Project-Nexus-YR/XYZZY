@@ -433,7 +433,9 @@ class MultiplayerService:
         )
         for orphan in orphans:
             await self._settle_undispatched_run(
-                orphan.execution_id, "dispatcher stopped before the run started"
+                orphan.execution_id,
+                "dispatcher stopped before the run started",
+                RunSettlement.ORPHANED,
             )
 
     async def _backfill_legacy_artifact_provenance_hashes(self) -> None:
@@ -2217,6 +2219,7 @@ class MultiplayerService:
         session: Session,
         agent: AgentInstance,
         result: dict[str, Any],
+        continuation: _TurnContinuation,
     ) -> dict[str, Any]:
         """Permission check, policy check, approval gate, execution, audit event.
 
@@ -2272,23 +2275,42 @@ class MultiplayerService:
             )
             return self._tool_response(request)
         if decision.requires_approval:
-            approval = await self.request_approval(
-                session.room_id,
-                execution.execution_id,
-                agent.agent_id,
-                f"{tool}: {decision.required_capability}",
-                authorized_by=execution.authorized_by,
-            )
-            request = replace(request, approval_id=approval.approval_id)
-            await self.repos.tool_requests.create(request)
-            # No harness work is in flight while a reviewer thinks, so the lease is a
-            # long one. It is still a lease: an exemption is no deadline at all.
-            await self._advance_run_for_execution(
-                execution.execution_id,
-                HarnessState.AWAITING_APPROVAL,
-                execution.authorized_by,
-                _APPROVAL_LEASE,
-            )
+            # Deciding this approval puts the run back on a STREAMING lease, and that
+            # lease is only honest if the rest of the turn is there to be prompted.
+            # The two used to be separate writes — the approval committed here, the
+            # continuation was saved by the turn loop afterwards — so a crash or a
+            # race in between left an approval whose grant stranded the run: STREAMING,
+            # NULL settlement, and a lease held by nobody. They are one transaction
+            # now. Either the reviewer has a question and the turn is parked behind
+            # it, or neither exists.
+            async with self.db.transaction():
+                approval, approval_event = await self._request_approval_in_transaction(
+                    session.room_id,
+                    execution.execution_id,
+                    agent.agent_id,
+                    f"{tool}: {decision.required_capability}",
+                    execution.authorized_by,
+                )
+                request = replace(request, approval_id=approval.approval_id)
+                await self.repos.tool_requests.create(request)
+                # No harness work is in flight while a reviewer thinks, so the lease is
+                # a long one. It is still a lease: an exemption is no deadline at all.
+                await self._advance_run_for_execution(
+                    execution.execution_id,
+                    HarnessState.AWAITING_APPROVAL,
+                    execution.authorized_by,
+                    _APPROVAL_LEASE,
+                )
+                # Durably rather than in this process's memory: the decision that
+                # releases it can be made on any process.
+                await self.repos.suspended_turns.save(
+                    execution.execution_id,
+                    continuation.prompt,
+                    continuation.acting_as,
+                    continuation.observations,
+                )
+            await self._set_agent_status_safe(agent.agent_id, AgentStatus.WAITING_APPROVAL)
+            await self._broadcast_persisted_events([approval_event])
             return self._tool_response(request)
         await self.repos.tool_requests.create(request)
         return self._tool_response(await self._execute_tool_request(request))
@@ -2598,13 +2620,11 @@ class MultiplayerService:
             if not isinstance(request, dict):
                 return result
             if str(request.get("status")) == "PENDING_APPROVAL":
-                # The reviewer holds the turn now. It is parked durably rather than
-                # in this process's memory: the decision that releases it can be
-                # made on any process, and one that found nothing to resume left the
-                # run on a fresh STREAMING lease with nobody about to prompt it.
-                await self.repos.suspended_turns.save(
-                    execution_id, turn.prompt, turn.acting_as, turn.observations
-                )
+                # The reviewer holds the turn now, parked by the gate that opened the
+                # approval, in that same transaction. Saving it here instead was a
+                # later, separate write, and a decision that found nothing to resume
+                # left the run on a fresh STREAMING lease with nobody about to prompt
+                # it.
                 return result
             turn.observations.append(self._tool_observation(request))
             parked = await self._park_if_attempts_spent(execution_id, turn.acting_as, result)
@@ -2741,6 +2761,7 @@ class MultiplayerService:
                 execution_id,
                 f"{execution.authorized_by or 'an unknown principal'} may no longer "
                 f"invoke agent {execution.agent_id}: no effective capability",
+                RunSettlement.AUTHORITY_REVOKED,
             )
             raise AuthorizationError(
                 f"run {execution_id} is no longer authorized by {execution.authorized_by}"
@@ -2873,7 +2894,7 @@ class MultiplayerService:
                 "cancelled while the turn was in flight",
             )
         if result.get("action") == "tool":
-            return await self._handle_tool_request(execution, session, agent, result)
+            return await self._handle_tool_request(execution, session, agent, result, continuation)
         if result.get("action") == "finish":
             raw_output = result.get("result")
             output_data = raw_output if isinstance(raw_output, dict) else {"result": raw_output}
@@ -4382,8 +4403,18 @@ class MultiplayerService:
         )
         return execution, event
 
-    async def _settle_undispatched_run(self, execution_id: str, error: str) -> None:
-        """Bring a run that will never produce a result to a described terminal state."""
+    async def _settle_undispatched_run(
+        self, execution_id: str, error: str, settlement: RunSettlement = RunSettlement.FAILED
+    ) -> None:
+        """Bring a run that will never produce a result to a described terminal state.
+
+        The settlement says what became of it, and it defaulted to FAILED for every
+        caller — so a run stopped because its authorizing human was removed was
+        recorded as an agent that failed, and one whose dispatcher died before it
+        started was recorded the same way. Neither agent failed. Callers that know a
+        truer name pass it; the default is kept for the one caller a failure really
+        is.
+        """
         execution = await self.repos.executions.get(execution_id)
         if execution is None or execution.status in {
             ExecutionStatus.COMPLETED,
@@ -4414,6 +4445,7 @@ class MultiplayerService:
                         actor_type="agent",
                     )
                 ],
+                settlement,
             )
         except DomainError:
             # The run moved on between the read above and this write. Settling a run
@@ -5130,6 +5162,29 @@ class MultiplayerService:
         authorized_by: str = "",
         require_member: bool = False,
     ) -> Approval:
+        async with self.db.transaction():
+            if require_member:
+                await self._require_mutate_in_transaction(room_id, requested_by)
+            approval, event = await self._request_approval_in_transaction(
+                room_id, execution_id, agent_id, action_description, authorized_by
+            )
+        await self._set_agent_status_safe(agent_id, AgentStatus.WAITING_APPROVAL)
+        await self._broadcast_persisted_events([event])
+        return approval
+
+    async def _request_approval_in_transaction(
+        self,
+        room_id: str,
+        execution_id: str,
+        agent_id: str,
+        action_description: str,
+        authorized_by: str,
+    ) -> tuple[Approval, RoomEvent]:
+        """Open one approval for a caller that already owns the write transaction.
+
+        The gateway needs it, because the approval and the rest of the turn it holds
+        up have to commit together or not at all.
+        """
         approval = Approval(
             approval_id=new_id("appr"),
             room_id=room_id,
@@ -5138,27 +5193,22 @@ class MultiplayerService:
             action_description=action_description,
             authorized_by=authorized_by,
         )
-        async with self.db.transaction():
-            if require_member:
-                await self._require_mutate_in_transaction(room_id, requested_by)
-            await self.repos.approvals.create(approval)
-            event = await self.repos.events.append_with_next_sequence_in_transaction(
-                RoomEvent(
-                    room_id=room_id,
-                    sequence=0,
-                    event_type=EventType.APPROVAL_REQUESTED,
-                    payload={
-                        "approval_id": approval.approval_id,
-                        "agent_id": agent_id,
-                        "action": action_description,
-                    },
-                    actor_id=agent_id,
-                    actor_type="agent",
-                )
+        await self.repos.approvals.create(approval)
+        event = await self.repos.events.append_with_next_sequence_in_transaction(
+            RoomEvent(
+                room_id=room_id,
+                sequence=0,
+                event_type=EventType.APPROVAL_REQUESTED,
+                payload={
+                    "approval_id": approval.approval_id,
+                    "agent_id": agent_id,
+                    "action": action_description,
+                },
+                actor_id=agent_id,
+                actor_type="agent",
             )
-        await self._set_agent_status_safe(agent_id, AgentStatus.WAITING_APPROVAL)
-        await self._broadcast_persisted_events([event])
-        return approval
+        )
+        return approval, event
 
     async def approve_action(
         self, approval_id: str, reviewer_id: str, comment: str = "", *, require_member: bool = False
@@ -5277,9 +5327,23 @@ class MultiplayerService:
         ``_continue_agent_turn`` promises cannot happen. A step that refuses itself
         settles the run on the way out; a refusal reaching here settled nothing, so
         it is settled here instead of vanishing.
+
+        The same is true of finding no continuation at all. The gate that opened the
+        approval writes both in one transaction, so absence here means the row was
+        lost after that commit rather than never written — and the decision above has
+        already issued the STREAMING lease it was meant to spend. Returning would leave
+        that lease held by nobody, which is the fourth route into the state this
+        docstring rules out. Nothing is carrying the run and nothing will, so it is
+        settled ORPHANED now rather than by a sweep a quarter of an hour later.
         """
         parked = await self.repos.suspended_turns.claim(execution_id)
         if parked is None:
+            await self._settle_unresumable_turn(
+                execution_id,
+                "",
+                RunSettlement.ORPHANED,
+                "the rest of this turn was not there to resume after its approval decision",
+            )
             return
         turn = _TurnContinuation(
             prompt=str(parked["prompt"]),
