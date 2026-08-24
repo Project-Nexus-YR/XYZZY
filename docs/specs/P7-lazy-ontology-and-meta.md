@@ -105,6 +105,8 @@ behind one connection and one lock, and the blocked-read figure is re-measured u
 
 ```python
 class MetaQuestionKind(StrEnum): ...  # the seven kinds named in the mapping table below
+
+
 def classify_meta_question(question: str) -> MetaQuestionKind: ...  # refuses; never returns None
 ```
 
