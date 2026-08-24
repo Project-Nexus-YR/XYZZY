@@ -331,6 +331,7 @@ def test_the_unbounded_derivation_has_only_gates_and_a_preview_for_callers() -> 
         "_require_delegated_authority",  # may this caller steer somebody else's run
         "_require_agent_run_authority",  # may this caller steer this agent at all
         "_invoke_mentioned_agent_in_transaction",  # may this member open a turn here
+        "open_agent_task",  # may this asker — human or delegating agent — open a task here
         "_execute_one_agent_step_inner",  # may the run's own principal still be spoken for
         "agent_capability_terms",  # a preview for a run that does not exist
     }

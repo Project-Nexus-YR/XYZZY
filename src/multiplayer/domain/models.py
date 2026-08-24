@@ -477,6 +477,9 @@ class Execution:
     # The human whose authority this run carries. Capability terms are derived
     # from this principal at execution time, never from the agent or the branch.
     authorized_by: str = ""
+    # The agent task this run answers, if it answers one. On the run rather than
+    # on the task because a task opens a fresh run every time it resumes.
+    agent_task_id: str | None = None
     branch_id: str = ""
     run_id: str | None = None
     triggered_by: AgentTrigger = AgentTrigger.DIRECT
@@ -486,6 +489,25 @@ class Execution:
     error: str = ""
     started_at: datetime = field(default_factory=utcnow)
     completed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        """Carry the task link on every clone, rather than trusting five writers to.
+
+        ``agent_task_id`` is a column so the bound can join on it, and it was set at
+        exactly one of the five places an ``Execution`` is built. ``resume_agent_run``
+        clones ``triggered_by`` and ``input_data`` from the earlier run — the task id
+        is literally inside that dict — and left the column NULL, so a resumed
+        delegated run lost its entire chain from the bound the moment it came back.
+
+        Deriving it here is what makes that unrepeatable: a writer that carries the
+        input data cannot drop the link, and a writer that means to set the column
+        outright still can. A column four of five writers forget is a column that
+        gets forgotten again.
+        """
+        if self.agent_task_id is None:
+            carried = self.input_data.get("agent_task_id")
+            if isinstance(carried, str) and carried:
+                object.__setattr__(self, "agent_task_id", carried)
 
 
 @dataclass(frozen=True, slots=True)

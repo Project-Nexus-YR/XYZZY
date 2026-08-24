@@ -1,0 +1,15 @@
+-- The caller who asks for a task is a participant of the run it becomes.
+--
+-- 035 stored who a task is authorized by and, for a delegated task, that is the
+-- human at the root of the chain rather than whoever made the call. The bounding
+-- set at the door was then built as {authorized_by} plus the delegating agent —
+-- the caller swapped out rather than the root added in. Relocation fifteen: a
+-- room editor narrowed to one capability asked through a delegation and the
+-- delegate spent three, because the narrowed member appeared in no row the spend
+-- path reads and so bounded nothing.
+--
+-- A principal whose ceiling applies is a row, never an argument that gets
+-- dropped. This column is that row. It stores who asked and nothing about what
+-- they were allowed to lend, for the reason 035 gives at length: a stored
+-- capability set freezes while the membership behind it moves.
+ALTER TABLE agent_tasks ADD COLUMN requested_by TEXT NOT NULL DEFAULT '';

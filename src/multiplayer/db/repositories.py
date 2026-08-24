@@ -11,6 +11,16 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
+from ..domain.agent_tasks import (
+    TERMINAL_STATES,
+    AgentTask,
+    AgentTaskMessage,
+    AgentTaskState,
+    DelegationCycleError,
+    Part,
+    TaskMessageRole,
+    require_transition,
+)
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
     AddressingMode,
@@ -140,6 +150,7 @@ class Repos:
         self.branch_syntheses = BranchSynthesisRepo(db)
         self.turn_locks = TurnLockRepo(db)
         self.tasks = TaskRepo(db)
+        self.agent_tasks = AgentTaskRepo(db)
         self.messages = MessageRepo(db)
         self.mentions = MessageMentionRepo(db)
         self.handles = RoomParticipantHandleRepo(db)
@@ -1803,13 +1814,15 @@ class ExecutionRepo:
             execution = replace(execution, branch_id=branch.branch_id)
         await self.db.execute(
             "INSERT INTO executions(execution_id, session_id, agent_id, authorized_by, "
-            "branch_id, run_id, triggered_by, status, input_data, output_data, error, "
-            "started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "agent_task_id, branch_id, run_id, triggered_by, status, input_data, "
+            "output_data, error, started_at, completed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 execution.execution_id,
                 execution.session_id,
                 execution.agent_id,
                 execution.authorized_by,
+                execution.agent_task_id,
                 execution.branch_id,
                 execution.run_id,
                 execution.triggered_by.value,
@@ -1855,13 +1868,15 @@ class ExecutionRepo:
             )
             await self.db.execute(
                 "INSERT INTO executions(execution_id, session_id, agent_id, authorized_by, "
-                "branch_id, run_id, triggered_by, status, input_data, output_data, error, "
-                "started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "agent_task_id, branch_id, run_id, triggered_by, status, input_data, "
+                "output_data, error, started_at, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     execution.execution_id,
                     execution.session_id,
                     execution.agent_id,
                     execution.authorized_by,
+                    execution.agent_task_id,
                     execution.branch_id,
                     execution.run_id,
                     execution.triggered_by.value,
@@ -2066,19 +2081,50 @@ class ExecutionRepo:
     async def bounding_principals(self, execution_id: str) -> frozenset[str]:
         """Every principal whose grant bounds this run, as one set, in one read.
 
-        Three kinds of participant leave a durable row against a run, and this is the
+        Four kinds of participant leave a durable row against a run, and this is the
         only place they are enumerated: the human who authorized it, every human who
-        has acted on it, and every human who has steered it. A fourth kind is a fourth
-        arm of this union and nothing else — no spend-point learns a new name, because
-        no spend-point ever knew any of these.
+        has acted on it, every human who has steered it, and every agent in the
+        delegation chain the run is answering. A fifth kind is a fifth arm of this
+        union and nothing else — no spend-point learns a new name, because no
+        spend-point ever knew any of these.
+
+        The fourth arm was declared before it was written. A delegating agent was put
+        into the bounding set at the door that opens a task and nowhere near the till
+        that spends it, so a delegate ran on the whole of its own capability set:
+        ceilinged at the gate, unbounded at every tool call after it.
+
+        It then joined through ``agent_tasks.execution_id``, and that is a one-slot
+        pointer to the newest turn: a task that stopped for input and started again
+        overwrote it, and the earlier run — still PENDING, still dispatchable —
+        stopped being bounded by its own chain. The join is ``executions.agent_task_id``
+        instead, which is the direction the relationship actually runs, so every turn
+        a task ever opened keeps its link.
+
+        There is no separate arm for ``agent_tasks.delegating_agent_id``. It would be
+        an alias of a row this one already returns: ``_delegating_task`` derives the
+        parent from the delegator's own open run, so the parent's ``target_agent_id``
+        *is* the delegating agent, and the chain the child is written with has it at
+        the last position. A second arm returning the same principal would be an
+        untested duplicate of a load-bearing one, which is how an arm gets deleted by
+        somebody who checks only that the tests still pass.
         """
+        # Read here rather than at module scope because this is the only query in
+        # this module that writes a principal rather than reading one back, and
+        # spelling the prefix into the SQL would put a second definition of it
+        # somewhere nothing would ever come back to update.
+        from ..security.capabilities import AGENT_PRINCIPAL_PREFIX
+
         rows = await self.db.fetch_all(
             "SELECT authorized_by AS principal FROM executions WHERE execution_id = ?"
             " UNION "
             "SELECT caller_id FROM execution_callers WHERE execution_id = ?"
             " UNION "
-            "SELECT intervened_by FROM execution_interventions WHERE execution_id = ?",
-            (execution_id, execution_id, execution_id),
+            "SELECT intervened_by FROM execution_interventions WHERE execution_id = ?"
+            " UNION "
+            "SELECT ? || chain.agent_id FROM agent_task_chain chain "
+            "JOIN executions ex ON ex.agent_task_id = chain.task_id "
+            "WHERE ex.execution_id = ?",
+            (execution_id, execution_id, execution_id, AGENT_PRINCIPAL_PREFIX, execution_id),
         )
         return frozenset(str(row["principal"]) for row in rows)
 
@@ -2096,6 +2142,7 @@ class ExecutionRepo:
             session_id=row["session_id"],
             agent_id=row["agent_id"],
             authorized_by=row.get("authorized_by") or "",
+            agent_task_id=row.get("agent_task_id"),
             branch_id=row.get("branch_id") or "",
             run_id=row.get("run_id"),
             triggered_by=AgentTrigger(row["triggered_by"]),
@@ -2758,6 +2805,263 @@ class TaskRepo:
             delegation_id=row.get("delegation_id"),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+
+class AgentTaskRepo:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create_in_transaction(self, task: AgentTask, ancestry: tuple[str, ...]) -> AgentTask:
+        """Write the task and the chain it descends from as one unit.
+
+        A task with no chain rows reads as a task a human opened, which is
+        precisely the claim a delegated task must never be able to make about
+        itself. So the two writes are not allowed to come apart.
+
+        Depth is written as the length of that chain rather than as whatever the
+        caller believed it to be. Migration 035 stores the ancestry one row per
+        ancestor so that depth is a count; a caller-supplied number beside it
+        would be a second, quieter answer to the same question, and the two
+        would disagree the first time a service computed one of them wrong.
+
+        An agent appearing twice is refused here rather than left to the UNIQUE
+        index, so the caller is told which agent repeated instead of being told
+        that some constraint failed. The index is still what makes the row
+        unwritable; this is what makes the refusal readable.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("agent task creation requires transaction ownership")
+        seen: set[str] = set()
+        for agent_id in ancestry:
+            if agent_id in seen:
+                raise DelegationCycleError(
+                    f"{agent_id} appears twice in this chain: {' -> '.join(ancestry)}"
+                )
+            seen.add(agent_id)
+        stored = replace(task, depth=len(ancestry))
+        await self.db.execute(
+            "INSERT INTO agent_tasks(task_id, context_id, room_id, target_agent_id, "
+            "delegating_agent_id, delegating_run_id, execution_id, state, "
+            "accepted_output_modes, depth, authorized_by, requested_by, created_at, "
+            "updated_at, terminal_at, refusal_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                stored.task_id,
+                stored.context_id,
+                stored.room_id,
+                stored.target_agent_id,
+                stored.delegating_agent_id,
+                stored.delegating_run_id,
+                stored.execution_id,
+                stored.state.value,
+                json.dumps(list(stored.accepted_output_modes)),
+                stored.depth,
+                stored.authorized_by,
+                stored.requested_by,
+                serialize_datetime(stored.created_at),
+                serialize_datetime(stored.updated_at),
+                serialize_datetime(stored.terminal_at),
+                stored.refusal_reason,
+            ),
+        )
+        for position, agent_id in enumerate(ancestry):
+            await self.db.execute(
+                "INSERT INTO agent_task_chain(task_id, position, agent_id) VALUES (?, ?, ?)",
+                (stored.task_id, position, agent_id),
+            )
+        return stored
+
+    async def create(self, task: AgentTask, ancestry: tuple[str, ...]) -> AgentTask:
+        async with self.db.transaction():
+            return await self.create_in_transaction(task, ancestry)
+
+    async def get(self, task_id: str) -> AgentTask | None:
+        row = await self.db.fetch_one("SELECT * FROM agent_tasks WHERE task_id = ?", (task_id,))
+        return None if row is None else self._from_row(row)
+
+    async def ancestry(self, task_id: str) -> tuple[str, ...]:
+        """Every agent already in this task's chain, root first.
+
+        Empty means a human asked, and that is why the whole chain is returned
+        rather than the delegator alone: A asks B asks A is the loop people
+        picture, A asks B asks C asks A is the loop they hit, and only the
+        first of the two is visible one step back.
+        """
+        rows = await self.db.fetch_all(
+            "SELECT agent_id FROM agent_task_chain WHERE task_id = ? ORDER BY position",
+            (task_id,),
+        )
+        return tuple(str(row["agent_id"]) for row in rows)
+
+    async def list_by_context(self, context_id: str) -> list[AgentTask]:
+        # task_id breaks the tie. Tasks a fan-out opened together share a
+        # timestamp to the microsecond, and SQLite promises nothing about the
+        # order of rows an ORDER BY cannot separate.
+        rows = await self.db.fetch_all(
+            "SELECT * FROM agent_tasks WHERE context_id = ? ORDER BY created_at, task_id",
+            (context_id,),
+        )
+        return [self._from_row(r) for r in rows]
+
+    async def list_open_for_agent(self, agent_id: str) -> list[AgentTask]:
+        placeholders = ", ".join("?" for _ in TERMINAL_STATES)
+        rows = await self.db.fetch_all(
+            "SELECT * FROM agent_tasks WHERE target_agent_id = ? "
+            f"AND state NOT IN ({placeholders}) ORDER BY created_at, task_id",
+            (agent_id, *(state.value for state in TERMINAL_STATES)),
+        )
+        return [self._from_row(r) for r in rows]
+
+    async def transition(
+        self,
+        task_id: str,
+        expected: AgentTaskState,
+        target: AgentTaskState,
+        *,
+        refusal_reason: str = "",
+    ) -> AgentTask:
+        """Move the task, conditional on the state the caller read.
+
+        The state machine is asked first, so a move it does not have is refused
+        before the database is touched. The WHERE clause is the second refusal
+        and the one that matters under concurrency: a caller acting on a state
+        that has since moved writes nothing and is told so, rather than
+        overwriting whoever got there first.
+
+        RETURNING is what makes the returned task the task this call wrote.
+        Reading the row back afterwards would hand the caller whichever
+        transition happened to land last, which under exactly the contention
+        the WHERE clause exists to catch is somebody else's.
+        """
+        require_transition(expected, target)
+        now = utcnow()
+        updates: dict[str, Any] = {"state": target.value, "updated_at": now.isoformat()}
+        if refusal_reason:
+            updates["refusal_reason"] = refusal_reason
+        if target in TERMINAL_STATES:
+            updates["terminal_at"] = now.isoformat()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        cursor = await self.db.execute(
+            f"UPDATE agent_tasks SET {set_clause} WHERE task_id = ? AND state = ? RETURNING *",
+            (*updates.values(), task_id, expected.value),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            raise DomainError(
+                f"agent task {task_id} is no longer {expected.value}: "
+                f"the transition to {target.value} was not applied"
+            )
+        await self.db.commit()
+        return self._from_row(dict(row))
+
+    async def attach_execution(self, task_id: str, execution_id: str) -> None:
+        """Record the run this task is being served by, while it can still be served.
+
+        Guarded like a transition, and for the same reason: an unguarded UPDATE
+        reports success against a task_id nobody ever wrote, and hangs a live
+        execution off a task that finished while the caller was starting it.
+        """
+        placeholders = ", ".join("?" for _ in TERMINAL_STATES)
+        cursor = await self.db.execute(
+            "UPDATE agent_tasks SET execution_id = ?, updated_at = ? "
+            f"WHERE task_id = ? AND state NOT IN ({placeholders})",
+            (
+                execution_id,
+                serialize_datetime(utcnow()),
+                task_id,
+                *(state.value for state in TERMINAL_STATES),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise DomainError(
+                f"agent task {task_id} is unknown or already terminal: "
+                f"execution {execution_id} was not attached"
+            )
+        await self.db.commit()
+
+    async def append_message_with_next_sequence(
+        self, task_id: str, role: TaskMessageRole, parts: tuple[Part, ...]
+    ) -> AgentTaskMessage:
+        """Atomically allocate this task's next sequence and insert its message."""
+        async with self.db.transaction():
+            return await self.append_message_with_next_sequence_in_transaction(task_id, role, parts)
+
+    async def append_message_with_next_sequence_in_transaction(
+        self, task_id: str, role: TaskMessageRole, parts: tuple[Part, ...]
+    ) -> AgentTaskMessage:
+        """Append while the caller owns a wider atomic state transition.
+
+        The sequence is taken by the statement that writes it. Read separately,
+        two turns landing together would both see the same maximum, and
+        UNIQUE(task_id, sequence) would turn the loser's message into an error
+        instead of into the next message.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("agent task message append requires transaction ownership")
+        message_id = new_id("a2amsg")
+        created_at = utcnow()
+        cursor = await self.db.execute(
+            "INSERT INTO agent_task_messages(message_id, task_id, sequence, role, parts, "
+            "created_at) "
+            "SELECT ?, ?, COALESCE(MAX(sequence), 0) + 1, ?, ?, ? "
+            "FROM agent_task_messages WHERE task_id = ? "
+            "RETURNING sequence",
+            (
+                message_id,
+                task_id,
+                role.value,
+                json.dumps([part.as_dict() for part in parts]),
+                serialize_datetime(created_at),
+                task_id,
+            ),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return AgentTaskMessage(
+            message_id=message_id,
+            task_id=task_id,
+            sequence=int(row["sequence"]) if row else 1,
+            role=role,
+            parts=parts,
+            created_at=created_at,
+        )
+
+    async def list_messages(self, task_id: str) -> list[AgentTaskMessage]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM agent_task_messages WHERE task_id = ? ORDER BY sequence", (task_id,)
+        )
+        return [self._message_from_row(r) for r in rows]
+
+    def _from_row(self, row: dict[str, Any]) -> AgentTask:
+        return AgentTask(
+            task_id=row["task_id"],
+            context_id=row["context_id"],
+            room_id=row["room_id"],
+            target_agent_id=row["target_agent_id"],
+            authorized_by=row["authorized_by"],
+            requested_by=row["requested_by"],
+            delegating_agent_id=row["delegating_agent_id"],
+            delegating_run_id=row["delegating_run_id"],
+            execution_id=row["execution_id"],
+            state=AgentTaskState(row["state"]),
+            accepted_output_modes=tuple(json.loads(row["accepted_output_modes"])),
+            depth=int(row["depth"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+            terminal_at=deserialize_datetime(row["terminal_at"]),
+            refusal_reason=row["refusal_reason"],
+        )
+
+    def _message_from_row(self, row: dict[str, Any]) -> AgentTaskMessage:
+        return AgentTaskMessage(
+            message_id=row["message_id"],
+            task_id=row["task_id"],
+            sequence=int(row["sequence"]),
+            role=TaskMessageRole(row["role"]),
+            parts=tuple(Part.from_dict(part) for part in json.loads(row["parts"])),
+            created_at=datetime.fromisoformat(row["created_at"]),
         )
 
 

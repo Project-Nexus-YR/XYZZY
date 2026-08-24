@@ -55,6 +55,24 @@ def policy_capabilities(allowed: Iterable[str] | None) -> frozenset[str]:
 # principal must lend.
 UNKNOWN_PRINCIPAL = ""
 
+# A delegating agent is a principal like any other, and is written into a
+# bounding set under this prefix so it can never be mistaken for a human id.
+# The union that fills a bounding set said a fourth kind of participant would be
+# a fourth arm of it and nothing else; this is that fourth kind.
+AGENT_PRINCIPAL_PREFIX = "agent:"
+
+
+def agent_principal(agent_id: str) -> str:
+    """How a delegating agent appears in a bounding set."""
+    return f"{AGENT_PRINCIPAL_PREFIX}{agent_id}"
+
+
+def delegating_agent_id(principal: str) -> str | None:
+    """The agent behind a principal, or None when it names a human."""
+    if principal.startswith(AGENT_PRINCIPAL_PREFIX):
+        return principal[len(AGENT_PRINCIPAL_PREFIX) :] or None
+    return None
+
 
 @dataclass(frozen=True, slots=True)
 class BoundingPrincipals:

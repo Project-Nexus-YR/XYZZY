@@ -571,6 +571,7 @@ def test_every_construction_of_a_bounding_set_is_a_recorded_decision() -> None:
         "_require_delegated_authority",  # may this caller act on somebody else's run
         "_require_agent_run_authority",  # may this caller steer this agent at all
         "_invoke_mentioned_agent_in_transaction",  # may this member open a turn here
+        "open_agent_task",  # may this asker — human or delegating agent — open a task here
         "_execute_one_agent_step_inner",  # is the run's own principal still spoken for
         "agent_capability_terms",  # a preview for a run that does not exist yet
         "_bounded_by_this_calls_reviewers",  # the humans who released this one call
