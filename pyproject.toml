@@ -17,6 +17,13 @@ dependencies = [
     "aiosqlite>=0.20",
     "pydantic>=2.6",
     "starlette>=0.36",
+    # Verifying a provider's ID token signature is a production path, not a test
+    # convenience: PyJWT does the JOSE work and cryptography does the arithmetic
+    # behind RS256. Both are named here rather than left to PyJWT's `crypto`
+    # extra, because an extra that stops being installed fails at signature
+    # verification, which is the one place this deployment must not fail open.
+    "pyjwt>=2.8",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -25,10 +32,6 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.6",
     "mypy>=1.11",
-    # Only the SIGNED_CHALLENGE proof mode needs Ed25519, and no production path
-    # builds one of those yet. Without it that mode refuses to launch, which is the
-    # direction a missing verifier should fail in.
-    "cryptography>=42",
 ]
 nexus = []
 
