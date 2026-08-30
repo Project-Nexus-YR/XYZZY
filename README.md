@@ -220,6 +220,11 @@ fleet's; two replicas behind a load balancer each allow the full budget.
 database and answers 503 when it cannot, so a process holding an unopenable
 database is never reported ready.
 
+`GET /metrics` exposes this process's own counters and gauges in Prometheus
+text format, exempt from auth and from the rate limiter like `/health`. It is
+single-process: scrape each replica rather than expecting one to speak for a
+fleet.
+
 ### Signing in through an identity provider
 
 SSO is additive. With none of these set the server behaves exactly as before —

@@ -142,11 +142,15 @@ def test_reload_stale_storage_and_second_browser_restore_without_duplicate_write
         # its authorized membership and exact name.
         assert _enter_workspace(client, OWNER, room_name) == room_id
 
-        # An invited collaborator can discover the room directly even though
-        # they were not silently granted broader workspace or org membership.
+        # An invited collaborator can discover the room directly. They are not
+        # silently granted org membership, but they are granted membership in the
+        # room's own workspace (S1) - otherwise every workspace-scoped route (e.g.
+        # creating a channel) 403s despite the room being visible.
         collaborator_context = client.get("/api/v1/me/context", headers=COLLABORATOR).json()
         assert collaborator_context["organizations"] == []
-        assert collaborator_context["workspaces"] == []
+        assert [w["workspace_id"] for w in collaborator_context["workspaces"]] == [
+            state_before["room"]["workspace_id"]
+        ]
         assert [room["room_id"] for room in collaborator_context["rooms"]] == [room_id]
         assert _enter_workspace(client, COLLABORATOR, room_name) == room_id
 
