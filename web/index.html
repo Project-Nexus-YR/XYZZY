@@ -206,6 +206,56 @@ a,.output-link{text-underline-offset:2px}
 .presence-dot.online{background:var(--ok)}
 .presence-dot.working{background:var(--accent)}
 
+/* One small dialog pattern, reused for create-channel, leave/remove confirms and
+   the redirect-agent prompt — no browser prompt()/confirm() anywhere in this file. */
+.modal-backdrop{
+  position:fixed;inset:0;z-index:200;background:var(--scrim,rgba(0,0,0,.4));
+  display:flex;align-items:center;justify-content:center;padding:var(--s-4);
+}
+.modal-backdrop.hidden{display:none}
+.modal-card{
+  background:var(--raised);border:1px solid var(--line);border-radius:var(--r-3);
+  box-shadow:var(--shadow-2);max-width:392px;width:100%;padding:var(--s-5);
+}
+.modal-card h3{font-size:var(--t-title);font-weight:var(--w-strong);letter-spacing:var(--k-title)}
+.modal-card p{font-size:var(--t-ui);color:var(--text-2);margin-top:var(--s-2);line-height:1.5;letter-spacing:var(--k-ui)}
+.modal-card label{display:block;font-size:var(--t-meta);letter-spacing:.07em;text-transform:uppercase;color:var(--text-3);margin:var(--s-4) 0 var(--s-2)}
+.modal-card input,.modal-card textarea{
+  width:100%;background:var(--bg);border:1px solid var(--edge);caret-color:var(--accent);border-radius:var(--r-2);
+  padding:var(--s-2) var(--s-3);font-size:var(--t-body);font-family:inherit;
+}
+.modal-card textarea{min-height:88px;resize:vertical}
+.modal-card .field-error{font-size:var(--t-small);color:var(--danger);margin-top:var(--s-2);line-height:1.45}
+.modal-actions{display:flex;justify-content:flex-end;gap:var(--s-2);margin-top:var(--s-5)}
+
+/* A small anchored menu — the channel header's overflow and no other pattern
+   in this file, so it is written once and reused wherever one shows up next. */
+.popover-menu{
+  position:fixed;z-index:150;min-width:180px;background:var(--raised);
+  border:1px solid var(--line);border-radius:var(--r-3);box-shadow:var(--shadow-2);
+  padding:var(--s-1);display:grid;
+}
+.popover-menu.hidden{display:none}
+.popover-menu button{
+  text-align:left;padding:var(--s-2) var(--s-3);border-radius:var(--r-2);
+  font-size:var(--t-ui);letter-spacing:var(--k-ui);color:var(--text);
+}
+.popover-menu button:hover{background:var(--line)}
+.popover-menu button.danger{color:var(--danger)}
+
+.notif-dot{
+  position:absolute;top:4px;right:4px;width:6px;height:6px;border-radius:50%;background:var(--accent);
+}
+.icon-button{position:relative}
+.browse-room-row{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-2) var(--s-3);border-bottom:1px solid var(--line)}
+.browse-room-row .detail{font-size:var(--t-small);color:var(--text-3)}
+.browse-room-row .btn-sm{margin-left:auto;flex-shrink:0}
+.notif-row{display:flex;flex-direction:column;gap:2px;padding:var(--s-2) var(--s-3);border-bottom:1px solid var(--line);cursor:pointer}
+.notif-row:hover{background:var(--line)}
+.notif-row .title{font-size:var(--t-ui);font-weight:var(--w-medium)}
+.notif-row .body{font-size:var(--t-small);color:var(--text-2)}
+.notif-row .time{font-size:var(--t-meta);color:var(--text-3)}
+
 /* ---------- sign in ---------- */
 /* A grid with a stretch column and a fixed one let the intro sit narrow and
    right-aligned inside a wide left track, leaving a lopsided gap on the left
@@ -963,8 +1013,9 @@ a,.output-link{text-underline-offset:2px}
     <button class="icon-button" onclick="openContext('members')" aria-label="Workspace details" title="People and permissions"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="3.2" r=".9"/><circle cx="8" cy="8" r=".9"/><circle cx="8" cy="12.8" r=".9"/></svg></button>
   </div>
   <div class="sidebar-scroll">
-    <div class="nav-label">Channels</div>
+    <div class="nav-label">Channels<button class="icon-button" onclick="openCreateChannelModal()" aria-label="Create channel" title="Create channel"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button></div>
     <div id="rooms-list"></div>
+    <button class="nav-item" onclick="openBrowseChannels()" aria-label="Browse channels"><span class="nav-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.4"/><path d="m10.4 10.4 3 3"/></svg></span><span class="nav-name">Browse channels</span></button>
 
     <div class="nav-label">AI work</div>
     <div id="branches-list"><div class="nav-item"><span class="nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span><span class="nav-name">No branches yet</span></div></div>
@@ -1008,7 +1059,15 @@ a,.output-link{text-underline-offset:2px}
       <button class="icon-button" onclick="openContext('search')" aria-label="Search channel" title="Search"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.4"/><path d="m10.4 10.4 3 3"/></svg></button>
       <button class="icon-button" onclick="openContext('members')" aria-label="Open members" title="People"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5.6" r="2.4"/><path d="M2.2 13c0-2.2 1.7-3.6 3.8-3.6S9.8 10.8 9.8 13"/><path d="M11 4.4a2.2 2.2 0 0 1 0 4.3M13.8 13c0-1.7-.8-2.8-2.2-3.3"/></svg></button>
       <button class="icon-button" onclick="openContext('branch')" aria-label="Open AI work" title="AI work"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3" width="11.6" height="10" rx="1.4"/><path d="M9.6 3v10"/></svg></button>
+      <button class="icon-button" id="notif-bell" onclick="openNotifications()" aria-label="Notifications" title="Notifications"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.4a3.6 3.6 0 0 0-3.6 3.6v2.2c0 .8-.3 1.6-.9 2.2l-.5.5h10l-.5-.5a3.1 3.1 0 0 1-.9-2.2V6a3.6 3.6 0 0 0-3.6-3.6z"/><path d="M6.6 12.8a1.4 1.4 0 0 0 2.8 0"/></svg><span class="notif-dot hidden" id="notif-dot"></span></button>
+      <button class="icon-button" id="channel-menu-button" onclick="toggleChannelMenu(event)" aria-label="Channel options" title="Channel options"><svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="13" cy="8" r="1.3"/></svg></button>
     </div>
+  </div>
+
+  <div class="popover-menu hidden" id="channel-menu" role="menu" aria-label="Channel options">
+    <button role="menuitem" onclick="closeChannelMenu();openInvitePeople()">Invite people</button>
+    <button role="menuitem" onclick="closeChannelMenu();openContext('members')">Channel details</button>
+    <button role="menuitem" class="danger" onclick="closeChannelMenu();openLeaveChannelConfirm()">Leave channel</button>
   </div>
 
   <div class="center-views">
@@ -1175,10 +1234,22 @@ a,.output-link{text-underline-offset:2px}
   <h3>Decisions</h3><div class="panel-section" id="decisions-panel"></div>
 </details>
 </section>
+
+<section class="context-view" data-context-view="browse" aria-labelledby="context-title">
+  <div class="panel-section"><div class="panel-copy">Any workspace member can see a channel exists here. Entering one you are not in needs an invitation.</div></div>
+  <div id="browse-channels-list"></div>
+</section>
+
+<section class="context-view" data-context-view="notifications" aria-labelledby="context-title">
+  <div id="notifications-list"><div class="panel-section"><div class="panel-copy">Nothing yet — mentions and invitations land here.</div></div></div>
+</section>
 </div>
 </div>
 </div>
 <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+<div class="modal-backdrop hidden" id="modal-backdrop" onclick="if(event.target===this)closeModal()">
+  <div class="modal-card" id="modal-card" role="dialog" aria-modal="true"></div>
+</div>
 <script>
 // The system preference decides until someone states one; then the stated one
 // wins on every later visit in this browser.
@@ -1342,7 +1413,7 @@ function openRightPanel(view) {
   const panel = document.querySelector('.right-panel');
   panel.classList.add('open');
   document.querySelectorAll('.context-view').forEach(el => el.classList.toggle('active', el.dataset.contextView === view));
-  const titles = {thread: 'Thread', search: 'Search', members: 'People'};
+  const titles = {thread: 'Thread', search: 'Search', members: 'People', browse: 'Browse channels', notifications: 'Notifications'};
   document.getElementById('context-title').textContent = titles[view] || 'Context';
   // Opening search always reveals the form and puts the caret in it, even on
   // the very first open before any layout has settled.
@@ -1430,8 +1501,10 @@ function handleComposerKey(event) {
 
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
-    // Frontmost-first: the tray floats above the panel, which floats above the drawer.
-    if (document.getElementById('ai-tray').classList.contains('open')) toggleAITray(false);
+    // Frontmost-first: the modal floats above the menu, above the tray, above the panel, above the drawer.
+    if (!document.getElementById('modal-backdrop').classList.contains('hidden')) closeModal();
+    else if (!document.getElementById('channel-menu').classList.contains('hidden')) closeChannelMenu();
+    else if (document.getElementById('ai-tray').classList.contains('open')) toggleAITray(false);
     else if (document.querySelector('.right-panel').classList.contains('open')) closeContext();
     else if (document.getElementById('sidebar').classList.contains('open')) closeSidebarDrawer();
   }
@@ -1439,6 +1512,17 @@ document.addEventListener('keydown', event => {
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && document.getElementById('ai-tray').classList.contains('open')) {
     event.preventDefault();
     if (!document.getElementById('launch-button').disabled) launchParallelAnalyses();
+  }
+  // Trap Tab inside the modal while it is open — the dialog is the only thing
+  // on the page a keyboard user should be able to reach.
+  if (event.key === 'Tab' && !document.getElementById('modal-backdrop').classList.contains('hidden')) {
+    const focusable = [...document.getElementById('modal-card').querySelectorAll('button,input,textarea,select,a[href]')]
+      .filter(el => !el.disabled && el.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   }
 });
 document.getElementById('messages').addEventListener('scroll', scheduleAutoRead);
@@ -1478,6 +1562,78 @@ window.addEventListener('resize', () => {
   }
   wasAboveMobileBreak = isAboveNow;
 });
+document.addEventListener('click', event => {
+  const menu = document.getElementById('channel-menu');
+  if (!menu.classList.contains('hidden') && !menu.contains(event.target) && event.target.id !== 'channel-menu-button' && !event.target.closest('#channel-menu-button')) {
+    closeChannelMenu();
+  }
+});
+
+function toggleChannelMenu(event) {
+  event.stopPropagation();
+  const menu = document.getElementById('channel-menu');
+  if (!menu.classList.contains('hidden')) { closeChannelMenu(); return; }
+  const btn = document.getElementById('channel-menu-button');
+  const rect = btn.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 4}px`;
+  menu.style.right = `${Math.max(8, window.innerWidth - rect.right)}px`;
+  menu.classList.remove('hidden');
+}
+function closeChannelMenu() { document.getElementById('channel-menu').classList.add('hidden'); }
+
+function openModal(html) {
+  document.getElementById('modal-card').innerHTML = html;
+  document.getElementById('modal-backdrop').classList.remove('hidden');
+  requestAnimationFrame(() => document.getElementById('modal-card').querySelector('input,textarea')?.focus());
+}
+// A modal closed any way (Cancel, Escape, backdrop click) resolves the field
+// dialog's promise with null — one path, not three that each have to remember.
+let pendingDialogResolve = null;
+function closeModal() {
+  document.getElementById('modal-backdrop').classList.add('hidden');
+  document.getElementById('modal-card').innerHTML = '';
+  if (pendingDialogResolve) {
+    const resolve = pendingDialogResolve;
+    pendingDialogResolve = null;
+    resolve(null);
+  }
+}
+
+// The one in-app replacement for window.prompt()/confirm() in this file. Renders
+// labelled inputs in the existing modal-card, resolves with {id: value, ...} on
+// submit or null on Cancel/Escape/backdrop click — same shape prompt() gave callers.
+function openFieldDialog({title, description, fields, submitLabel = 'Submit'}) {
+  return new Promise(resolve => {
+    pendingDialogResolve = resolve;
+    const fieldsHtml = fields.map(f => `
+      <label for="dlg-${escHtml(f.id)}">${escHtml(f.label)}</label>
+      ${f.type === 'textarea'
+        ? `<textarea id="dlg-${escHtml(f.id)}" ${f.required ? 'required' : ''}>${escHtml(f.value || '')}</textarea>`
+        : `<input id="dlg-${escHtml(f.id)}" type="text" value="${escHtml(f.value || '')}" ${f.required ? 'required' : ''} autocomplete="off">`}
+    `).join('');
+    openModal(`
+      <h3>${escHtml(title)}</h3>
+      ${description ? `<p>${escHtml(description)}</p>` : ''}
+      <form id="field-dialog-form">
+        ${fieldsHtml}
+        <div class="field-error hidden" id="field-dialog-error"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn-sm" id="field-dialog-cancel">Cancel</button>
+          <button type="submit" class="btn-primary">${escHtml(submitLabel)}</button>
+        </div>
+      </form>
+    `);
+    document.getElementById('field-dialog-cancel').onclick = () => closeModal();
+    document.getElementById('field-dialog-form').onsubmit = event => {
+      event.preventDefault();
+      const values = {};
+      for (const f of fields) values[f.id] = document.getElementById(`dlg-${f.id}`).value;
+      pendingDialogResolve = null;
+      resolve(values);
+      closeModal();
+    };
+  });
+}
 
 async function api(method, path, body, options = {}) {
   const url = `${API}${path}`;
@@ -1566,14 +1722,37 @@ function renderRoomsList() {
     return;
   }
   const roomIsActiveView = currentCenterView() === 'conversation';
-  list.innerHTML = myRooms.map(room => `
-    <button class="nav-item${room.room_id === roomId && roomIsActiveView ? ' active' : ''}" data-room-id="${escHtml(room.room_id)}" onclick="switchRoom(this.dataset.roomId)" aria-label="#${escHtml(room.name)}"><span class="nav-icon">#</span><span class="nav-name">${escHtml(room.name)}</span></button>
-  `).join('');
+  list.innerHTML = myRooms.map(room => {
+    const unread = room.room_id === roomId ? 0 : (roomUnreadCounts.get(room.room_id) || 0);
+    return `<button class="nav-item${room.room_id === roomId && roomIsActiveView ? ' active' : ''}" data-room-id="${escHtml(room.room_id)}" onclick="switchRoom(this.dataset.roomId)" aria-label="#${escHtml(room.name)}${unread ? `, ${unread} unread` : ''}"><span class="nav-icon">#</span><span class="nav-name">${escHtml(room.name)}</span>${unread ? `<span class="nav-meta">${unread}</span>` : ''}</button>`;
+  }).join('');
 }
 
 async function refreshRooms() {
   const context = await api('GET', '/me/context');
   myRooms = context.rooms;
+  renderRoomsList();
+  refreshOtherRoomUnreads();
+}
+
+// Quiet unread counts for the sidebar's other rooms. My rooms are few, so a
+// read-cursor call plus an events-since-cursor call per other room (capped at
+// 10) is cheap; there is no lighter existing route that carries both a room's
+// read position and its latest sequence in one call.
+let roomUnreadCounts = new Map();
+async function refreshOtherRoomUnreads() {
+  const others = myRooms.filter(room => room.room_id !== roomId).slice(0, 10);
+  await Promise.allSettled(others.map(async room => {
+    try {
+      const cursor = await api('GET', `/rooms/${room.room_id}/read-cursor`);
+      const events = await api('GET', `/rooms/${room.room_id}/events?after=${cursor.last_read_sequence || 0}`);
+      const unread = events.filter(e => e.event_type === 'message.created').length;
+      if (unread > 0) roomUnreadCounts.set(room.room_id, unread);
+      else roomUnreadCounts.delete(room.room_id);
+    } catch {
+      roomUnreadCounts.delete(room.room_id);
+    }
+  }));
   renderRoomsList();
 }
 
@@ -1595,6 +1774,7 @@ async function switchRoom(targetRoomId) {
   openThreadRootId = '';
   threadReplyTargetId = '';
   readCursor = 0;
+  roomUnreadCounts.delete(roomId);
   closeSidebarDrawer();
   openCenterView('conversation');
   renderRoomsList();
@@ -1602,6 +1782,105 @@ async function switchRoom(targetRoomId) {
   connectWS();
   try { await loadState(); }
   catch (err) { toast(`Could not open #${room.name}: ${errorMessage(err)}`, 'error'); }
+}
+
+function openCreateChannelModal() {
+  openModal(`
+    <h3>Create channel</h3>
+    <form onsubmit="submitCreateChannel(event)">
+      <label for="new-channel-name">Name</label>
+      <input id="new-channel-name" required autocomplete="off" placeholder="e.g. incident-response">
+      <label for="new-channel-description">Description</label>
+      <input id="new-channel-description" autocomplete="off" placeholder="Optional">
+      <div class="field-error hidden" id="new-channel-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn-sm" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn-primary" id="new-channel-submit">Create</button>
+      </div>
+    </form>
+  `);
+}
+
+async function submitCreateChannel(event) {
+  event.preventDefault();
+  const name = document.getElementById('new-channel-name').value.trim();
+  const description = document.getElementById('new-channel-description').value.trim();
+  const errorEl = document.getElementById('new-channel-error');
+  const submitButton = document.getElementById('new-channel-submit');
+  if (!name) return;
+  submitButton.disabled = true;
+  try {
+    // This is a room-creation write in an already-discovered workspace, not a setup-time
+    // org/workspace bootstrap — the path is built separately so it reads as what it is.
+    const createRoomPath = `/workspaces/${workspaceId}/rooms`;
+    const room = await api('POST', createRoomPath, {name, description});
+    closeModal();
+    await refreshRooms();
+    await switchRoom(room.room_id);
+    toast(`#${room.name} created.`);
+  } catch (err) {
+    errorEl.textContent = errorMessage(err);
+    errorEl.classList.remove('hidden');
+    submitButton.disabled = false;
+  }
+}
+
+async function openBrowseChannels() {
+  openContext('browse');
+  const list = document.getElementById('browse-channels-list');
+  list.innerHTML = '<div class="panel-section"><div class="panel-copy">Loading…</div></div>';
+  try {
+    const rooms = await api('GET', `/workspaces/${workspaceId}/rooms`);
+    if (!rooms.length) { list.innerHTML = '<div class="panel-section"><div class="panel-copy">No channels in this workspace yet.</div></div>'; return; }
+    list.innerHTML = rooms.map(room => {
+      const mine = myRooms.some(item => item.room_id === room.room_id);
+      const action = mine
+        ? `<button class="btn-sm" onclick="closeContext();switchRoom('${escHtml(room.room_id)}')">Open</button>`
+        : `<span class="detail">by invitation</span>`;
+      return `<div class="browse-room-row"><div><div class="title">#${escHtml(room.name)}</div><div class="detail">${escHtml(room.description || 'No description')}</div></div>${action}</div>`;
+    }).join('');
+  } catch (err) {
+    list.innerHTML = `<div class="panel-section"><div class="panel-copy">${escHtml(errorMessage(err))}</div></div>`;
+  }
+}
+
+function openLeaveChannelConfirm() {
+  const name = currentRoomName || 'this channel';
+  openModal(`
+    <h3>Leave #${escHtml(name)}?</h3>
+    <p>You will need a new invitation to rejoin.</p>
+    <div class="field-error hidden" id="leave-channel-error"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn-sm" onclick="closeModal()">Cancel</button>
+      <button type="button" class="btn-primary" onclick="submitLeaveChannel()">Leave channel</button>
+    </div>
+  `);
+}
+
+async function submitLeaveChannel() {
+  const errorEl = document.getElementById('leave-channel-error');
+  const leftRoomId = roomId;
+  const leftName = currentRoomName;
+  try {
+    await api('POST', `/rooms/${leftRoomId}/leave`);
+    closeModal();
+    myRooms = myRooms.filter(item => item.room_id !== leftRoomId);
+    toast(`Left #${leftName}.`);
+    if (myRooms.length) {
+      await switchRoom(myRooms[0].room_id);
+    } else {
+      roomId = '';
+      location.reload();
+    }
+  } catch (err) {
+    errorEl.textContent = errorMessage(err);
+    errorEl.classList.remove('hidden');
+  }
+}
+
+function openInvitePeople() {
+  openContext('members');
+  requestAnimationFrame(() => document.getElementById('invite-user-id')?.focus());
 }
 
 function handleAccessRevoked() {
@@ -2119,12 +2398,13 @@ async function loadStateImpl() {
   // Approvals
   renderApprovals(state.pending_approvals);
 
+  // Decisions render first: the artifact reader below embeds the same cards,
+  // so lastDecisions must already be current when renderArtifacts reads it.
+  renderDecisions(state.decisions);
+
   // Artifacts
   renderArtifacts(state.artifacts);
   document.getElementById('artifact-nav-count').textContent = state.artifacts.length;
-
-  // Decisions
-  renderDecisions(state.decisions);
 
   // Members
   renderMembers(state.members);
@@ -2141,6 +2421,52 @@ async function loadStateImpl() {
 
   if (openThreadRootId) await refreshThread();
   updateRoomHeader();
+  refreshNotificationDot();
+  roomUnreadCounts.delete(roomId);
+  refreshOtherRoomUnreads();
+}
+
+const NOTIF_SEEN_KEY = 'xyzzy.notificationsSeenAt';
+let lastNotifications = [];
+async function refreshNotificationDot() {
+  try {
+    lastNotifications = await api('GET', '/notifications');
+    const seenAt = Number(localStorage.getItem(NOTIF_SEEN_KEY) || 0);
+    const unseen = lastNotifications.some(n => Date.parse(n.created_at) > seenAt);
+    document.getElementById('notif-dot').classList.toggle('hidden', !unseen);
+  } catch (_) { /* the bell just stays quiet until the next successful refresh */ }
+}
+
+async function openNotifications() {
+  openContext('notifications');
+  const list = document.getElementById('notifications-list');
+  try {
+    lastNotifications = await api('GET', '/notifications');
+  } catch (err) {
+    list.innerHTML = `<div class="panel-section"><div class="panel-copy">${escHtml(errorMessage(err))}</div></div>`;
+    return;
+  }
+  try { localStorage.setItem(NOTIF_SEEN_KEY, String(Date.now())); } catch (_) { /* private browsing */ }
+  document.getElementById('notif-dot').classList.add('hidden');
+  if (!lastNotifications.length) {
+    list.innerHTML = '<div class="panel-section"><div class="panel-copy">Nothing yet — mentions and invitations land here.</div></div>';
+    return;
+  }
+  const sorted = [...lastNotifications].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  list.innerHTML = sorted.map(n => `
+    <div class="notif-row" data-room-id="${escHtml(n.room_id || '')}" onclick="openNotification(this.dataset.roomId)">
+      <div class="title">${escHtml(n.title)}</div>
+      <div class="body">${escHtml(n.body)}</div>
+      <div class="time">${formatTime(n.created_at)}</div>
+    </div>
+  `).join('');
+}
+
+async function openNotification(targetRoomId) {
+  if (!targetRoomId) return;
+  closeContext();
+  if (!myRooms.some(item => item.room_id === targetRoomId)) await refreshRooms();
+  if (myRooms.some(item => item.room_id === targetRoomId)) await switchRoom(targetRoomId);
 }
 
 function handleRealtimeEvent(msg) {
@@ -2582,12 +2908,39 @@ async function markRoomRead() {
 function renderAgents(agents) {
   const panel = document.getElementById('agents-panel');
   if (!agents.length) { panel.innerHTML = '<div class="card"><div class="detail">No agents</div></div>'; return; }
+  const canRemove = currentRoomRole === 'admin';
   panel.innerHTML = agents.map(a => `
     <div class="card">
       <div class="title">${escHtml(a.name)} <span class="badge ${a.status.toLowerCase()}">${a.status}</span></div>
       <div class="detail">${escHtml(a.role)}${a.handle ? ` · <span class="handle">@${escHtml(a.handle)}</span>` : ''}</div>
+      ${canRemove ? `<button class="btn-sm" onclick="confirmRemoveAgent('${escHtml(a.agent_id)}','${escHtml(a.name).replace(/'/g, "\\'")}')">Remove</button>` : ''}
     </div>
   `).join('');
+}
+
+function confirmRemoveAgent(agentId, agentName) {
+  openModal(`
+    <h3>Remove ${escHtml(agentName)}?</h3>
+    <p>This takes the agent out of the channel and settles anything it had in flight.</p>
+    <div class="field-error hidden" id="remove-agent-error"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn-sm" onclick="closeModal()">Cancel</button>
+      <button type="button" class="btn-primary" onclick="submitRemoveAgent('${escHtml(agentId)}')">Remove</button>
+    </div>
+  `);
+}
+
+async function submitRemoveAgent(agentId) {
+  try {
+    await api('DELETE', `/rooms/${roomId}/agents/${encodeURIComponent(agentId)}`);
+    closeModal();
+    toast('Agent removed.');
+    await loadState();
+  } catch (err) {
+    const errorEl = document.getElementById('remove-agent-error');
+    errorEl.textContent = errorMessage(err);
+    errorEl.classList.remove('hidden');
+  }
 }
 
 function renderSidebarAgents(agents) {
@@ -2656,6 +3009,7 @@ function renderArtifacts(arts) {
       ${selected.content ? `<div class="artifact-doc-content">${renderMarkdown(selected.content)}</div>
         <button class="btn-sm" onclick="loadProvenance('${selected.version_id}')">Inspect claim provenance</button>
         <div id="provenance-${selected.version_id}"></div>` : '<div class="artifact-doc-content">No content on this version.</div>'}
+      ${lastDecisions.length ? `<h3>Decisions</h3>${lastDecisions.map(decisionCardHtml).join('')}` : ''}
     </article>`;
 }
 
@@ -2664,15 +3018,41 @@ function selectArtifact(artifactId) {
   renderArtifacts(lastArtifacts);
 }
 
+let lastDecisions = [];
+// One card renderer for both the People-panel records list and the artifact
+// reader, so a status change updates the badge wherever it is read from a
+// single loadState() refresh rather than two renderers drifting apart.
+function decisionCardHtml(d) {
+  const canAct = canGovernOntology();
+  let actions = '';
+  if (canAct && d.status === 'PROPOSED') {
+    actions = `<button class="btn-sm" onclick="setDecisionStatus('${escHtml(d.decision_id)}','ACTIVE')">Accept</button>`;
+  } else if (canAct && d.status === 'ACTIVE') {
+    actions = `<button class="btn-sm" onclick="setDecisionStatus('${escHtml(d.decision_id)}','SUPERSEDED')">Supersede</button>`;
+  }
+  return `
+    <div class="card" data-decision-id="${escHtml(d.decision_id)}">
+      <div class="title">${escHtml(d.title)} <span class="badge completed">${escHtml(d.status)}</span></div>
+      <div class="detail">${escHtml(d.content || '').slice(0,100)}</div>
+      ${actions}
+    </div>`;
+}
+
+async function setDecisionStatus(decisionId, status) {
+  try {
+    await api('POST', `/decisions/${decisionId}/status`, {status});
+    toast('Decision updated.');
+    await loadState();
+  } catch (err) {
+    toast(`Could not update the decision: ${errorMessage(err)}`, 'error');
+  }
+}
+
 function renderDecisions(decs) {
+  lastDecisions = decs;
   const panel = document.getElementById('decisions-panel');
   if (!decs.length) { panel.innerHTML = '<div class="card"><div class="detail">No decisions</div></div>'; return; }
-  panel.innerHTML = decs.map(d => `
-    <div class="card" data-decision-id="${escHtml(d.decision_id)}">
-      <div class="title">${escHtml(d.title)} <span class="badge completed">${d.status}</span></div>
-      <div class="detail">${escHtml(d.content || '').slice(0,100)}</div>
-    </div>
-  `).join('');
+  panel.innerHTML = decs.map(decisionCardHtml).join('');
 }
 
 function canGovernOntology() {
@@ -2810,29 +3190,38 @@ async function reviewOntologyEntity(entityId, action) {
   if (!entity || !canGovernOntology()) return;
   const body = {action};
   if (action === 'CONFIRM') {
-    const reason = prompt('Optional confirmation reason:', 'Checked against exact evidence.');
-    if (reason === null) return;
-    body.reason = reason;
+    const values = await openFieldDialog({
+      title: 'Confirm assertion',
+      fields: [{id: 'reason', label: 'Confirmation reason (optional)', value: 'Checked against exact evidence.'}],
+      submitLabel: 'Confirm',
+    });
+    if (!values) return;
+    body.reason = values.reason;
   } else {
-    const label = prompt('Corrected assertion:', entity.label);
-    if (label === null) return;
-    const confidenceText = prompt('Corrected confidence (0–1):', String(entity.confidence));
-    if (confidenceText === null) return;
-    const reason = prompt('Correction reason (required):', '');
-    if (reason === null) return;
-    const confidence = Number(confidenceText);
-    if (label !== entity.label) body.corrected_label = label;
+    const values = await openFieldDialog({
+      title: 'Correct assertion',
+      fields: [
+        {id: 'label', label: 'Corrected assertion', value: entity.label},
+        {id: 'confidence', label: 'Corrected confidence (0–1)', value: String(entity.confidence)},
+        {id: 'reason', label: 'Correction reason (required)', value: '', required: true},
+      ],
+      submitLabel: 'Save correction',
+    });
+    if (!values) return;
+    const confidence = Number(values.confidence);
+    if (values.label !== entity.label) body.corrected_label = values.label;
     if (confidence !== Number(entity.confidence)) body.corrected_confidence = confidence;
-    body.reason = reason;
+    body.reason = values.reason;
     if (body.corrected_label === undefined && body.corrected_confidence === undefined) {
-      return alert('Change the assertion or confidence before saving a correction.');
+      toast('Change the assertion or confidence before saving a correction.', 'error');
+      return;
     }
   }
   try {
     await api('POST', `/rooms/${roomId}/ontology/entities/${entityId}/reviews`, body);
     await loadState();
   } catch (err) {
-    alert(`Ontology review was not saved: ${errorMessage(err)}`);
+    toast(`Ontology review was not saved: ${errorMessage(err)}`, 'error');
   }
 }
 
@@ -2843,32 +3232,39 @@ async function reviewOntologyRelationship(relationshipId, action) {
   if (!relationship || !canGovernOntology()) return;
   const body = {action};
   if (action === 'CONFIRM') {
-    const reason = prompt('Optional link confirmation reason:', 'Checked against exact evidence.');
-    if (reason === null) return;
-    body.reason = reason;
+    const values = await openFieldDialog({
+      title: 'Confirm link',
+      fields: [{id: 'reason', label: 'Link confirmation reason (optional)', value: 'Checked against exact evidence.'}],
+      submitLabel: 'Confirm',
+    });
+    if (!values) return;
+    body.reason = values.reason;
   } else {
-    const kind = prompt(
-      'Corrected relationship (OWNS, BLOCKS, DEPENDS_ON, SUPPORTS, CONTRADICTS, REFERENCES, DERIVED_FROM):',
-      relationship.kind
-    );
-    if (kind === null) return;
-    const confidenceText = prompt('Corrected confidence (0–1):', String(relationship.confidence));
-    if (confidenceText === null) return;
-    const reason = prompt('Correction reason (required):', '');
-    if (reason === null) return;
-    const confidence = Number(confidenceText);
-    if (kind !== relationship.kind) body.corrected_kind = kind;
+    const values = await openFieldDialog({
+      title: 'Correct link',
+      description: 'Valid relationships: OWNS, BLOCKS, DEPENDS_ON, SUPPORTS, CONTRADICTS, REFERENCES, DERIVED_FROM.',
+      fields: [
+        {id: 'kind', label: 'Corrected relationship', value: relationship.kind},
+        {id: 'confidence', label: 'Corrected confidence (0–1)', value: String(relationship.confidence)},
+        {id: 'reason', label: 'Correction reason (required)', value: '', required: true},
+      ],
+      submitLabel: 'Save correction',
+    });
+    if (!values) return;
+    const confidence = Number(values.confidence);
+    if (values.kind !== relationship.kind) body.corrected_kind = values.kind;
     if (confidence !== Number(relationship.confidence)) body.corrected_confidence = confidence;
-    body.reason = reason;
+    body.reason = values.reason;
     if (body.corrected_kind === undefined && body.corrected_confidence === undefined) {
-      return alert('Change the relationship or confidence before saving a correction.');
+      toast('Change the relationship or confidence before saving a correction.', 'error');
+      return;
     }
   }
   try {
     await api('POST', `/rooms/${roomId}/ontology/relationships/${relationshipId}/reviews`, body);
     await loadState();
   } catch (err) {
-    alert(`Ontology relationship review was not saved: ${errorMessage(err)}`);
+    toast(`Ontology relationship review was not saved: ${errorMessage(err)}`, 'error');
   }
 }
 
@@ -2918,10 +3314,18 @@ function renderMembers(members) {
     const name = m.display_name || m.user_id;
     const handle = m.handle ? ` <span class="handle">@${escHtml(m.handle)}</span>` : '';
     const idLine = `<div class="detail">ID <code>${escHtml(m.user_id)}</code></div>`;
-    if (!isAdmin || m.role === 'admin') {
+    if (!isAdmin) {
       return `<div class="card"><div class="title">${escHtml(name)}${handle}${you}</div><div class="detail">${escHtml(roleLabel(m.role))}</div>${idLine}</div>`;
     }
-    return `<div class="card member-row"><div><div class="title">${escHtml(name)}${handle}</div><div class="detail">${escHtml(roleLabel(m.role))}</div>${idLine}</div><select aria-label="Access for ${escHtml(name)}" data-user-id="${escHtml(m.user_id)}" onchange="changeMemberRole(this.dataset.userId, this.value)"><option value="editor"${m.role === 'editor' ? ' selected' : ''}>Can contribute</option><option value="viewer"${m.role === 'viewer' ? ' selected' : ''}>Read only</option></select><button class="btn-sm" type="button" data-user-id="${escHtml(m.user_id)}" onclick="removeMember(this.dataset.userId)">Remove</button></div>`;
+    const roleSelect = `<select aria-label="Access for ${escHtml(name)}" data-user-id="${escHtml(m.user_id)}" onchange="changeMemberRole(this.dataset.userId, this.value)"><option value="admin"${m.role === 'admin' ? ' selected' : ''}>Admin</option><option value="editor"${m.role === 'editor' ? ' selected' : ''}>Can contribute</option><option value="viewer"${m.role === 'viewer' ? ' selected' : ''}>Read only</option></select>`;
+    if (m.role === 'admin') {
+      // Admins stay non-editable except for the role select itself: it lets an
+      // admin demote another admin, and the server 400s a demotion that would
+      // leave the room without one — that refusal surfaces inline via the same
+      // toast path changeMemberRole already uses for every other role change.
+      return `<div class="card member-row"><div><div class="title">${escHtml(name)}${handle}${you}</div><div class="detail">${escHtml(roleLabel(m.role))}</div>${idLine}</div>${roleSelect}</div>`;
+    }
+    return `<div class="card member-row"><div><div class="title">${escHtml(name)}${handle}</div><div class="detail">${escHtml(roleLabel(m.role))}</div>${idLine}</div>${roleSelect}<button class="btn-sm" type="button" data-user-id="${escHtml(m.user_id)}" onclick="removeMember(this.dataset.userId)">Remove</button></div>`;
   }).join('');
   // The invite form is rebuilt only when the caller's own access changes, so a
   // half-typed user id survives the re-render every membership event triggers.
@@ -2936,7 +3340,26 @@ function renderMembers(members) {
   const copy = isAdmin
     ? 'Invited people see this channel in their sidebar at once. Removing someone ends their live feed and access immediately.'
     : 'Invited people see this channel in their sidebar at once. A channel admin changes access or removes members.';
-  controls.innerHTML = `<form class="invite-form" onsubmit="inviteMember(event)"><input id="invite-user-id" placeholder="User ID" autocomplete="off" aria-label="User ID to invite" required><select id="invite-role" aria-label="Access level"><option value="editor">Can contribute</option><option value="viewer">Read only</option></select><button class="btn-sm" type="submit">Invite</button></form><div class="panel-copy">Ask the person for their user ID — it shows on their own entry in this list. ${copy}</div>`;
+  controls.innerHTML = `<form class="invite-form" onsubmit="inviteMember(event)"><input id="invite-user-id" list="invite-candidates" placeholder="User ID" autocomplete="off" aria-label="User ID to invite" required><datalist id="invite-candidates"></datalist><select id="invite-role" aria-label="Access level"><option value="editor">Can contribute</option><option value="viewer">Read only</option></select><button class="btn-sm" type="submit">Invite</button></form><div class="panel-copy">Ask the person for their user ID — it shows on their own entry in this list. ${copy}</div>`;
+  loadInviteCandidates(new Set(members.map(m => m.user_id)));
+}
+
+// Feeds the invite picker's datalist from the workspace member directory. That
+// route is new server-side and may still 404/403 until it lands — free-text
+// entry (already required on the input) is the fallback, so a failure here is
+// silent rather than surfaced as an error.
+async function loadInviteCandidates(existingMemberIds) {
+  const datalist = document.getElementById('invite-candidates');
+  if (!datalist) return;
+  try {
+    const candidates = await api('GET', `/workspaces/${workspaceId}/members`);
+    datalist.innerHTML = candidates
+      .filter(c => !existingMemberIds.has(c.user_id))
+      .map(c => `<option value="${escHtml(c.user_id)}">${escHtml(c.display_name || c.user_id)} (@${escHtml(c.user_id)})</option>`)
+      .join('');
+  } catch {
+    // No workspace member directory yet — the free-text input still works.
+  }
 }
 
 function roleLabel(role) {
@@ -3065,7 +3488,13 @@ function renderBranches(branches, runs) {
   document.getElementById('branch-panel-copy').textContent = `${branch.mode === 'TURN_LOCKED_SINGLE' ? 'Single agent' : 'Parallel'} · ${status} · ${count} ${count === 1 ? 'agent' : 'agents'}`;
   document.getElementById('branch-runs').innerHTML = related.map(run => {
     const agent = roomAgents.find(item => item.agent_id === run.agent_id);
-    return `<div class="card"><div class="title"><span class="status-text ${String(run.status).toLowerCase()}">${escHtml(agent ? agent.name : 'Specialist')} · ${escHtml(run.status)}</span></div><div class="detail">${escHtml(agent ? agent.role : 'Independent analysis')}</div></div>`;
+    // Mirrors the same active-run test cancelCurrentTurn() uses, so Interrupt/Redirect
+    // appear exactly when a Cancel for this run would also make sense.
+    const isActive = ['PENDING', 'RUNNING'].includes(run.status);
+    const controls = isActive && run.agent_id
+      ? `<div class="btns"><button class="btn-sm" onclick="interruptAgent('${escHtml(run.agent_id)}')">Interrupt</button><button class="btn-sm" onclick="openRedirectModal('${escHtml(run.agent_id)}')">Redirect</button></div>`
+      : '';
+    return `<div class="card"><div class="title"><span class="status-text ${String(run.status).toLowerCase()}">${escHtml(agent ? agent.name : 'Specialist')} · ${escHtml(run.status)}</span></div><div class="detail">${escHtml(agent ? agent.role : 'Independent analysis')}</div>${controls}</div>`;
   }).join('');
   renderBranchActivity(branches, runs);
 }
@@ -3126,6 +3555,45 @@ async function cancelCurrentTurn() {
   if (!run) return toast('No active run is available to cancel.');
   try { await api('POST', `/executions/${run.execution_id}/cancel`, {}); toast('Cancellation requested.'); await loadState(); }
   catch (err) { toast(`Could not cancel the run: ${errorMessage(err)}`, 'error'); }
+}
+
+async function interruptAgent(agentId) {
+  try {
+    await api('POST', `/agents/${agentId}/interrupt`, {reason: ''});
+    toast('Agent interrupted.');
+    await loadState();
+  } catch (err) { toast(`Could not interrupt the agent: ${errorMessage(err)}`, 'error'); }
+}
+
+function openRedirectModal(agentId) {
+  openModal(`
+    <h3>Redirect agent</h3>
+    <form onsubmit="submitRedirect(event, '${escHtml(agentId)}')">
+      <label for="redirect-instruction">New instruction</label>
+      <textarea id="redirect-instruction" required placeholder="Tell the agent what to do instead"></textarea>
+      <div class="field-error hidden" id="redirect-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn-sm" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn-primary">Send</button>
+      </div>
+    </form>
+  `);
+}
+
+async function submitRedirect(event, agentId) {
+  event.preventDefault();
+  const instruction = document.getElementById('redirect-instruction').value.trim();
+  if (!instruction) return;
+  try {
+    await api('POST', `/agents/${agentId}/redirect`, {instruction});
+    closeModal();
+    toast('Agent redirected.');
+    await loadState();
+  } catch (err) {
+    const errorEl = document.getElementById('redirect-error');
+    errorEl.textContent = errorMessage(err);
+    errorEl.classList.remove('hidden');
+  }
 }
 
 async function launchParallelAnalyses() {
@@ -3189,6 +3657,10 @@ async function launchParallelAnalyses() {
     setLaunchNote(`${succeeded} completed; ${failed} failed. Successful outputs remain persisted.`, 'error');
   } else {
     setLaunchNote(`${succeeded} authored outputs completed and persisted.`, 'success');
+    // A successful launch is done — leaving the tray open only invites a second,
+    // duplicate launch of the same question. A validation failure above returns
+    // before this point, so the tray stays open for the person to fix the input.
+    toggleAITray(false);
   }
 }
 
