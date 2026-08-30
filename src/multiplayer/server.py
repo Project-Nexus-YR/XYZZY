@@ -20,11 +20,16 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .api.a2a import router as a2a_router
-from .api.routes import router, set_authenticator, set_service, set_sessions
+from .api.routes import current_sessions, router, set_authenticator, set_service, set_sessions
 from .db.connection import Database
 from .realtime.hub import RealtimeHub
 from .realtime.websocket import websocket_endpoint
-from .security import AuthorizationError, TokenAuthenticator, ingest_bootstrap_tokens
+from .security import (
+    AuthorizationError,
+    TokenAuthenticator,
+    ingest_bootstrap_tokens,
+    session_cookie_name,
+)
 from .security.oidc import OidcProvider, settings_from_environment
 from .security.sessions import SessionService
 from .security.sessions import settings_from_environment as session_settings
@@ -209,9 +214,29 @@ def create_app(
         # Raised inside a write transaction when membership changed under the request.
         return JSONResponse(status_code=403, content={"detail": str(exc)})
 
+    def _ws_session_cookie() -> str | None:
+        # Read at connection time, not app-creation time: a deployment's SSO
+        # configuration is fixed at startup, but resolving it here rather than
+        # once keeps this in step with `_current_user`, which reads the same
+        # live sessions service on every request. None when SSO is
+        # unconfigured — there is no cookie flow at all in that case, so the
+        # WebSocket path skips cookie auth entirely rather than guessing at a
+        # scheme nothing configured.
+        live = current_sessions()
+        if live is None or not live.provider.settings.configured:
+            return None
+        return session_cookie_name(live.provider.settings.redirect_uri.startswith("https://"))
+
     @app.websocket("/ws")
     async def ws_route(websocket: WebSocket) -> None:
-        await websocket_endpoint(websocket, hub, authenticator, svc.authorization)
+        await websocket_endpoint(
+            websocket,
+            hub,
+            authenticator,
+            svc.authorization,
+            configured_origins(),
+            _ws_session_cookie(),
+        )
 
     # Serve the web UI
     static_dir = Path(__file__).parent.parent.parent / "web"

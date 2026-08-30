@@ -22,6 +22,19 @@ class AuthenticationError(ValueError):
     """Raised when a request has no valid configured credential."""
 
 
+# The browser session cookie carries the access token and nothing else — no
+# refresh token ever reaches it. `__Host-` is used whenever the deployment is
+# HTTPS: it binds the cookie to this exact host and path, which a plain name
+# cannot. A plain-http local run falls back to the bare name, mirroring the
+# existing login-binding cookie's own secure/insecure split.
+SECURE_SESSION_COOKIE = "__Host-xyzzy_session"
+SESSION_COOKIE = "xyzzy_session"
+
+
+def session_cookie_name(secure: bool) -> str:
+    return SECURE_SESSION_COOKIE if secure else SESSION_COOKIE
+
+
 @dataclass(frozen=True, slots=True)
 class AuthenticatedUser:
     user_id: str

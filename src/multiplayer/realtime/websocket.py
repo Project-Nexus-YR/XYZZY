@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+from collections.abc import Sequence
 from contextlib import suppress
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -27,12 +28,24 @@ log = logging.getLogger(__name__)
 REAUTH_SECONDS = 30.0
 
 
-def _websocket_authorization(websocket: WebSocket) -> tuple[str | None, str | None]:
-    """Read a browser-compatible bearer credential from negotiated subprotocols.
+def _websocket_authorization(
+    websocket: WebSocket, allowed_origins: Sequence[str], session_cookie: str | None
+) -> tuple[str | None, str | None]:
+    """Read a browser-compatible bearer credential from the handshake.
 
     Browser WebSocket APIs cannot set Authorization headers. The UI therefore sends
     ``xyzzy.v1`` plus a base64url encoded ``bearer.<token>`` protocol value. This
     keeps credentials out of URLs, query logs, and reconnect history.
+
+    Cookie mode has no subprotocol to send either, and the browser attaches the
+    cookie itself. What stands in for the header-gate CSRF check HTTP cookie auth
+    uses is the Origin header, which a WebSocket handshake does carry and a script
+    cannot forge: it must equal one of `configured_origins()` exactly.
+
+    ``session_cookie`` names exactly the one cookie this deployment's scheme
+    sets — never both names. Accepting the plain name as a fallback on an
+    HTTPS deployment is the same hole a related-subdomain attacker would use
+    against the HTTP cookie path, so there is no fallback here either.
     """
     authorization = websocket.headers.get("authorization")
     if authorization:
@@ -42,19 +55,22 @@ def _websocket_authorization(websocket: WebSocket) -> tuple[str | None, str | No
         for value in websocket.headers.get("sec-websocket-protocol", "").split(",")
         if value.strip()
     ]
-    if "xyzzy.v1" not in protocols:
-        return None, None
-    encoded = next(
-        (value.removeprefix("bearer.") for value in protocols if value.startswith("bearer.")), ""
-    )
-    if not encoded:
-        return None, None
-    try:
-        padded = encoded + "=" * (-len(encoded) % 4)
-        token = base64.urlsafe_b64decode(padded.encode()).decode()
-    except (ValueError, UnicodeDecodeError):
-        return None, None
-    return f"Bearer {token}", "xyzzy.v1"
+    if "xyzzy.v1" in protocols:
+        encoded = next(
+            (value.removeprefix("bearer.") for value in protocols if value.startswith("bearer.")),
+            "",
+        )
+        if encoded:
+            try:
+                padded = encoded + "=" * (-len(encoded) % 4)
+                token = base64.urlsafe_b64decode(padded.encode()).decode()
+            except (ValueError, UnicodeDecodeError):
+                return None, None
+            return f"Bearer {token}", "xyzzy.v1"
+    cookie = websocket.cookies.get(session_cookie) if session_cookie else None
+    if cookie and websocket.headers.get("origin", "") in allowed_origins:
+        return f"Bearer {cookie}", None
+    return None, None
 
 
 async def websocket_endpoint(
@@ -62,6 +78,8 @@ async def websocket_endpoint(
     hub: RealtimeHub,
     authenticator: TokenAuthenticator,
     authorization: RoomPolicy,
+    allowed_origins: Sequence[str] = (),
+    session_cookie: str | None = None,
 ) -> None:
     """Handle a WebSocket connection for realtime room updates.
 
@@ -75,7 +93,9 @@ async def websocket_endpoint(
         await websocket.close(code=4400, reason="room_id required")
         return
 
-    websocket_authorization, accepted_protocol = _websocket_authorization(websocket)
+    websocket_authorization, accepted_protocol = _websocket_authorization(
+        websocket, allowed_origins, session_cookie
+    )
     try:
         principal = await authenticator.authenticate(websocket_authorization)
     except AuthenticationError:

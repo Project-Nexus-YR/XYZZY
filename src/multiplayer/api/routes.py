@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 from enum import StrEnum
 from typing import Annotated, Any, TypeVar
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 from ..domain.meta import MetaQuestionKind
@@ -39,6 +40,7 @@ from ..domain.models import (
     Session,
     Task,
     TaskPriority,
+    utcnow,
 )
 from ..domain.provenance import (
     normalize_provenance_author,
@@ -52,6 +54,7 @@ from ..security import (
     RoomCapability,
     TokenAuthenticator,
     allowed_tools,
+    session_cookie_name,
 )
 from ..security.capabilities import Posture
 from ..security.oidc import OidcError
@@ -83,6 +86,13 @@ def set_sessions(sessions: SessionService | None) -> None:
     _sessions = sessions
 
 
+def current_sessions() -> SessionService | None:
+    """The live sessions service, for callers (the WS route) outside this router
+    that need to resolve the deployment's cookie name at connection time rather
+    than at app-creation time."""
+    return _sessions
+
+
 def _sessions_or_501() -> SessionService:
     """SSO is optional. A deployment without a provider says so, rather than 500."""
     if _sessions is None or not _sessions.provider.settings.configured:
@@ -96,13 +106,41 @@ def _svc_or_404() -> MultiplayerService:
     return _svc
 
 
+# The one custom header a same-origin fetch or XHR can attach and a top-level
+# navigation or cross-origin request cannot: a cross-origin page can only send
+# it via a CORS preflight, which `configured_origins()` refuses, and a browser
+# navigation (the shape of a CSRF attack against a mutating GET) never carries
+# custom headers at all. Its presence, not its value, is what gates the cookie.
+WEB_CLIENT_HEADER = "x-xyzzy-client"
+
+
 async def _current_user(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> AuthenticatedUser:
     if _authenticator is None:
         raise HTTPException(503, "authentication service not ready")
+    credential = authorization
+    if not credential and _sessions is not None:
+        # Exactly the cookie this deployment sets, never the other — same
+        # discipline as the login-binding cookie. Accepting the plain name as a
+        # fallback on an HTTPS deployment undoes the __Host- guarantee: a
+        # related-subdomain attacker plants the weaker cookie and it is
+        # accepted as a session. No SSO configured means no cookie flow at
+        # all, so cookie auth is skipped entirely rather than guessed at.
+        secure = _sessions.provider.settings.redirect_uri.startswith("https://")
+        cookie = request.cookies.get(session_cookie_name(secure))
+        if cookie:
+            if not request.headers.get(WEB_CLIENT_HEADER):
+                raise HTTPException(
+                    401,
+                    "authentication required",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            credential = f"Bearer {cookie}"
+            request.state.authenticated_via_cookie = True
     try:
-        return await _authenticator.authenticate(authorization)
+        return await _authenticator.authenticate(credential)
     except AuthenticationError as exc:
         raise HTTPException(
             401,
@@ -475,6 +513,52 @@ class RefreshRequest(BaseModel):
 NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 
 
+class AuthConfig(BaseModel):
+    sso: bool
+    provider_label: str
+    authenticated: bool
+
+
+@router.get("/auth/config")
+async def auth_config(request: Request) -> AuthConfig:
+    """Unauthenticated, so the client can ask this before it has any credential.
+
+    ``authenticated`` answers "does this browser already hold a live cookie
+    session" without the client having to probe an authenticated route and put
+    a 401 in the console on every signed-out load. It reveals one bit that a
+    cross-site caller cannot read back under CORS, and it deliberately does not
+    require the web-client header: nothing here acts on the session.
+    """
+    sso = _sessions is not None and _sessions.provider.settings.configured
+    label = os.environ.get("XYZZY_OIDC_PROVIDER_LABEL", "single sign-on")
+    authenticated = False
+    if sso and _sessions is not None and _authenticator is not None:
+        secure = _sessions.provider.settings.redirect_uri.startswith("https://")
+        cookie = request.cookies.get(session_cookie_name(secure))
+        if cookie:
+            try:
+                await _authenticator.authenticate(f"Bearer {cookie}")
+                authenticated = True
+            except AuthenticationError:
+                authenticated = False
+    return AuthConfig(sso=sso, provider_label=label, authenticated=authenticated)
+
+
+def _prefers_html(accept: str) -> bool:
+    """True when the caller's Accept header ranks text/html over JSON.
+
+    A browser's top-level navigation back from the provider sends text/html
+    first. A programmatic caller — curl, an agent, the test suite — sends
+    application/json or omits the header, so the JSON contract is the default
+    and html is the thing that has to be asked for explicitly.
+    """
+    html_at = accept.find("text/html")
+    if html_at == -1:
+        return False
+    json_at = accept.find("application/json")
+    return json_at == -1 or html_at < json_at
+
+
 def _issued(session: Any, access_token: str, refresh_token: str) -> dict[str, Any]:
     """The one moment either credential exists in plaintext outside the caller."""
     return {
@@ -488,9 +572,52 @@ def _issued(session: Any, access_token: str, refresh_token: str) -> dict[str, An
     }
 
 
+# Inline, no external asset: the callback response is the one place a fetch of
+# the app's own stylesheet would be one more round trip before the page can
+# say anything at all.
+_HANDOFF_STYLE = (
+    "body{background:#111418;color:#e6e6e6;font-family:system-ui,-apple-system,"
+    '"Segoe UI",sans-serif;display:flex;min-height:100vh;margin:0;'
+    "align-items:center;justify-content:center}"
+    ".card{background:#1b1f26;border-radius:12px;padding:2rem 2.5rem;"
+    "box-shadow:0 4px 24px rgba(0,0,0,.4);text-align:center;max-width:22rem}"
+    "a{color:#7dd3fc}"
+)
+
+
+def _handoff_page(message: str, *, redirect: bool) -> str:
+    """A minimal page for the browser landing back from the provider.
+
+    No token or other credential appears in the markup: the cookie already
+    rode the response's own Set-Cookie header, which is the only place a
+    credential belongs on this leg of the trip.
+    """
+    head = f'<meta charset="utf-8"><style>{_HANDOFF_STYLE}</style>'
+    if redirect:
+        # A no-JS fallback that lands the same place the script does.
+        head = '<meta http-equiv="refresh" content="0;url=/">' + head
+    script = "<script>location.replace('/');</script>" if redirect else ""
+    return (
+        f"<!doctype html><html><head>{head}</head>"
+        f'<body><div class="card"><p>{message}</p>'
+        '<p><a href="/">Continue to XYZZY</a></p></div>'
+        f"{script}</body></html>"
+    )
+
+
 @router.get("/auth/login")
-async def begin_login() -> RedirectResponse:
+async def begin_login(request: Request) -> RedirectResponse:
     sessions = _sessions_or_501()
+    target = urlsplit(sessions.provider.settings.redirect_uri)
+    if request.url.scheme == target.scheme and request.url.netloc != target.netloc:
+        # The binding cookie set below binds to *this* host. A user who opened
+        # the app on a different host than `redirect_uri` names — localhost vs
+        # 127.0.0.1, say — would set it on a host the callback never revisits,
+        # and every sign-in 400s. Restart the flow on the host it will
+        # actually land on, before minting anything.
+        return RedirectResponse(
+            f"{target.scheme}://{target.netloc}{request.url.path}", status_code=307
+        )
     url, binding = await sessions.begin_login()
     answer = RedirectResponse(url, status_code=307)
     secure = sessions.provider.settings.redirect_uri.startswith("https://")
@@ -511,14 +638,16 @@ async def begin_login() -> RedirectResponse:
     return answer
 
 
-@router.get("/auth/callback")
+@router.get("/auth/callback", response_model=None)
 async def complete_login(
     request: Request,
     response: Response,
     state: Annotated[str, Query(min_length=1, max_length=512)],
     code: Annotated[str, Query(min_length=1, max_length=4096)],
-) -> dict[str, Any]:
+) -> dict[str, Any] | HTMLResponse:
     sessions = _sessions_or_501()
+    secure = sessions.provider.settings.redirect_uri.startswith("https://")
+    wants_html = _prefers_html(request.headers.get("accept", ""))
     try:
         issued = await sessions.complete_login(
             state=state,
@@ -527,26 +656,51 @@ async def complete_login(
             # the plain name as a fallback on an HTTPS deployment undoes the
             # __Host- guarantee: a related-domain attacker plants the weaker
             # cookie and it is accepted as the binding.
-            binding=request.cookies.get(
-                _binding_cookie_name(
-                    sessions.provider.settings.redirect_uri.startswith("https://")
-                ),
-                "",
-            ),
+            binding=request.cookies.get(_binding_cookie_name(secure), ""),
         )
     except (SessionError, OidcError) as exc:
         # One message for every way a login can fail. Which one it was is a fact
         # about the provider's state, and telling the caller apart from an
         # attacker is not possible at this point in the flow.
         log.info("Login could not be completed: %s", exc)
+        if wants_html:
+            # The common way a browser hits this branch is pressing Back: the
+            # state this URL names was already consumed by the first visit. A
+            # styled page instead of a raw JSON body, so that dead end still
+            # looks like the app rather than an API error.
+            page = HTMLResponse(
+                _handoff_page("This sign-in could not be completed.", redirect=False),
+                status_code=400,
+            )
+            page.headers.update(NO_STORE)
+            return page
         raise HTTPException(400, "this sign-in could not be completed") from exc
+
+    if wants_html:
+        # The browser arriving by redirect. It gets a cookie carrying the access
+        # token and never sees the refresh token at all — that credential stays
+        # server-side, in the row `sessions.complete_login` already wrote. A 200
+        # page that itself navigates to `/` (rather than a 303) keeps this
+        # consumed-state URL out of history, so Back does not re-GET it.
+        page = HTMLResponse(_handoff_page("Signed in.", redirect=True))
+        page.headers.update(NO_STORE)
+        page.delete_cookie(_binding_cookie_name(secure), path="/")
+        idle_seconds = int((issued.session.idle_expires_at - utcnow()).total_seconds())
+        page.set_cookie(
+            session_cookie_name(secure),
+            issued.access_token,
+            max_age=max(idle_seconds, 0),
+            httponly=True,
+            samesite="lax",
+            secure=secure,
+            path="/",
+        )
+        return page
+
     response.headers.update(NO_STORE)
     # The binding has done its job; leaving it on the browser is one more copy of
     # a secret with nothing left to protect.
-    response.delete_cookie(
-        _binding_cookie_name(sessions.provider.settings.redirect_uri.startswith("https://")),
-        path="/",
-    )
+    response.delete_cookie(_binding_cookie_name(secure), path="/")
     return _issued(issued.session, issued.access_token, issued.refresh_token)
 
 
@@ -562,11 +716,17 @@ async def refresh_session(req: RefreshRequest, response: Response) -> dict[str, 
 
 
 @router.post("/auth/logout")
-async def end_this_session(principal: CurrentUser) -> dict[str, Any]:
+async def end_this_session(
+    principal: CurrentUser, request: Request, response: Response
+) -> dict[str, Any]:
     sessions = _sessions_or_501()
     if principal.session_id is None:
         raise HTTPException(400, "this credential is not a sign-in session")
-    return {"ended": await sessions.end_session(principal.session_id)}
+    ended = await sessions.end_session(principal.session_id)
+    if getattr(request.state, "authenticated_via_cookie", False):
+        secure = sessions.provider.settings.redirect_uri.startswith("https://")
+        response.delete_cookie(session_cookie_name(secure), path="/", secure=secure, httponly=True)
+    return {"ended": ended}
 
 
 @router.post("/auth/logout-everywhere")
@@ -615,7 +775,13 @@ async def provider_end_session(
     principal: CurrentUser,
     redirect_to: Annotated[str, Query(max_length=2048)] = "",
 ) -> dict[str, Any]:
-    """Where to send the browser so the provider ends its own session too."""
+    """Where to send the browser so the provider ends its own session too.
+
+    A mutating GET, so it must never authenticate off a bare cookie — that is
+    exactly the shape a cross-site link or `<img>` tag can trigger. `_current_user`
+    already refuses a cookie without `X-XYZZY-Client`, which a cross-site request
+    cannot attach, so this endpoint inherits that refusal rather than adding one.
+    """
     sessions = _sessions_or_501()
     if redirect_to and not sessions.permits_redirect(redirect_to):
         raise HTTPException(400, "that redirect target is not configured")
