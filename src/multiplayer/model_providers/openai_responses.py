@@ -6,9 +6,12 @@ import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    from .openai_chat_completions import OpenAIChatCompletionsProvider
 
 _RESPONSES_URL = "https://api.openai.com/v1/responses"
 _DEFAULT_MODEL = "gpt-5.4-mini"
@@ -286,16 +289,28 @@ class OpenAIResponsesProvider:
 
 def model_provider_from_environment(
     environ: Mapping[str, str] | None = None,
-) -> OpenAIResponsesProvider | WorkflowOnlyModelProvider:
+) -> OpenAIResponsesProvider | WorkflowOnlyModelProvider | OpenAIChatCompletionsProvider:
     """Build the server model provider without accepting credentials from requests or storage."""
     values = os.environ if environ is None else environ
-    api_key = values.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        return WorkflowOnlyModelProvider()
     model = values.get("XYZZY_OPENAI_MODEL", _DEFAULT_MODEL).strip() or _DEFAULT_MODEL
     raw_timeout = values.get("XYZZY_MODEL_TIMEOUT_SECONDS", str(_DEFAULT_TIMEOUT_SECONDS))
     try:
         timeout = float(raw_timeout)
     except ValueError as exc:
         raise ValueError("XYZZY_MODEL_TIMEOUT_SECONDS must be a number") from exc
+
+    base_url = values.get("XYZZY_LOCAL_MODEL_BASE_URL", "").strip()
+    if base_url:
+        # Imported lazily to avoid a circular import: the chat-completions module
+        # reuses this module's schema and step-decoding helpers.
+        from .openai_chat_completions import OpenAIChatCompletionsProvider
+
+        api_key = values.get("OPENAI_API_KEY", "").strip() or None
+        return OpenAIChatCompletionsProvider(
+            base_url=base_url, model=model, api_key=api_key, timeout_seconds=timeout
+        )
+
+    api_key = values.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return WorkflowOnlyModelProvider()
     return OpenAIResponsesProvider(api_key=api_key, model=model, timeout_seconds=timeout)
