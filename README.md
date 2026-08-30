@@ -2,8 +2,8 @@
 
 A team makes a hard technical decision with AI, and keeps the receipts.
 
-[![gates](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/ci.yml/badge.svg)](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/ci.yml)
-[![image](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/docker-publish.yml)
+[![gates](https://github.com/Yasser-Ameur/XYZZY/actions/workflows/ci.yml/badge.svg)](https://github.com/Yasser-Ameur/XYZZY/actions/workflows/ci.yml)
+[![image](https://github.com/Yasser-Ameur/XYZZY/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Yasser-Ameur/XYZZY/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 <picture>
@@ -15,7 +15,7 @@ A team makes a hard technical decision with AI, and keeps the receipts.
 ## Try it
 
 ```bash
-docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/project-nexus-yr/xyzzy
+docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/yasser-ameur/xyzzy
 ```
 
 Opens a seeded demo workspace at `http://localhost:8000`, signed in with one click. No account,
@@ -145,7 +145,7 @@ service to stand up first.
 macOS and Linux:
 
 ```bash
-git clone https://github.com/Project-Nexus-YR/XYZZY.git
+git clone https://github.com/Yasser-Ameur/XYZZY.git
 cd XYZZY
 python3 -m venv .venv
 source .venv/bin/activate
@@ -155,7 +155,7 @@ pip install -e ".[dev]"
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/Project-Nexus-YR/XYZZY.git
+git clone https://github.com/Yasser-Ameur/XYZZY.git
 cd XYZZY
 python -m venv .venv
 .venv\Scripts\Activate.ps1
@@ -394,7 +394,7 @@ docker run -p 8000:8000 -v xyzzy-data:/data -e XYZZY_AUTH_TOKENS='{"local-dev-to
 ```
 
 No account, no config, nothing to try alone: `docker compose --profile demo up` (or
-`docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/project-nexus-yr/xyzzy`, the published image —
+`docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/yasser-ameur/xyzzy`, the published image —
 see [Try it](#try-it) above) opens a seeded demo workspace at http://localhost:8000, signed in
 with one click.
 
