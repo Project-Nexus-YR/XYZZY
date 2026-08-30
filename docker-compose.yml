@@ -14,5 +14,16 @@ services:
       # OPENAI_API_KEY: ""
       # XYZZY_LOCAL_MODEL_BASE_URL: "http://host.docker.internal:11434/v1"
 
+  # Seeded, sign-in-free demo workspace: docker compose --profile demo up
+  # Mutually exclusive with real auth config by design (the server refuses
+  # XYZZY_DEMO alongside XYZZY_AUTH_TOKENS or OIDC).
+  demo:
+    build: .
+    profiles: ["demo"]
+    ports:
+      - "8000:8000"
+    environment:
+      XYZZY_DEMO: "1"
+
 volumes:
   xyzzy-data:

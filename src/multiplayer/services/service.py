@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import re
+import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -58,6 +59,7 @@ from ..domain.models import (
     ApprovalStatus,
     Artifact,
     ArtifactClaim,
+    ArtifactShare,
     ArtifactType,
     ArtifactVersion,
     Attachment,
@@ -191,6 +193,12 @@ from ..security.screening import fenced, screen
 from ..services.presence import PresenceService
 
 log = logging.getLogger(__name__)
+
+# The two human identities a demo deployment seeds. Fixed rather than generated,
+# so the one bearer token XYZZY_DEMO issues (see server.py) always resolves to
+# the same workspace on every restart of the same database.
+DEMO_USER_ID = "user_demo"
+DEMO_SECOND_USER_ID = "user_demo_second"
 
 # A mention addresses a handle: one whitespace-free token, drawn from the same
 # alphabet handle_from_display_name issues into, so every handle in the room is a
@@ -659,6 +667,132 @@ class MultiplayerService:
         ]
         for t in defaults:
             await self.repos.agents.create_template(t)
+
+    async def seed_demo_workspace(self) -> None:
+        """Populate an empty demo deployment with one realistic, offline scene.
+
+        Guarded on organizations existing at all, not on a flag row: a database
+        that already has a workspace was seeded by an earlier startup of this
+        same demo, or holds a real one, and either way there is nothing left
+        for this call to add. That makes the guard the idempotence itself —
+        a second startup finds a non-empty table and returns immediately.
+        Every write below goes through the same service methods an HTTP
+        caller would use, so it picks up every invariant those methods
+        enforce for free, and needs no API key: leaving model_provider and
+        model_name unset resolves to the SIMULATED provider, same as any
+        other room with no provider configured.
+        """
+        if await self.db.fetch_one("SELECT 1 FROM organizations LIMIT 1") is not None:
+            return
+        _org, _workspace, room = await self.bootstrap_user_workspace(
+            DEMO_USER_ID, "Yasser", "General"
+        )
+        room_id = room.room_id
+        if await self.repos.users.get(DEMO_SECOND_USER_ID) is None:
+            await self.repos.users.create(
+                User(
+                    user_id=DEMO_SECOND_USER_ID,
+                    display_name="Amira",
+                    email=f"{DEMO_SECOND_USER_ID}@demo.local",
+                )
+            )
+        await self.invite_room_member(room_id, DEMO_SECOND_USER_ID, "editor", DEMO_USER_ID)
+
+        async def say(sender: str, content: str, parent_message_id: str | None = None) -> str:
+            message = await self.send_message(
+                room_id,
+                MessageRole.HUMAN,
+                sender,
+                content,
+                parent_message_id=parent_message_id,
+                invoke_mentioned_agents=False,
+            )
+            return message.message_id
+
+        m1 = await say(
+            DEMO_USER_ID,
+            "Morning - picking up the payments-provider decision. Stripe vs Adyen vs "
+            "building on our bank's raw API.",
+        )
+        await say(
+            DEMO_SECOND_USER_ID,
+            "Finance wants an answer by Thursday. The contract renewal is the forcing function.",
+        )
+        m3 = await say(
+            DEMO_USER_ID,
+            "Main unknowns for me: EU settlement times, and what the migration costs us "
+            "in engineering weeks.",
+        )
+        await say(
+            DEMO_SECOND_USER_ID,
+            "I'll pull our current chargeback numbers so the branches have real inputs.",
+        )
+        await say(
+            DEMO_USER_ID,
+            "Adyen quotes T+1 for EU settlement on their site - worth verifying in the branch run.",
+            parent_message_id=m3,
+        )
+        await say(
+            DEMO_SECOND_USER_ID,
+            "Our bank's API settles T+2 at best, and that's before reconciliation.",
+            parent_message_id=m3,
+        )
+        await self.add_reaction(m1, DEMO_SECOND_USER_ID, "\U0001f44d")
+
+        templates = (await self.list_agent_templates())[:2]
+        agent_ids = []
+        for template in templates:
+            agent = await self.spawn_agent(
+                room_id,
+                template.template_id,
+                template.name,
+                requested_by=DEMO_USER_ID,
+                require_member=True,
+            )
+            agent_ids.append(agent.agent_id)
+        branch, runs = await self.start_branch(
+            room_id,
+            BranchMode.PARALLEL,
+            "Compare Stripe, Adyen, and our bank's raw API for EU card payments: "
+            "settlement time, fees at our volume, and migration effort.",
+            DEMO_USER_ID,
+            agent_ids,
+        )
+        for run in runs:
+            await self.execute_branch_run(branch.branch_id, run.execution_id, DEMO_USER_ID)
+        # Every output must be decided before a synthesis can read the branch, and
+        # each one is included here so the seeded brief has both perspectives in it.
+        for output in await self.list_room_outputs(room_id):
+            await self.select_output(
+                room_id, output.output_id, OutputDisposition.INCLUDED, DEMO_USER_ID
+            )
+        await self.synthesize_branch_decision_brief(
+            branch.branch_id, "Decision Brief", DEMO_USER_ID
+        )
+        await say(
+            DEMO_SECOND_USER_ID,
+            "Reading the brief now. The settlement-time claim needs a source before we commit.",
+        )
+        await say(DEMO_USER_ID, "Agreed - flagged it in Evidence. Let's decide Thursday morning.")
+
+        # Seeding runs in one instant, which stamps every message with the same
+        # minute and makes the scene read as the fixture it is. Spread the
+        # message rows back across a plausible stretch of morning instead. Only
+        # messages.created_at moves: room_events keep their true times, so the
+        # hash chain over the event log is untouched and still verifies.
+        rows = await self.db.fetch_all(
+            "SELECT message_id FROM messages WHERE room_id = ? ORDER BY created_at, message_id",
+            (room_id,),
+        )
+        gaps_minutes = [0, 4, 9, 2, 7, 3, 12, 5, 8, 6, 4, 10]
+        start = utcnow() - timedelta(minutes=sum(gaps_minutes[: len(rows)]) + 3)
+        elapsed = start
+        for i, row in enumerate(rows):
+            elapsed += timedelta(minutes=gaps_minutes[i % len(gaps_minutes)])
+            await self.db.execute(
+                "UPDATE messages SET created_at = ? WHERE message_id = ?",
+                (elapsed.isoformat(), row["message_id"]),
+            )
 
     # ── Event helpers ────────────────────────────────────────────────────────
 
@@ -5546,6 +5680,91 @@ class MultiplayerService:
 
     async def list_room_artifacts(self, room_id: str) -> list[Artifact]:
         return await self.repos.artifacts.list_by_room(room_id)
+
+    # ── Artifact shares — the room's one door to the outside ───────────────────
+
+    async def create_artifact_share(
+        self, artifact_id: str, created_by: str
+    ) -> tuple[ArtifactShare, str]:
+        """Mint a public read-only link for an artifact's latest published content.
+
+        Sharing outward is a governance act, not authorship, so it is gated on
+        room ADMINISTER rather than the MUTATE that writing a version needs. The
+        bearer token is returned here and nowhere else; only its hash is stored.
+        """
+        artifact = await self.repos.artifacts.get(artifact_id)
+        if artifact is None:
+            raise DomainError(f"artifact not found: {artifact_id}")
+        token = secrets.token_urlsafe(32)
+        share = ArtifactShare(
+            share_id=new_id("share"),
+            artifact_id=artifact_id,
+            room_id=artifact.room_id,
+            token_hash=hashlib.sha256(token.encode()).hexdigest(),
+            created_by=created_by,
+        )
+        async with self.db.transaction():
+            # Re-check ADMINISTER inside the write's own transaction: an admin
+            # demoted after the route authorized them must not still be able to
+            # open a door out of the room.
+            await self._require_capability_in_transaction(
+                artifact.room_id, created_by, RoomCapability.ADMINISTER
+            )
+            await self.repos.artifact_shares.create_in_transaction(share)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=artifact.room_id,
+                    sequence=0,
+                    event_type=EventType.ARTIFACT_SHARE_CREATED,
+                    payload={"artifact_id": artifact_id, "share_id": share.share_id},
+                    actor_id=created_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
+        return share, token
+
+    async def list_artifact_shares(self, artifact_id: str) -> list[ArtifactShare]:
+        return await self.repos.artifact_shares.list_by_artifact(artifact_id)
+
+    async def revoke_artifact_share(self, artifact_id: str, share_id: str, revoked_by: str) -> None:
+        share = await self.repos.artifact_shares.get(share_id)
+        if share is None or share.artifact_id != artifact_id:
+            raise DomainError(f"artifact share not found: {share_id}")
+        async with self.db.transaction():
+            await self._require_capability_in_transaction(
+                share.room_id, revoked_by, RoomCapability.ADMINISTER
+            )
+            revoked = await self.repos.artifact_shares.revoke_in_transaction(share_id)
+            if revoked is None:
+                raise DomainError(f"artifact share already revoked: {share_id}")
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=share.room_id,
+                    sequence=0,
+                    event_type=EventType.ARTIFACT_SHARE_REVOKED,
+                    payload={"artifact_id": artifact_id, "share_id": share_id},
+                    actor_id=revoked_by,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
+
+    async def resolve_public_share(self, token: str) -> tuple[Artifact, ArtifactVersion] | None:
+        """The `/share/{token}` route's only lookup — unauthenticated, so this never
+        raises: an unknown, malformed, or revoked token is the same None to the
+        caller, which is what keeps the public 404 from becoming an oracle."""
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        share = await self.repos.artifact_shares.get_live_by_token_hash(token_hash)
+        if share is None:
+            return None
+        artifact = await self.repos.artifacts.get(share.artifact_id)
+        if artifact is None:
+            return None
+        versions = await self.repos.artifacts.list_versions(share.artifact_id)
+        if not versions:
+            return None
+        return artifact, versions[0]
 
     # ── Decisions ────────────────────────────────────────────────────────────
 

@@ -79,11 +79,17 @@ router = APIRouter(prefix="/api/v1", tags=["multiplayer"])
 _svc: MultiplayerService | None = None
 _authenticator: TokenAuthenticator | None = None
 _sessions: SessionService | None = None
+_demo_enabled = False
 
 
 def set_service(svc: MultiplayerService | None) -> None:
     global _svc
     _svc = svc
+
+
+def set_demo_enabled(enabled: bool) -> None:
+    global _demo_enabled
+    _demo_enabled = enabled
 
 
 def set_authenticator(authenticator: TokenAuthenticator | None) -> None:
@@ -563,6 +569,7 @@ class AuthConfig(BaseModel):
     sso: bool
     provider_label: str
     authenticated: bool
+    demo: bool
 
 
 @router.get("/auth/config")
@@ -587,7 +594,9 @@ async def auth_config(request: Request) -> AuthConfig:
                 authenticated = True
             except AuthenticationError:
                 authenticated = False
-    return AuthConfig(sso=sso, provider_label=label, authenticated=authenticated)
+    return AuthConfig(
+        sso=sso, provider_label=label, authenticated=authenticated, demo=_demo_enabled
+    )
 
 
 def _prefers_html(accept: str) -> bool:
@@ -2638,6 +2647,61 @@ async def get_artifact_version_provenance(
         "provenance_hash_verified": svc.verify_artifact_provenance_hash(version, claims),
         "claims": claims,
     }
+
+
+# ── Artifact shares — the room's one door to the outside ───────────────────────
+
+
+@router.post("/artifacts/{artifact_id}/shares")
+async def create_artifact_share(
+    artifact_id: str,
+    principal: CurrentUser,
+) -> dict[str, Any]:
+    """Publish this artifact's latest version to a public URL. ADMINISTER, because
+    sharing outward is a governance act, not authorship."""
+    svc = _svc_or_404()
+    await _authorized_artifact(artifact_id, principal, RoomCapability.ADMINISTER)
+    try:
+        share, token = await svc.create_artifact_share(artifact_id, principal.user_id)
+    except DomainError as e:
+        raise HTTPException(400, str(e)) from e
+    return {
+        "share_id": share.share_id,
+        "url_path": f"/share/{token}",
+        "created_at": share.created_at.isoformat(),
+    }
+
+
+@router.get("/artifacts/{artifact_id}/shares")
+async def list_artifact_shares(
+    artifact_id: str,
+    principal: CurrentUser,
+) -> list[dict[str, Any]]:
+    await _authorized_artifact(artifact_id, principal, RoomCapability.ADMINISTER)
+    shares = await _svc_or_404().list_artifact_shares(artifact_id)
+    return [
+        {
+            "share_id": s.share_id,
+            "created_by": s.created_by,
+            "created_at": s.created_at.isoformat(),
+            "revoked_at": s.revoked_at.isoformat() if s.revoked_at else None,
+        }
+        for s in shares
+    ]
+
+
+@router.delete("/artifacts/{artifact_id}/shares/{share_id}")
+async def revoke_artifact_share(
+    artifact_id: str,
+    share_id: str,
+    principal: CurrentUser,
+) -> dict[str, str]:
+    await _authorized_artifact(artifact_id, principal, RoomCapability.ADMINISTER)
+    try:
+        await _svc_or_404().revoke_artifact_share(artifact_id, share_id, principal.user_id)
+    except DomainError as e:
+        raise HTTPException(404 if "not found" in str(e) else 400, str(e)) from e
+    return {"status": "revoked"}
 
 
 # ── Decisions ────────────────────────────────────────────────────────────────

@@ -975,6 +975,7 @@ a,.output-link{text-underline-offset:2px}
      revealing this doesn't shift the page, and hiding it up front means the
      wrong variant never flashes before the right one replaces it. -->
 <div id="setup-card-variant" class="hidden">
+<button id="setup-demo-button" onclick="enterDemoWorkspace()" style="display:none">Explore the demo workspace</button>
 <button id="setup-sso-button" onclick="startSsoLogin()">Continue with single sign-on</button>
 <details id="setup-token-details" open>
 <summary id="setup-token-summary" style="display:none" tabindex="0" role="button" aria-expanded="true" onkeydown="handleSummaryKey(event)">Use an access token instead</summary>
@@ -1008,7 +1009,7 @@ a,.output-link{text-underline-offset:2px}
     <div class="workspace-badge" aria-hidden="true">X</div>
     <div>
       <div class="workspace-name">XYZZY Workspace</div>
-      <div class="workspace-sub">Shared decision space</div>
+      <div class="workspace-sub" id="workspace-sub">Shared decision space</div>
     </div>
     <button class="icon-button" onclick="openContext('members')" aria-label="Workspace details" title="People and permissions"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="3.2" r=".9"/><circle cx="8" cy="8" r=".9"/><circle cx="8" cy="12.8" r=".9"/></svg></button>
   </div>
@@ -1303,7 +1304,7 @@ const QUICK_REACTIONS = ['👍', '🎯', '⚠️'];
 const outputSelections = new Map();
 const SESSION_STORAGE_KEY = 'xyzzy.session';
 let sessionMode = ''; // '' | 'bearer' | 'cookie'
-let ssoConfig = {sso: false, provider_label: 'single sign-on'};
+let ssoConfig = {sso: false, provider_label: 'single sign-on', demo: false};
 const COOKIE_401_GUARD_KEY = 'xyzzy.cookie401At';
 let cookieRedirecting = false;
 
@@ -2069,6 +2070,11 @@ function showWorkspace() {
   document.getElementById('setup-screen').style.display = 'none';
   document.getElementById('app-header').style.display = 'flex';
   document.getElementById('app-main').style.display = 'grid';
+  // Quiet and persistent rather than a banner: a demo session looks like any
+  // other workspace except for this one line, so nothing about the product
+  // being explored feels like a sandboxed toy.
+  document.getElementById('workspace-sub').textContent =
+    ssoConfig.demo ? 'Demo workspace' : 'Shared decision space';
   connectWS();
 }
 
@@ -2079,10 +2085,12 @@ function showWorkspace() {
 function renderSetupScreen() {
   const card = document.querySelector('.setup-card');
   const ssoButton = document.getElementById('setup-sso-button');
+  const demoButton = document.getElementById('setup-demo-button');
   const details = document.getElementById('setup-token-details');
   const summary = document.getElementById('setup-token-summary');
   const intro = document.getElementById('setup-card-intro');
   const step1 = document.getElementById('setup-step-1-text');
+  demoButton.style.display = ssoConfig.demo ? 'block' : 'none';
   if (ssoConfig.sso) {
     card.classList.add('sso-mode');
     ssoButton.textContent = `Continue with ${ssoConfig.provider_label}`;
@@ -2099,6 +2107,13 @@ function renderSetupScreen() {
     details.open = true;
     step1.textContent = 'Sign in with your access token';
   }
+  // Demo mode is refused server-side alongside SSO or a real token list, so
+  // this always wins last: nothing above describes a path the card also
+  // offers a one-click shortcut around.
+  if (ssoConfig.demo) {
+    intro.textContent = 'One click, no account, no API key — explore a workspace already mid-decision.';
+    step1.textContent = 'Explore the demo workspace';
+  }
   // Config has now answered which variant this card shows; reveal it in one
   // shot instead of letting the pre-JS default (the token form, open) flash
   // before a resolved SSO config swaps it out from under the person reading it.
@@ -2107,6 +2122,40 @@ function renderSetupScreen() {
 
 function startSsoLogin() {
   location.href = `${API}/auth/login`;
+}
+
+// The demo token is fixed server-side ("demo") and the workspace it opens is
+// seeded once at startup — no token field, no channel field, because there is
+// exactly one demo workspace to enter.
+async function enterDemoWorkspace() {
+  const button = document.getElementById('setup-demo-button');
+  button.disabled = true;
+  button.textContent = 'Opening…';
+  accessToken = 'demo';
+  userName = 'Yasser';
+  sessionMode = 'bearer';
+  try {
+    const context = await api('GET', '/me/context');
+    userId = context.user_id;
+    myRooms = context.rooms;
+    const room = context.rooms.find(item => item.room_id === storedRoomId()) || context.rooms[0];
+    if (!room) throw new Error('The demo workspace has no channel yet.');
+    roomId = room.room_id;
+    workspaceId = room.workspace_id;
+    const existingWorkspace = context.workspaces.find(item => item.workspace_id === workspaceId);
+    orgId = existingWorkspace ? existingWorkspace.org_id : '';
+    rememberRoomId(roomId);
+    persistSession();
+    showWorkspace();
+    await loadTemplates();
+  } catch (err) {
+    sessionMode = '';
+    accessToken = '';
+    toast(`Could not open the demo workspace: ${errorMessage(err)}`, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Explore the demo workspace';
+  }
 }
 
 // <summary> toggles its <details> on click already, but the critic found it

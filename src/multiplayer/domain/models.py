@@ -931,6 +931,25 @@ class ArtifactVersion:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactShare:
+    """A capability to read one artifact's latest published version, outside the room.
+
+    Only ``token_hash`` is stored; the bearer token itself is returned once, at
+    creation, and never again — the same discipline a password reset link uses.
+    ``revoked_at`` is soft: the row and its audit trail stay, only the public
+    URL stops resolving.
+    """
+
+    share_id: str
+    artifact_id: str
+    room_id: str
+    token_hash: str
+    created_by: str = ""
+    created_at: datetime = field(default_factory=utcnow)
+    revoked_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactClaim:
     """A final artifact claim whose evidence is exact immutable agent output text."""
 

@@ -107,7 +107,7 @@ service to stand up first.
 macOS and Linux:
 
 ```bash
-git clone https://github.com/Yasser-Ameur/XYZZY.git
+git clone https://github.com/Project-Nexus-YR/XYZZY.git
 cd XYZZY
 python3 -m venv .venv
 source .venv/bin/activate
@@ -117,7 +117,7 @@ pip install -e ".[dev]"
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/Yasser-Ameur/XYZZY.git
+git clone https://github.com/Project-Nexus-YR/XYZZY.git
 cd XYZZY
 python -m venv .venv
 .venv\Scripts\Activate.ps1
@@ -354,6 +354,8 @@ Without `docker compose`, the equivalent is:
 docker build -t xyzzy .
 docker run -p 8000:8000 -v xyzzy-data:/data -e XYZZY_AUTH_TOKENS='{"local-dev-token":"user_local"}' xyzzy
 ```
+
+No account, no config, nothing to try alone: `docker compose --profile demo up` (or `docker run -p 8000:8000 -e XYZZY_DEMO=1 xyzzy` after the build above) opens a seeded demo workspace at http://localhost:8000, signed in with one click.
 
 The database is a file under `/data`. Without the volume the room history dies
 with the container.

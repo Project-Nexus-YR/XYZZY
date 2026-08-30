@@ -37,6 +37,7 @@ from ..domain.models import (
     ApprovalStatus,
     Artifact,
     ArtifactClaim,
+    ArtifactShare,
     ArtifactType,
     ArtifactVersion,
     Attachment,
@@ -161,6 +162,7 @@ class Repos:
         self.search = SearchRepo(db)
         self.events = EventRepo(db)
         self.artifacts = ArtifactRepo(db)
+        self.artifact_shares = ArtifactShareRepo(db)
         self.decisions = DecisionRepo(db)
         self.memories = MemoryRepo(db)
         self.approvals = ApprovalRepo(db)
@@ -4391,6 +4393,72 @@ class ArtifactRepo:
             created_by=row["created_by"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+
+class ArtifactShareRepo:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create_in_transaction(self, share: ArtifactShare) -> ArtifactShare:
+        await self.db.execute(
+            "INSERT INTO artifact_shares(share_id, artifact_id, room_id, token_hash, "
+            "created_by, created_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                share.share_id,
+                share.artifact_id,
+                share.room_id,
+                share.token_hash,
+                share.created_by,
+                serialize_datetime(share.created_at),
+                serialize_datetime(share.revoked_at) if share.revoked_at else None,
+            ),
+        )
+        return share
+
+    async def get(self, share_id: str) -> ArtifactShare | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM artifact_shares WHERE share_id = ?", (share_id,)
+        )
+        return None if row is None else self._from_row(row)
+
+    async def get_live_by_token_hash(self, token_hash: str) -> ArtifactShare | None:
+        """The public route's only lookup — revoked and unknown tokens both miss here,
+        so the caller answers both cases with the same 404 rather than distinguishing."""
+        row = await self.db.fetch_one(
+            "SELECT * FROM artifact_shares WHERE token_hash = ? AND revoked_at IS NULL",
+            (token_hash,),
+        )
+        return None if row is None else self._from_row(row)
+
+    async def list_by_artifact(self, artifact_id: str) -> list[ArtifactShare]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM artifact_shares WHERE artifact_id = ? ORDER BY created_at DESC",
+            (artifact_id,),
+        )
+        return [self._from_row(r) for r in rows]
+
+    async def revoke_in_transaction(self, share_id: str) -> ArtifactShare | None:
+        """Soft-revoke a live share; returns None if it was already revoked."""
+        current = await self.get(share_id)
+        if current is None or current.revoked_at is not None:
+            return None
+        revoked_at = utcnow()
+        await self.db.execute(
+            "UPDATE artifact_shares SET revoked_at = ? WHERE share_id = ?",
+            (serialize_datetime(revoked_at), share_id),
+        )
+        return replace(current, revoked_at=revoked_at)
+
+    def _from_row(self, row: dict[str, Any]) -> ArtifactShare:
+        return ArtifactShare(
+            share_id=row["share_id"],
+            artifact_id=row["artifact_id"],
+            room_id=row["room_id"],
+            token_hash=row["token_hash"],
+            created_by=row["created_by"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            revoked_at=deserialize_datetime(row.get("revoked_at")),
         )
 
 

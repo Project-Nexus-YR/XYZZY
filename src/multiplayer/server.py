@@ -16,7 +16,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
@@ -26,9 +26,11 @@ from .api.routes import (
     max_attachment_bytes,
     router,
     set_authenticator,
+    set_demo_enabled,
     set_service,
     set_sessions,
 )
+from .api.share_page import render_share_not_found_page, render_share_page
 from .db.connection import Database
 from .metrics import Metrics
 from .realtime.hub import RealtimeHub
@@ -42,7 +44,7 @@ from .security import (
 from .security.oidc import OidcProvider, settings_from_environment
 from .security.sessions import SessionService
 from .security.sessions import settings_from_environment as session_settings
-from .services.service import MultiplayerService
+from .services.service import DEMO_USER_ID, MultiplayerService
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +64,17 @@ RATE_LIMIT_EXEMPT_PATHS = frozenset({"/api/v1/health", "/metrics"})
 # larger — cap: an attachment upload is legitimately bigger than any other
 # request body this API accepts, so it needs its own ceiling, not none at all.
 _ATTACHMENT_UPLOAD_PATH = re.compile(r"^/api/v1/rooms/[^/]+/attachments$")
+
+# The one bearer token a demo deployment ever issues, mapped through the same
+# XYZZY_AUTH_TOKENS machinery every other deployment uses — demo mode adds no
+# new authentication path, only a fixed value on the existing one.
+DEMO_BEARER_TOKEN = "demo"
+
+
+def _demo_mode_requested() -> bool:
+    """XYZZY_DEMO=1 (or any value but empty/"0"/"false") turns on the solo on-ramp."""
+    raw = os.environ.get("XYZZY_DEMO", "").strip().lower()
+    return raw not in ("", "0", "false")
 
 
 def _positive_int(name: str, default: int) -> int:
@@ -110,10 +123,12 @@ def create_app(
     db_path: str = ":memory:",
     *,
     auth_tokens: dict[str, str] | None = None,
+    demo: bool | None = None,
 ) -> FastAPI:
     db = Database(db_path)
     hub = RealtimeHub()
     metrics = Metrics(version=__version__)
+    demo_requested = _demo_mode_requested() if demo is None else demo
     if auth_tokens is None:
         raw_tokens = os.environ.get("XYZZY_AUTH_TOKENS", "{}")
         try:
@@ -123,6 +138,18 @@ def create_app(
         if not isinstance(configured_tokens, dict):
             raise RuntimeError("XYZZY_AUTH_TOKENS must be a JSON object")
         auth_tokens = {str(token): str(user_id) for token, user_id in configured_tokens.items()}
+    if demo_requested:
+        # Demo entry is a one-click credential into a workspace nobody else set
+        # up. Bolting it onto a deployment that already trusts a real identity
+        # provider or a real token list would hand that one-click entry the same
+        # standing those grant — this is refused before the process ever binds
+        # a port, rather than left to be discovered in a security review.
+        if settings_from_environment().configured or "XYZZY_AUTH_TOKENS" in os.environ:
+            raise RuntimeError(
+                "XYZZY_DEMO cannot be combined with a configured identity provider "
+                "or XYZZY_AUTH_TOKENS"
+            )
+        auth_tokens = {DEMO_BEARER_TOKEN: DEMO_USER_ID}
     svc = MultiplayerService(db, hub, known_users=frozenset(auth_tokens.values()))
     sessions = SessionService(
         db=db,
@@ -150,14 +177,18 @@ def create_app(
         await db.connect()
         await svc.initialize()
         await ingest_bootstrap_tokens(db, auth_tokens)
+        if demo_requested:
+            await svc.seed_demo_workspace()
         set_service(svc)
         set_authenticator(authenticator)
         set_sessions(sessions)
+        set_demo_enabled(demo_requested)
         sweeper = asyncio.create_task(sweep_run_leases())
         yield
         sweeper.cancel()
         with suppress(asyncio.CancelledError):
             await sweeper
+        set_demo_enabled(False)
         set_sessions(None)
         set_authenticator(None)
         set_service(None)
@@ -280,6 +311,25 @@ def create_app(
         metrics.set_websocket_connections(await hub.subscriber_count())
         return Response(content=metrics.render(), media_type="text/plain; version=0.0.4")
 
+    @app.get("/share/{token}")
+    async def share_page(token: str) -> Response:
+        """The growth object: unauthenticated, rate-limited like any other route
+        (it is not in RATE_LIMIT_EXEMPT_PATHS), and answers the same 404 page for
+        an unknown token, a revoked one, and a malformed one — nothing about the
+        room this artifact lives in is visible from the difference.
+        """
+        resolved = await svc.resolve_public_share(token)
+        if resolved is None:
+            return HTMLResponse(render_share_not_found_page(), status_code=404)
+        artifact, version = resolved
+        return HTMLResponse(
+            render_share_page(
+                title=artifact.name,
+                content=version.content,
+                published_at=version.created_at.date().isoformat(),
+            )
+        )
+
     # Serve the web UI
     static_dir = Path(__file__).parent.parent.parent / "web"
     if static_dir.exists():
@@ -306,8 +356,13 @@ def main() -> None:
         level=os.environ.get("XYZZY_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    db_path = sys.argv[1] if len(sys.argv) > 1 else "multiplayer.db"
-    app = create_app(db_path)
+    argv = [arg for arg in sys.argv[1:] if arg != "--demo"]
+    # A bare flag, not an env var, so `xyzzy --demo` needs no shell-specific
+    # export syntax to try in under two minutes. None (not False) when the flag
+    # is absent, so XYZZY_DEMO in the environment still decides on its own.
+    demo = True if "--demo" in sys.argv[1:] else None
+    db_path = argv[0] if argv else "multiplayer.db"
+    app = create_app(db_path, demo=demo)
     # Loopback stays the default: a process that binds every interface because
     # nobody configured it is a deployment decision made by omission.
     uvicorn.run(

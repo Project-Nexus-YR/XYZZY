@@ -94,6 +94,7 @@ async def test_auth_config_reports_sso_state():
                 "sso": False,
                 "provider_label": "single sign-on",
                 "authenticated": False,
+                "demo": False,
             }
 
             os.environ["XYZZY_OIDC_PROVIDER_LABEL"] = "Acme SSO"
@@ -112,6 +113,7 @@ async def test_auth_config_reports_sso_state():
                 "sso": True,
                 "provider_label": "Acme SSO",
                 "authenticated": False,
+                "demo": False,
             }
             assert bogus.json()["authenticated"] is False
 
