@@ -163,6 +163,26 @@ python -m multiplayer.server
 # http://localhost:8000
 ```
 
+### Local models
+
+Set `XYZZY_LOCAL_MODEL_BASE_URL` to point specialists at any OpenAI-compatible
+chat-completions server instead of the OpenAI API — Ollama, LM Studio, vLLM,
+and llama.cpp's server all qualify. It takes priority over `OPENAI_API_KEY`
+when both are set. `XYZZY_OPENAI_MODEL` still names the model; `OPENAI_API_KEY`
+is optional here and, when set, is sent as a bearer token — to the host the base
+URL names, so unset the key (or use a placeholder) when pointing at a local
+runtime you do not want your OpenAI key sent to.
+
+```bash
+# Ollama
+export XYZZY_LOCAL_MODEL_BASE_URL="http://localhost:11434/v1"
+export XYZZY_OPENAI_MODEL="llama3"
+
+# LM Studio
+export XYZZY_LOCAL_MODEL_BASE_URL="http://localhost:1234/v1"
+export XYZZY_OPENAI_MODEL="local-model"
+```
+
 ```powershell
 # Windows PowerShell: `export` is not a PowerShell verb.
 $env:XYZZY_AUTH_TOKENS = '{"local-dev-token":"user_local"}'
@@ -281,6 +301,19 @@ start a fresh chain by declining to name its parent: a cycle is refused by name,
 and a chain deeper than four delegations is too.
 
 ### Docker
+
+**Quickstart:**
+
+```bash
+git clone <this repo> && cd xyzzy
+docker compose up
+```
+
+Open http://localhost:8000 and sign in with the dev token
+`change-me-dev-token`. Replace that token in `docker-compose.yml` before
+deploying anywhere real.
+
+Without `docker compose`, the equivalent is:
 
 ```bash
 docker build -t xyzzy .
