@@ -45,8 +45,9 @@ after they arrive needs every contributor's consent):
    service. Protects the future cloud without AGPL's viral complexity (which
    Cal.com's own history shows still needs a commercial license on top).
 
-Recommendation: stay MIT unless resale-by-others genuinely threatens the plan;
-if it does, switch BEFORE launch, never after.
+**Decided 2026-08-30: stay MIT.** The adoption bet wins; the LICENSE file already
+says MIT and stays as it is. Revisit only if a competing hosted fork actually
+materializes, knowing a change can then only apply to future versions.
 
 ## Adoption prerequisites (before any of the above matters)
 
