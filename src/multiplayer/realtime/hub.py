@@ -130,6 +130,11 @@ class RealtimeHub:
         async with self._lock:
             return len(self._room_subscriptions.get(room_id, set()))
 
+    async def subscriber_count(self) -> int:
+        """Live WebSocket subscriptions across every room, for the /metrics gauge."""
+        async with self._lock:
+            return len(self._subscriptions)
+
     async def get_user_rooms(self, user_id: str) -> set[str]:
         rooms: set[str] = set()
         async with self._lock:

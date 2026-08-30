@@ -22,6 +22,7 @@ from . import __version__
 from .api.a2a import router as a2a_router
 from .api.routes import current_sessions, router, set_authenticator, set_service, set_sessions
 from .db.connection import Database
+from .metrics import Metrics
 from .realtime.hub import RealtimeHub
 from .realtime.websocket import websocket_endpoint
 from .security import (
@@ -46,6 +47,9 @@ DEFAULT_RATE_LIMIT = 120
 DEFAULT_MAX_BODY_BYTES = 1_048_576
 MAX_TRACKED_CLIENTS = 10_000
 DEFAULT_ORIGINS = ("http://localhost:8000", "http://127.0.0.1:8000")
+# Probes exempt from the rate limiter: a monitor polling either must not be
+# able to spend the budget of whoever else shares its address.
+RATE_LIMIT_EXEMPT_PATHS = frozenset({"/api/v1/health", "/metrics"})
 
 
 def _positive_int(name: str, default: int) -> int:
@@ -97,6 +101,7 @@ def create_app(
 ) -> FastAPI:
     db = Database(db_path)
     hub = RealtimeHub()
+    metrics = Metrics(version=__version__)
     if auth_tokens is None:
         raw_tokens = os.environ.get("XYZZY_AUTH_TOKENS", "{}")
         try:
@@ -172,36 +177,50 @@ def create_app(
     async def guard(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
+        request_started = time.monotonic()
         declared = request.headers.get("content-length", "")
         # A request that declares its size is refused before the body is read. A
         # chunked request declares nothing, so this caps the honest case only.
         if declared.isdigit() and int(declared) > max_body_bytes:
-            return JSONResponse(status_code=413, content={"detail": "request body too large"})
-        # The readiness probe is exempt: a monitor polling it must not be able to
-        # spend the budget of whoever else shares its address.
-        if request.url.path == "/api/v1/health":
-            return await call_next(request)
-        key = _client_key(request)
-        now = time.monotonic()
-        started, count = windows.get(key, (now, 0))
-        if now - started >= RATE_LIMIT_WINDOW_SECONDS:
-            started, count = now, 0
-        if count >= rate_limit:
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "rate limit exceeded"},
-                headers={"Retry-After": str(int(RATE_LIMIT_WINDOW_SECONDS - (now - started)) + 1)},
+            response: Response = JSONResponse(
+                status_code=413, content={"detail": "request body too large"}
             )
-        windows[key] = (started, count + 1)
-        if len(windows) > MAX_TRACKED_CLIENTS:
-            # A key is dead the moment its window rolls. Dropping the rolled ones
-            # is what keeps an unbounded client population from being a leak.
-            for stale in [
-                k for k, (at, _) in windows.items() if now - at >= RATE_LIMIT_WINDOW_SECONDS
-            ]:
-                del windows[stale]
+        # The readiness probe and the metrics scrape are exempt: a monitor
+        # polling either must not be able to spend the budget of whoever else
+        # shares its address.
+        elif request.url.path in RATE_LIMIT_EXEMPT_PATHS:
+            response = await call_next(request)
+        else:
+            key = _client_key(request)
+            now = time.monotonic()
+            started, count = windows.get(key, (now, 0))
+            if now - started >= RATE_LIMIT_WINDOW_SECONDS:
+                started, count = now, 0
+            if count >= rate_limit:
+                metrics.record_rate_limited()
+                response = JSONResponse(
+                    status_code=429,
+                    content={"detail": "rate limit exceeded"},
+                    headers={
+                        "Retry-After": str(int(RATE_LIMIT_WINDOW_SECONDS - (now - started)) + 1)
+                    },
+                )
+            else:
+                windows[key] = (started, count + 1)
+                if len(windows) > MAX_TRACKED_CLIENTS:
+                    # A key is dead the moment its window rolls. Dropping the
+                    # rolled ones is what keeps an unbounded client population
+                    # from being a leak.
+                    for stale in [
+                        k for k, (at, _) in windows.items() if now - at >= RATE_LIMIT_WINDOW_SECONDS
+                    ]:
+                        del windows[stale]
+                response = await call_next(request)
 
-        return await call_next(request)
+        metrics.record_request(
+            request.method, response.status_code, time.monotonic() - request_started
+        )
+        return response
 
     app.include_router(router)
     # The A2A surface is rooted rather than under /api/v1: its endpoint path and
@@ -237,6 +256,13 @@ def create_app(
             configured_origins(),
             _ws_session_cookie(),
         )
+
+    @app.get("/metrics")
+    async def metrics_endpoint() -> Response:
+        # Single-process gauge: the count of subscriptions live in this
+        # server's own hub, not a fleet-wide total.
+        metrics.set_websocket_connections(await hub.subscriber_count())
+        return Response(content=metrics.render(), media_type="text/plain; version=0.0.4")
 
     # Serve the web UI
     static_dir = Path(__file__).parent.parent.parent / "web"

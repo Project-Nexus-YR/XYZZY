@@ -73,6 +73,54 @@ async def test_the_rate_limit_counts_the_principal_and_exempts_the_probe(monkeyp
             assert (await client.get("/api/v1/health")).status_code == 200
 
 
+@pytest.mark.asyncio
+async def test_metrics_exposes_expected_series_and_advances_after_a_request():
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    transport = ASGITransport(app=app)
+
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            before = await client.get("/metrics")
+            assert before.status_code == 200
+            assert before.headers["content-type"].startswith("text/plain")
+            before_text = before.text
+            for series in (
+                "# TYPE xyzzy_http_requests_total counter",
+                "# TYPE xyzzy_http_request_seconds histogram",
+                "# TYPE xyzzy_rate_limited_total counter",
+                "# TYPE xyzzy_websocket_connections gauge",
+                "# TYPE xyzzy_build_info gauge",
+                'xyzzy_build_info{version="',
+            ):
+                assert series in before_text
+
+            await client.get("/api/v1/me/context", headers=HEADERS)
+
+            after_text = (await client.get("/metrics")).text
+            assert 'xyzzy_http_requests_total{method="GET",status="2xx"}' in after_text
+
+
+@pytest.mark.asyncio
+async def test_metrics_counts_the_429_branch_and_is_itself_rate_limit_exempt(monkeypatch):
+    monkeypatch.setenv("XYZZY_RATE_LIMIT_PER_MINUTE", "1")
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    transport = ASGITransport(app=app)
+
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.get("/api/v1/me/context", headers=HEADERS)
+            limited = await client.get("/api/v1/me/context", headers=HEADERS)
+            assert limited.status_code == 429
+
+            # /metrics itself must not be spendable, and must not count itself
+            # against the same budget the assertion above just exhausted.
+            for _ in range(3):
+                assert (await client.get("/metrics")).status_code == 200
+
+            text = (await client.get("/metrics")).text
+            assert "xyzzy_rate_limited_total 1" in text
+
+
 def test_cors_origins_default_to_loopback_and_refuse_a_wildcard(monkeypatch):
     monkeypatch.delenv("XYZZY_CORS_ORIGINS", raising=False)
     assert configured_origins() == list(DEFAULT_ORIGINS)
