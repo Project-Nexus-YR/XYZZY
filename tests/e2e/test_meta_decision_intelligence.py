@@ -1029,7 +1029,7 @@ def test_one_meta_answer_gives_one_account_of_each_assertion_currency() -> None:
 
 def test_browser_meta_contract_exposes_scope_freshness_and_drilldown() -> None:
     ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
-    assert 'id="meta-panel"' in ui
+    assert 'data-center-view="meta"' in ui
     assert 'id="meta-question"' in ui
     assert 'id="meta-scope"' in ui
     assert 'id="meta-answer"' in ui

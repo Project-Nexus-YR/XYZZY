@@ -140,6 +140,7 @@ button:disabled{cursor:not-allowed;opacity:.4}
 ::-webkit-scrollbar-thumb:hover{background:var(--line-3);background-clip:content-box}
 ::-webkit-scrollbar-track{background:transparent}
 .hidden{display:none!important}
+.sidebar-backdrop{display:none}
 
 /* every machine fact — ids, counts, durations, stamps — is set here */
 .mono,.badge,.status,.nav-label,.nav-meta,.member-row .handle,.events-log,
@@ -286,8 +287,14 @@ a,.output-link{text-underline-offset:2px}
   color:var(--text-3);font-size:var(--t-ui);
 }
 .nav-item:hover .nav-icon,.nav-item.active .nav-icon{color:currentColor}
-.nav-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .nav-meta{font-size:var(--t-meta);color:var(--text-3)}
+/* A branch row packs a title and a summary line into .nav-name, which is
+   otherwise a single nowrap line — the two ran together with the title's
+   ellipsis touching the summary text. Let this one row wrap onto its own
+   second line instead, with the title still truncating on its own. */
+.branch-nav .nav-name{white-space:normal;overflow:visible;text-overflow:clip;display:flex;flex-direction:column;align-items:flex-start;min-width:0}
+.branch-nav .nav-name > span:first-child{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .member-row{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-1) var(--s-2);font-size:var(--t-ui);color:var(--text-2);letter-spacing:var(--k-ui)}
 .member-row .handle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--t-meta);color:var(--text-3)}
 .member-row .badge{margin-left:auto}
@@ -323,7 +330,7 @@ a,.output-link{text-underline-offset:2px}
 
 /* ---------- conversation ---------- */
 .room-hash{color:var(--text-3);display:grid;place-items:center;flex-shrink:0}
-.center{min-width:0;display:flex;flex-direction:column;background:var(--bg);min-height:0}
+.center{min-width:0;display:flex;flex-direction:column;background:var(--bg);min-height:0;position:relative}
 .room-header{
   display:flex;align-items:center;gap:var(--s-3);min-height:48px;flex-shrink:0;
   padding:0 var(--s-2) 0 var(--s-5);border-bottom:1px solid var(--line);
@@ -342,6 +349,11 @@ a,.output-link{text-underline-offset:2px}
 .messages{
   flex:1;overflow-y:auto;min-height:0;
   padding:var(--s-5) max(var(--s-5),3vw) var(--s-1);display:flex;flex-direction:column;
+  /* A short room reads like a bare page pinned to the top; pushing the run of
+     messages to the bottom edge (newest just above the composer) is how every
+     chat product handles it. Once content overflows, flex-end just means the
+     top of it scrolls off first — normal scroll behavior is unaffected. */
+  justify-content:flex-end;
 }
 
 .msg{
@@ -358,7 +370,7 @@ a,.output-link{text-underline-offset:2px}
 .msg.human::before{border-color:var(--line-3);color:var(--text)}
 .msg.agent::before{border-style:dashed;color:var(--text-2)}
 /* consecutive messages from one author collapse into a block */
-.msg.grouped{padding-top:1px}
+.msg.grouped{padding-top:0}
 .msg.grouped::before{content:"";border:0}
 .msg.grouped .sender{display:none}
 .msg.grouped .time{
@@ -393,13 +405,24 @@ a,.output-link{text-underline-offset:2px}
 .output-link{color:var(--accent);text-decoration:none;border-bottom:1px solid currentColor}
 .output-link:hover{color:var(--accent-2)}
 .msg-actions{
-  grid-row:4;grid-column:2/4;display:flex;gap:var(--s-half);margin-top:var(--s-1);
-  opacity:0;transition:opacity var(--t-fast);
+  grid-row:4;grid-column:2/4;display:flex;gap:var(--s-half);margin-top:0;
+  max-height:0;overflow:hidden;opacity:0;
+  transition:opacity var(--t-fast),max-height var(--t-fast),margin-top var(--t-fast);
 }
-.msg:hover .msg-actions,.msg:focus-within .msg-actions{opacity:1}
+/* Hidden means zero height, not just invisible — a hover strip nobody is
+   hovering must not hold a bubble away from its own group. The thread pane
+   reuses this same class for its per-reply "Reply to this", so it follows
+   the identical reveal rule rather than staying permanently rendered. */
+.msg:hover .msg-actions,.msg:focus-within .msg-actions,.msg.actions-open .msg-actions,
+.thread-item:hover .msg-actions,.thread-item:focus-within .msg-actions,.thread-item.actions-open .msg-actions{
+  opacity:1;max-height:32px;margin-top:var(--s-1);
+}
+/* No hover on touch: a tap on the message body toggles .actions-open instead,
+   so a screen of chat is not a permanent stack of "Reply" rows. */
 .msg-actions .action{
   font-size:var(--t-small);color:var(--text-3);letter-spacing:var(--k-small);
-  padding:var(--s-half) var(--s-2);border-radius:var(--r-2);
+  padding:var(--s-half) var(--s-2);border-radius:var(--r-2);min-height:24px;
+  display:inline-flex;align-items:center;
   transition:background var(--t-fast),color var(--t-fast);
 }
 .msg-actions .action:hover{background:var(--line);color:var(--text)}
@@ -433,9 +456,11 @@ a,.output-link{text-underline-offset:2px}
   width:22px;height:22px;border-radius:var(--r-1);border:1px solid var(--line-2);
   color:var(--accent);display:grid;place-items:center;font-size:var(--t-ui);
 }
-.branch-title{font-size:var(--t-ui);font-weight:var(--w-medium);letter-spacing:var(--k-ui)}
-.branch-detail,.branch-progress{font-size:var(--t-meta);color:var(--text-3);margin-top:var(--s-1);letter-spacing:.01em}
-.branch-summary{font-size:var(--t-small);color:var(--text-2);margin-top:var(--s-1);letter-spacing:var(--k-small)}
+.branch-title{font-size:var(--t-ui);font-weight:var(--w-medium);letter-spacing:var(--k-ui);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Both spans are inline text nodes by default, so a truncated title's ellipsis
+   ran straight into the meta beside it. A real line, not a margin nothing can see. */
+.branch-detail,.branch-progress{font-size:var(--t-meta);color:var(--text-3);margin-top:var(--s-1);letter-spacing:.01em;display:block}
+.branch-summary{font-size:var(--t-small);color:var(--text-2);margin-top:var(--s-1);letter-spacing:var(--k-small);display:block}
 .status-text{display:inline-flex;align-items:center;gap:var(--s-1);font-size:var(--t-meta);color:var(--text-2)}
 
 .turn-lock{
@@ -486,7 +511,7 @@ a,.output-link{text-underline-offset:2px}
 
 /* ---------- branch launcher ---------- */
 .ai-tray{
-  display:none;position:absolute;bottom:100%;z-index:20;
+  display:none;position:absolute;bottom:84px;z-index:20;
   left:max(var(--s-5),3vw);right:max(var(--s-5),3vw);max-width:var(--content);max-height:62vh;
   background:var(--raised);border:1px solid var(--line-2);border-radius:var(--r-3);
   box-shadow:var(--shadow-2);overflow:hidden;
@@ -556,7 +581,25 @@ a,.output-link{text-underline-offset:2px}
 .launch-note{flex:1;font-size:var(--t-small);color:var(--text-3);line-height:1.45;letter-spacing:var(--k-small)}
 .empty-outputs{font-size:var(--t-small);color:var(--text-3);padding:var(--s-3);text-align:center}
 
-/* ---------- context panel ---------- */
+/* ---------- center view stack ---------- */
+.center-views{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
+.center-view{display:none;flex:1;min-height:0;flex-direction:column;overflow:hidden}
+.center-view.active{display:flex}
+.view-scroll{flex:1;overflow-y:auto;min-height:0}
+/* Meta and Artifact are reading surfaces, not working grids: give the column a
+   ceiling and center it instead of letting prose hug the left edge of a wide window. */
+#view-meta .view-scroll,#view-artifact .view-scroll{max-width:920px;width:100%;margin:0 auto;padding-top:var(--s-4)}
+.view-head{
+  display:flex;align-items:flex-start;justify-content:space-between;gap:var(--s-3);
+  padding:var(--s-4) max(var(--s-5),3vw) var(--s-3);
+}
+.view-empty{
+  flex:1;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;
+  gap:var(--s-3);max-width:52ch;padding:var(--s-5) max(var(--s-5),3vw);
+}
+.view-empty p{font-size:var(--t-ui);color:var(--text-2);line-height:1.55;letter-spacing:var(--k-ui)}
+
+/* ---------- context panel (Thread / Search / People only) ---------- */
 .right-panel{
   display:none;width:min(392px,36vw);min-width:340px;
   background:var(--surface);border-left:1px solid var(--line);
@@ -569,18 +612,6 @@ a,.output-link{text-underline-offset:2px}
 }
 .context-head h2{font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui)}
 .context-head .icon-button{margin-left:auto}
-.context-tabs{
-  display:flex;gap:var(--s-half);flex-shrink:0;padding:var(--s-1) var(--s-2) 0;
-  overflow-x:auto;border-bottom:1px solid var(--line);scrollbar-width:none;
-}
-.context-tabs::-webkit-scrollbar{display:none}
-.context-tab{
-  font-size:var(--t-small);color:var(--text-3);letter-spacing:var(--k-small);
-  padding:var(--s-1) var(--s-2) var(--s-2);
-  border-bottom:1px solid transparent;white-space:nowrap;transition:color var(--t-fast);
-}
-.context-tab:hover{color:var(--text-2)}
-.context-tab.active{color:var(--text);border-bottom-color:var(--accent)}
 .context-scroll{flex:1;overflow-y:auto;min-height:0}
 .context-view{display:none}
 .context-view.active{display:block}
@@ -590,14 +621,27 @@ a,.output-link{text-underline-offset:2px}
 
 .outputs-head{
   display:flex;align-items:baseline;justify-content:space-between;gap:var(--s-2);
-  padding:var(--s-2) var(--s-4);border-top:1px solid var(--line);
+  padding:var(--s-2) max(var(--s-5),3vw);border-top:1px solid var(--line);
 }
 .outputs-head h3{font-size:var(--t-meta);letter-spacing:.1em;text-transform:uppercase;color:var(--text-3);font-weight:var(--w-normal)}
 .outputs-count{font-size:var(--t-meta);color:var(--text-3)}
-.outputs-grid{display:block;padding:0 var(--s-4) var(--s-3)}
-.output-card{border-bottom:1px solid var(--line);padding:var(--s-3) 0}
-.output-card:last-child{border-bottom:0}
-.output-card.included{background:transparent}
+.outputs-grid{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:var(--s-3);
+  padding:0 max(var(--s-5),3vw) var(--s-4);align-items:stretch;
+}
+/* Branch view: the header block above stays its natural size, the grid takes
+   whatever is left of the viewport instead of shrink-wrapping to its content, and
+   each card stretches to that row height — long or short, the surface reads full. */
+#view-branch .view-scroll{display:flex;flex-direction:column}
+/* Cards size to their own content — a short output should not be forced to fill
+   the viewport. min-height keeps short cards from looking clipped-thin; content
+   past that scrolls inside the card instead of stretching it. */
+#view-branch .outputs-grid{grid-auto-rows:minmax(160px,auto)}
+.output-card{
+  border:1px solid var(--line);border-radius:var(--r-3);background:var(--raised);
+  padding:var(--s-3);display:flex;flex-direction:column;min-height:0;
+}
+.output-card.excluded{opacity:.72}
 .output-card.excluded .output-content{color:var(--text-3)}
 .output-card.excluded .output-author{text-decoration:line-through;text-decoration-thickness:1px;text-underline-offset:2px}
 .output-card-head{display:flex;align-items:center;gap:var(--s-2)}
@@ -605,7 +649,20 @@ a,.output-link{text-underline-offset:2px}
 .output-role{font-size:var(--t-meta);color:var(--accent);margin-top:var(--s-half)}
 .output-content{
   font-size:var(--t-small);line-height:1.6;color:var(--text-2);letter-spacing:var(--k-small);
-  max-height:220px;overflow:auto;margin:var(--s-2) 0;white-space:pre-wrap;
+  flex:1;min-height:80px;max-height:50vh;overflow:auto;margin:var(--s-2) 0;white-space:pre-wrap;
+}
+.output-content.md,.artifact-doc-content.md,.meta-answer.md{white-space:normal}
+.output-content h3,.output-content h4,.output-content h5,
+.artifact-doc-content h3,.artifact-doc-content h4,.artifact-doc-content h5,
+.meta-answer h3,.meta-answer h4,.meta-answer h5{margin:var(--s-3) 0 var(--s-1);font-weight:var(--w-strong);color:var(--text)}
+.output-content p,.artifact-doc-content p,.meta-answer p{margin:var(--s-2) 0}
+.output-content ul,.artifact-doc-content ul,.meta-answer ul{margin:var(--s-2) 0;padding-left:1.2em}
+.output-content pre,.artifact-doc-content pre,.meta-answer pre{
+  background:var(--sunken);border-radius:var(--r-2);padding:var(--s-2);overflow:auto;
+  font-family:var(--mono);font-size:var(--t-small);margin:var(--s-2) 0;
+}
+.output-content code,.artifact-doc-content code,.meta-answer code{
+  font-family:var(--mono);font-size:.92em;background:var(--sunken);padding:0 3px;border-radius:var(--r-1);
 }
 .output-provenance{font-size:var(--t-meta);color:var(--text-3);line-height:1.5}
 .review-state{font-size:var(--t-meta);color:var(--text-3);text-transform:uppercase;letter-spacing:.05em}
@@ -616,8 +673,10 @@ a,.output-link{text-underline-offset:2px}
   transition:background var(--t-fast);
 }
 .review-actions button:hover{background:var(--line)}
-.review-actions button.active.include{color:var(--ok);border-color:currentColor}
-.review-actions button.active.exclude{color:var(--danger);border-color:currentColor}
+/* Text-color-only active state read as barely-different from the inactive
+   outline in the light theme. A filled chip is unmistakable in both. */
+.review-actions button.active.include{color:var(--ok);border-color:currentColor;background:var(--accent-dim);font-weight:var(--w-medium)}
+.review-actions button.active.exclude{color:var(--danger);border-color:currentColor;background:var(--accent-dim);font-weight:var(--w-medium)}
 .output-record-head{font-size:var(--t-small);font-weight:var(--w-medium);letter-spacing:var(--k-small)}
 .output-record-body{font-size:var(--t-small);color:var(--text-2);margin-top:var(--s-1);line-height:1.5;letter-spacing:var(--k-small)}
 .synthesis-gate{
@@ -634,9 +693,9 @@ a,.output-link{text-underline-offset:2px}
 }
 
 /* meta */
-.meta-head{padding:var(--s-4)}
-.meta-head h3{font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui)}
-.meta-head p{font-size:var(--t-small);color:var(--text-3);line-height:1.5;margin-top:var(--s-1);letter-spacing:var(--k-small)}
+.meta-head{padding:var(--s-4) max(var(--s-5),3vw)}
+.meta-head h3{font-size:var(--t-title);font-weight:var(--w-strong);letter-spacing:var(--k-title)}
+.meta-head p{font-size:var(--t-ui);color:var(--text-3);line-height:1.55;margin-top:var(--s-1);letter-spacing:var(--k-ui);max-width:60ch}
 .meta-presets{display:flex;flex-wrap:wrap;gap:var(--s-2);margin-top:var(--s-3)}
 .meta-presets button{
   font-size:var(--t-small);color:var(--text-2);border:1px solid var(--line-2);
@@ -644,7 +703,7 @@ a,.output-link{text-underline-offset:2px}
   transition:background var(--t-fast),color var(--t-fast);
 }
 .meta-presets button:hover{background:var(--line);color:var(--text)}
-.meta-query{display:flex;gap:var(--s-2);padding:0 var(--s-4) var(--s-3)}
+.meta-query{display:flex;gap:var(--s-2);padding:0 max(var(--s-5),3vw) var(--s-3);max-width:68ch}
 .meta-query input{
   flex:1;min-width:0;background:var(--bg);border:1px solid var(--edge);
   border-radius:var(--r-2);padding:var(--s-2) var(--s-3);font-size:var(--t-ui);caret-color:var(--accent);
@@ -655,24 +714,43 @@ a,.output-link{text-underline-offset:2px}
   transition:background var(--t-fast);
 }
 .meta-query button:hover{background:var(--line)}
-.meta-scope{font-size:var(--t-small);color:var(--text-3);padding:0 var(--s-4) var(--s-2);line-height:1.5}
+.meta-scope{font-size:var(--t-small);color:var(--text-3);padding:0 max(var(--s-5),3vw) var(--s-2);line-height:1.5}
 .meta-answer{
-  margin:0 var(--s-4);padding:var(--s-3);background:var(--bg);border:1px solid var(--line);
+  margin:0 max(var(--s-5),3vw);padding:var(--s-3);background:var(--bg);border:1px solid var(--line);
   border-radius:var(--r-3);font-size:var(--t-ui);line-height:1.6;color:var(--text-2);letter-spacing:var(--k-ui);
+  max-width:68ch;
 }
-.meta-evidence{padding:var(--s-3) var(--s-4);display:grid;gap:var(--s-2)}
+.meta-evidence{padding:var(--s-3) max(var(--s-5),3vw);display:grid;gap:var(--s-2);max-width:68ch}
 .meta-chain{
   border-left:1px solid var(--line-2);padding:var(--s-half) 0 var(--s-half) var(--s-3);
   font-size:var(--t-small);color:var(--text-3);line-height:1.5;letter-spacing:var(--k-small);
 }
 .meta-chain pre{font-size:var(--t-meta);white-space:pre-wrap;color:var(--text-2);margin-top:var(--s-1)}
 
+/* artifact reader */
+.artifact-selector{display:flex;flex-wrap:wrap;gap:var(--s-2);padding:var(--s-4) max(var(--s-5),3vw) 0}
+.artifact-selector button{
+  border:1px solid var(--line-2);border-radius:var(--r-2);padding:var(--s-1) var(--s-2);
+  font-size:var(--t-small);color:var(--text-2);letter-spacing:var(--k-small);
+  transition:background var(--t-fast),border-color var(--t-fast);
+}
+.artifact-selector button:hover{background:var(--line)}
+.artifact-selector button.active{border-color:var(--accent);background:var(--accent-dim);color:var(--text)}
+.artifact-doc{padding:var(--s-4) max(var(--s-5),3vw)}
+.artifact-doc h2{font-size:var(--t-head);font-weight:var(--w-strong);letter-spacing:var(--k-head);max-width:68ch}
+.artifact-doc-meta{font-size:var(--t-small);color:var(--text-3);margin-top:var(--s-1);letter-spacing:var(--k-small)}
+.artifact-doc-content{
+  font-size:var(--t-body);line-height:1.65;color:var(--text-2);letter-spacing:var(--k-body);
+  max-width:68ch;margin-top:var(--s-4);white-space:pre-wrap;
+}
+.artifact-doc .btn-sm{margin-top:var(--s-3)}
+
 /* ontology */
-.ontology-head{display:flex;align-items:flex-start;gap:var(--s-2);padding:var(--s-4)}
+.ontology-head{display:flex;align-items:flex-start;gap:var(--s-2);padding:var(--s-4) max(var(--s-5),3vw)}
 .ontology-head h3{font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui)}
 .ontology-head p{font-size:var(--t-small);color:var(--text-3);line-height:1.5;margin-top:var(--s-1);letter-spacing:var(--k-small)}
 .ontology-mode{font-size:var(--t-meta);color:var(--text-3);border:1px solid var(--line-2);border-radius:var(--r-1);padding:1px var(--s-2);white-space:nowrap;text-transform:uppercase;letter-spacing:.05em}
-.ontology-tree{padding:0 var(--s-4) var(--s-3);display:grid;gap:var(--s-2)}
+.ontology-tree{padding:0 max(var(--s-5),3vw) var(--s-3);display:grid;gap:var(--s-2);max-width:68ch}
 .ontology-node{border-left:1px solid var(--line-2);padding:var(--s-half) 0 var(--s-half) var(--s-3)}
 .ontology-node-head{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap}
 .ontology-label{font-size:var(--t-small);font-weight:var(--w-medium);letter-spacing:var(--k-small)}
@@ -682,7 +760,7 @@ a,.output-link{text-underline-offset:2px}
 .ontology-actions button{border:1px solid var(--line-2);border-radius:var(--r-2);padding:var(--s-1) var(--s-2);font-size:var(--t-small);color:var(--text-2);letter-spacing:var(--k-small)}
 .ontology-actions button:hover{background:var(--line)}
 .ontology-empty{font-size:var(--t-small);color:var(--text-3);padding:var(--s-2) 0;letter-spacing:var(--k-small)}
-.ontology-history{padding:0 var(--s-4) var(--s-4);font-size:var(--t-small);color:var(--text-2)}
+.ontology-history{padding:0 max(var(--s-5),3vw) var(--s-4);font-size:var(--t-small);color:var(--text-2);max-width:68ch}
 .ontology-history summary{cursor:pointer;color:var(--text-3);font-size:var(--t-small);padding:var(--s-1) 0}
 .history-item{border-left:1px solid var(--line-2);padding:var(--s-1) 0 var(--s-1) var(--s-3);margin-top:var(--s-2);font-size:var(--t-meta);color:var(--text-3)}
 .history-values{font-size:var(--t-small);color:var(--text-2);margin-top:var(--s-half);letter-spacing:var(--k-small)}
@@ -690,12 +768,26 @@ a,.output-link{text-underline-offset:2px}
 
 /* thread + search */
 .thread-item{padding:var(--s-3) var(--s-4);border-bottom:1px solid var(--line)}
+/* One attribution renderer serves both panes; the thread lays its output on
+   one baseline row instead of growing a template of its own. */
+.thread-item .sender{display:flex;align-items:baseline;gap:var(--s-2);flex-wrap:wrap;
+  font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui);color:var(--text)}
+.thread-item .sender .time{font-size:var(--t-meta);font-weight:var(--w-normal);color:var(--text-3)}
 .thread-body{font-size:var(--t-ui);line-height:1.6;margin-top:var(--s-half);white-space:pre-wrap;overflow-wrap:anywhere;letter-spacing:var(--k-ui)}
 .thread-reply,.search-form,.invite-form{
   display:flex;gap:var(--s-2);align-items:center;flex-wrap:wrap;
   padding:var(--s-3) var(--s-4);border-top:1px solid var(--line);
 }
-.thread-reply input,.search-form input,.invite-form input,.invite-form select{
+/* The query grows full-width on its own row; the scope checkbox and the submit
+   control travel together as one unit right under it, never split apart. */
+.search-form{flex-direction:column;align-items:stretch}
+.search-form input#search-input{width:100%;flex:none}
+.search-form-row{display:flex;align-items:center;gap:var(--s-2)}
+/* The scope checkbox is a compact unit with its label, never the flexible
+   text input this rule is meant for — a checkbox that also matched here is
+   what stretched it into a 118px bar overlapping the label. */
+.thread-reply input:not([type="checkbox"]),.search-form input:not([type="checkbox"]),
+.invite-form input:not([type="checkbox"]),.invite-form select{
   flex:1;min-width:118px;background:var(--bg);border:1px solid var(--edge);
   border-radius:var(--r-2);padding:var(--s-2) var(--s-3);font-size:var(--t-ui);caret-color:var(--accent);
 }
@@ -741,9 +833,15 @@ a,.output-link{text-underline-offset:2px}
   .main{grid-template-columns:minmax(0,1fr)}
   .room-header{padding-left:var(--s-2);gap:var(--s-1)}
   .room-header .meta{display:none}
-  .header-actions .status{max-width:66px;overflow:hidden;white-space:nowrap}
+  /* The dot alone carries the state at this width; the word stays for screen
+     readers via aria-label instead of clipping mid-letter. */
+  .header-actions .status{
+    font-size:0;width:5px;height:5px;padding:0;gap:0;overflow:hidden;
+  }
   .composer-hint{display:none}
   .messages{padding:var(--s-3) var(--s-3) var(--s-1)}
+  .view-head,.view-empty,.outputs-head,.outputs-grid{padding-left:var(--s-3);padding-right:var(--s-3)}
+  .outputs-grid{grid-template-columns:1fr}
   .input-bar{padding:var(--s-1) var(--s-3) var(--s-3)}
   .ai-tray{left:var(--s-3);right:var(--s-3)}
   .sidebar{
@@ -751,7 +849,16 @@ a,.output-link{text-underline-offset:2px}
     transform:translateX(-102%);transition:transform 160ms cubic-bezier(.25,.46,.45,.94);
   }
   .sidebar.open{transform:none}
+  .sidebar-backdrop{
+    /* A dark tint alone reads fine over a light page but nearly vanishes over
+       an already-near-black dark theme — blur reads as "dimmed, not focused"
+       regardless of how much luminance contrast the tint has to work with. */
+    display:none;position:fixed;inset:0;z-index:65;background:rgba(10,9,7,.55);
+    backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);
+  }
+  .sidebar-backdrop.open{display:block}
   .mobile-nav{display:grid!important}
+  .right-panel{width:100vw;min-width:0}
   #setup-screen{grid-template-columns:minmax(0,1fr);gap:var(--s-6);padding:var(--s-6) var(--s-5);align-items:start}
   .setup-intro{justify-self:stretch}
   .setup-intro h1{font-size:var(--t-head);letter-spacing:var(--k-head)}
@@ -787,11 +894,15 @@ a,.output-link{text-underline-offset:2px}
 <p>Your token stays in this tab. Sign in from another tab with a different token to work together.</p>
 <label for="setup-name">Display name</label>
 <input id="setup-name" placeholder="Your name">
+<div class="field-help">Used only to create your member record on first sign-in. After that, your name shown here always comes from the workspace.</div>
 <label for="setup-token">Access token</label>
 <input id="setup-token" type="password" placeholder="Access token" autocomplete="off" spellcheck="false">
+<details id="setup-first-run" style="margin-top:var(--s-4)">
+<summary class="field-help" style="cursor:pointer;margin-top:0">First time here? Name your channel</summary>
 <label for="setup-room">Channel name</label>
 <input id="setup-room" placeholder="e.g. Authentication Migration">
-<div class="field-help">Your first sign-in creates this channel. After that you land in the channels you belong to — an admin invites you to theirs.</div>
+<div class="field-help">Your first sign-in creates this channel. Returning members land in the channels they belong to.</div>
+</details>
 <button id="setup-button" onclick="setup()">Enter workspace</button>
 </div>
 </div>
@@ -818,14 +929,14 @@ a,.output-link{text-underline-offset:2px}
 
     <div class="nav-label">AI work</div>
     <div id="branches-list"><div class="nav-item"><span class="nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span><span class="nav-name">No branches yet</span></div></div>
-    <button class="nav-item" onclick="openContext('meta')"><span class="nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.4 13.6 8 8 13.6 2.4 8z"/></svg></span><span class="nav-name">Ask Meta</span></button>
-    <button class="nav-item" onclick="openContext('artifacts')"><span class="nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.6" y="2.6" width="10.8" height="10.8" rx="1.4"/><path d="M5.4 6.2h5.2M5.4 9.4h3.4"/></svg></span><span class="nav-name">Artifacts</span><span class="nav-meta" id="artifact-nav-count">0</span></button>
+    <button class="nav-item" id="nav-meta" onclick="openContext('meta')" title="Room-scoped answers from the published decision record" aria-label="Ask Meta"><span class="nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.4 13.6 8 8 13.6 2.4 8z"/></svg></span><span class="nav-name">Ask Meta</span></button>
+    <button class="nav-item" id="nav-artifacts" onclick="openContext('artifacts')" aria-label="Artifacts"><span class="nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.6" y="2.6" width="10.8" height="10.8" rx="1.4"/><path d="M5.4 6.2h5.2M5.4 9.4h3.4"/></svg></span><span class="nav-name">Artifacts</span><span class="nav-meta" id="artifact-nav-count">0</span></button>
 
     <div class="nav-label">People</div>
     <div id="team-list"></div>
     <div id="agents-sidebar" class="hidden"></div>
 
-    <details><summary class="nav-label">Activity log</summary><div class="events-log" id="events-log"></div></details>
+    <details><summary class="nav-label" id="activity-log-summary">Activity log</summary><div class="events-log" id="events-log"></div></details>
   </div>
   <div class="sidebar-footer">
     <div class="identity-avatar" id="identity-avatar">Y</div>
@@ -837,156 +948,184 @@ a,.output-link{text-underline-offset:2px}
       <svg class="theme-sun" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 1.4v1.6M8 13v1.6M14.6 8H13M3 8H1.4M12.7 3.3l-1.1 1.1M4.4 11.6l-1.1 1.1M12.7 12.7l-1.1-1.1M4.4 4.4 3.3 3.3"/></svg>
       <svg class="theme-moon" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.4 9.6A5.8 5.8 0 0 1 6.4 2.6a5.8 5.8 0 1 0 7 7z"/></svg>
     </button>
+    <button class="icon-button" id="sign-out-button" onclick="signOut()" aria-label="Sign out" title="Sign out"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.4 13.6H3.6A1.2 1.2 0 0 1 2.4 12.4V3.6A1.2 1.2 0 0 1 3.6 2.4H6.4M10.8 11 14 8l-3.2-3M14 8H6"/></svg></button>
   </div>
 </div>
+
+<div class="sidebar-backdrop" id="sidebar-backdrop" onclick="toggleSidebar(false)"></div>
 
 <div class="center">
   <div class="room-header" id="room-header">
     <button class="icon-button mobile-nav hidden" onclick="toggleSidebar()" aria-label="Open navigation"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7"/></svg></button>
+    <button class="icon-button hidden" id="header-back" onclick="openCenterView('conversation')" aria-label="Back to channel" title="Back to channel"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.6 3.4 4.4 8l5.2 4.6"/></svg></button>
     <div>
-      <h2><span class="room-hash"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.1 2.6 4.9 13.4M11.1 2.6 9.9 13.4M2.8 6h10.4M2.4 10h10.4"/></svg></span><span id="room-name">channel</span></h2>
+      <h2><span class="room-hash" id="room-hash-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.1 2.6 4.9 13.4M11.1 2.6 9.9 13.4M2.8 6h10.4M2.4 10h10.4"/></svg></span><span id="room-name">channel</span></h2>
       <div class="meta" id="room-meta"></div>
     </div>
     <div class="header-actions">
-      <span class="status" id="ws-status">Connecting</span>
+      <span class="status" id="ws-status" aria-label="Connecting">Connecting</span>
       <span class="unread-pill" id="unread-pill" hidden>0</span>
       <button class="icon-button" onclick="markRoomRead()" id="mark-read-button" aria-label="Mark channel read" title="Mark this channel read"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 8.4 3.1 3.1L13 4.6"/></svg></button>
       <button class="icon-button" onclick="openContext('search')" aria-label="Search channel" title="Search"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.4"/><path d="m10.4 10.4 3 3"/></svg></button>
       <button class="icon-button" onclick="openContext('members')" aria-label="Open members" title="People"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5.6" r="2.4"/><path d="M2.2 13c0-2.2 1.7-3.6 3.8-3.6S9.8 10.8 9.8 13"/><path d="M11 4.4a2.2 2.2 0 0 1 0 4.3M13.8 13c0-1.7-.8-2.8-2.2-3.3"/></svg></button>
-      <button class="icon-button" onclick="openContext('branch')" aria-label="Open context" title="AI work"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3" width="11.6" height="10" rx="1.4"/><path d="M9.6 3v10"/></svg></button>
+      <button class="icon-button" onclick="openContext('branch')" aria-label="Open AI work" title="AI work"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3" width="11.6" height="10" rx="1.4"/><path d="M9.6 3v10"/></svg></button>
     </div>
   </div>
 
-  <div class="messages" id="messages" role="log" aria-live="polite" aria-label="Channel conversation"></div>
+  <div class="center-views">
+    <section class="center-view active" data-center-view="conversation" id="view-conversation">
+      <div class="messages" id="messages" role="log" aria-live="polite" aria-label="Channel conversation"></div>
 
-  <div class="turn-lock" id="turn-lock-banner" role="status">
-    <span class="spinner"></span>
-    <div class="lock-copy">
-      <div class="lock-title" id="turn-lock-title">AI owns this turn</div>
-      <div class="lock-detail" id="turn-lock-detail">Messages resume when the branch finishes.</div>
-    </div>
-    <button class="btn-sm" onclick="openContext('branch')">Inspect</button>
-    <button class="btn-sm" id="cancel-turn-button" onclick="cancelCurrentTurn()">Cancel</button>
+      <div class="turn-lock" id="turn-lock-banner" role="status">
+        <span class="spinner"></span>
+        <div class="lock-copy">
+          <div class="lock-title" id="turn-lock-title">AI owns this turn</div>
+          <div class="lock-detail" id="turn-lock-detail">Messages resume when the branch finishes.</div>
+        </div>
+        <button class="btn-sm" onclick="openContext('branch')">Inspect</button>
+        <button class="btn-sm" id="cancel-turn-button" onclick="cancelCurrentTurn()">Cancel</button>
+      </div>
+
+      <div class="input-bar">
+        <div class="composer">
+          <textarea id="msg-input" aria-label="Message channel" placeholder="Message #channel" onkeydown="handleComposerKey(event)"></textarea>
+          <div class="composer-tools">
+            <button id="ai-trigger" onclick="toggleAITray()" aria-expanded="false"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg> Branch</button>
+            <label class="mention-toggle" title="An @agent mention only notifies unless you tick this"><input type="checkbox" id="invoke-agents"> Run @agents</label>
+            <span class="composer-hint">Enter to send</span>
+            <button class="btn-primary send" id="send-message-button" onclick="sendMessage()">Send</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="center-view" data-center-view="branch" id="view-branch" aria-label="AI branch">
+      <div class="view-scroll">
+        <div class="view-head">
+          <div><div class="panel-title" id="branch-panel-title">No AI branch selected</div><div class="panel-copy" id="branch-panel-copy">Start AI work from the composer. Runs and outputs stay together here.</div></div>
+          <button class="btn-sm" onclick="toggleAITray(true)">New branch</button>
+        </div>
+        <div id="branch-runs" class="panel-section" style="padding-top:0"></div>
+        <div class="outputs-head">
+          <h3>Inspectable outputs</h3>
+          <span class="outputs-count" id="outputs-count">0 authored branches</span>
+        </div>
+        <div class="outputs-grid" id="outputs-panel"></div>
+      <!-- Inside the scroller: sits right under the outputs when they are short,
+           sticks to the bottom edge while long outputs scroll. -->
+      <div class="synthesis-gate">
+        <div class="synthesis-row">
+          <div>
+            <div class="synthesis-title" id="selection-summary">No outputs selected</div>
+            <div class="synthesis-meta">Selections are shared with the channel. Every published claim links to its source.</div>
+          </div>
+          <div class="synthesis-actions">
+            <select id="synthesis-type" aria-label="Synthesis type" onchange="updateSelectionSummary()">
+              <option value="GENERAL_SYNTHESIS">General Synthesis</option>
+              <option value="DECISION_BRIEF" selected>Decision Brief</option>
+              <option value="PROGRESS_REPORT">Progress Report</option>
+            </select>
+            <button class="btn-primary" id="synthesize-button" onclick="publishSynthesis()" disabled>Publish</button>
+          </div>
+        </div>
+      </div>
+      </div>
+    </section>
+
+    <section class="center-view" data-center-view="artifact" id="view-artifact" aria-label="Artifacts">
+      <div class="view-scroll">
+        <div class="artifact-selector" id="artifact-selector"></div>
+        <div id="artifact-surface"></div>
+        <div id="ontology-panel">
+          <div class="ontology-head">
+            <div><h3 id="ontology-title">Evidence</h3><p>Decision → Claim → exact AgentOutput. Every inferred link stays reviewable.</p></div>
+            <span class="ontology-mode hidden" id="ontology-mode">Read-only until published</span>
+          </div>
+          <div class="ontology-tree" id="ontology-tree"><div class="ontology-empty">Publish a Decision Brief to materialize its evidence tree.</div></div>
+          <details class="ontology-history" id="ontology-history"><summary>Review history · 0 entries</summary><div id="ontology-history-list"></div></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="center-view" data-center-view="meta" id="view-meta" aria-label="Ask Meta">
+      <div class="view-scroll">
+        <div class="meta-head">
+          <h3 id="meta-title">Ask Meta</h3>
+          <p>Room-scoped answers from the published decision and its governed evidence. Pick a question, or type your own.</p>
+          <div class="meta-presets" id="meta-kinds">
+            <button onclick="askMetaKind('STATUS')">Where things stand</button>
+            <button onclick="askMetaKind('BLOCKERS')">What is blocked</button>
+            <button onclick="askMetaKind('CHANGES')">What changed</button>
+            <button onclick="askMetaKind('DECISIONS_OPEN')">Still to decide</button>
+            <button onclick="askMetaKind('DECISIONS_MADE')">Already decided</button>
+            <button onclick="askMetaKind('DISAGREEMENT')">Where we disagree</button>
+            <button onclick="askMetaKind('WHY_DECISION')">Why this decision?</button>
+            <button onclick="askMetaKind('DECISION_EVIDENCE')">Show supporting evidence</button>
+          </div>
+        </div>
+        <div class="meta-query">
+          <input id="meta-question" placeholder="Ask in your own words" onkeydown="if(event.key==='Enter')askMeta()">
+          <button onclick="askMeta()">Ask</button>
+        </div>
+        <div class="meta-scope" id="meta-scope">Scope: current room · latest Decision Brief · maximum 10 claims</div>
+        <div class="meta-answer" id="meta-answer">Pick a question above, or type one. Why and supporting evidence need a published Decision Brief.</div>
+        <div class="meta-evidence" id="meta-evidence"></div>
+      </div>
+    </section>
   </div>
 
-  <div class="input-bar">
-    <div class="ai-tray" id="ai-tray">
-      <div class="tray-head">
-        <span class="tray-glyph"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span>
-        <div>
-          <div class="tray-title">Start AI work</div>
-          <div class="tray-subtitle">Branches from this channel's context as it stands now.</div>
-        </div>
-        <button class="icon-button" onclick="toggleAITray(false)" aria-label="Close AI launcher"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.2 4.2 7.6 7.6M11.8 4.2l-7.6 7.6"/></svg></button>
+  <div class="ai-tray" id="ai-tray">
+    <div class="tray-head">
+      <span class="tray-glyph"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span>
+      <div>
+        <div class="tray-title">Start AI work</div>
+        <div class="tray-subtitle">Branches from this channel's context as it stands now.</div>
       </div>
-      <section class="decision-studio" aria-labelledby="studio-title">
-        <span class="studio-label" id="studio-title">How should they work?</span>
-        <div class="strategy-toggle" role="group" aria-label="Execution strategy">
-          <button id="strategy-single" type="button" aria-pressed="false" onclick="setStrategy('single')"><span class="strategy-name"><span class="strategy-dot"></span>Single agent</span><span class="strategy-help">One specialist owns the turn.</span></button>
-          <button id="strategy-parallel" type="button" class="active" aria-pressed="true" onclick="setStrategy('parallel')"><span class="strategy-name"><span class="strategy-dot"></span>Parallel</span><span class="strategy-help">Two or three reason independently.</span></button>
-        </div>
-        <input id="turn-locked-mode" type="checkbox" hidden onchange="updateTemplateSelection()">
-        <label class="studio-label" for="analysis-question">What should they work on?</label>
-        <div class="question-wrap">
-          <textarea class="question-input" id="analysis-question" placeholder="Describe the decision or problem to analyze — every specialist receives this exact prompt"></textarea>
-          <div class="question-meta"><span>Sent verbatim to each specialist</span><span>⌘ Enter to launch</span></div>
-        </div>
-        <div class="field-label">Specialists <span id="template-selection-count">Choose 2 to 3</span></div>
-        <div class="template-grid" id="template-grid"><div class="empty-outputs">Loading specialists…</div></div>
-        <div class="studio-footer">
-          <div class="launch-note" id="launch-note">Every individual output is kept, with its provenance.</div>
-          <button class="btn-primary" id="launch-button" onclick="launchParallelAnalyses()" disabled>Run in parallel</button>
-        </div>
-      </section>
+      <button class="icon-button" onclick="toggleAITray(false)" aria-label="Close AI launcher"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.2 4.2 7.6 7.6M11.8 4.2l-7.6 7.6"/></svg></button>
     </div>
-    <div class="composer">
-      <textarea id="msg-input" aria-label="Message channel" placeholder="Message #channel" onkeydown="handleComposerKey(event)"></textarea>
-      <div class="composer-tools">
-        <button id="ai-trigger" onclick="toggleAITray()" aria-expanded="false"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg> Branch</button>
-        <label class="mention-toggle" title="An @agent mention only notifies unless you tick this"><input type="checkbox" id="invoke-agents"> Run @agents</label>
-        <span class="composer-hint">Enter to send</span>
-        <button class="btn-primary send" id="send-message-button" onclick="sendMessage()">Send</button>
+    <section class="decision-studio" aria-labelledby="studio-title">
+      <span class="studio-label" id="studio-title">How should they work?</span>
+      <div class="strategy-toggle" role="group" aria-label="Execution strategy">
+        <button id="strategy-single" type="button" aria-pressed="false" onclick="setStrategy('single')"><span class="strategy-name"><span class="strategy-dot"></span>Single agent</span><span class="strategy-help">One specialist owns the turn.</span></button>
+        <button id="strategy-parallel" type="button" class="active" aria-pressed="true" onclick="setStrategy('parallel')"><span class="strategy-name"><span class="strategy-dot"></span>Parallel</span><span class="strategy-help">Two or three reason independently.</span></button>
       </div>
-    </div>
+      <input id="turn-locked-mode" type="checkbox" hidden onchange="updateTemplateSelection()">
+      <label class="studio-label" for="analysis-question">What should they work on?</label>
+      <div class="question-wrap">
+        <textarea class="question-input" id="analysis-question" placeholder="Describe the decision or problem to analyze — every specialist receives this exact prompt"></textarea>
+        <div class="question-meta"><span>Sent verbatim to each specialist</span><span>⌘ Enter to launch</span></div>
+      </div>
+      <div class="field-label">Specialists <span id="template-selection-count">Choose 2 to 3</span></div>
+      <div class="template-grid" id="template-grid"><div class="empty-outputs">Loading specialists…</div></div>
+      <div class="studio-footer">
+        <div class="launch-note" id="launch-note">Every individual output is kept, with its provenance.</div>
+        <button class="btn-primary" id="launch-button" onclick="launchParallelAnalyses()" disabled>Run in parallel</button>
+      </div>
+    </section>
   </div>
 </div>
 
 <div class="right-panel">
-<div class="context-head"><h2 id="context-title">AI branch</h2><button class="icon-button" onclick="closeContext()" aria-label="Close context panel"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.2 4.2 7.6 7.6M11.8 4.2l-7.6 7.6"/></svg></button></div>
-<div class="context-tabs"><button class="context-tab active" data-view="branch" onclick="openContext('branch')">Branch</button><button class="context-tab" data-view="artifacts" onclick="openContext('artifacts')">Artifacts</button><button class="context-tab" data-view="meta" onclick="openContext('meta')">Meta</button><button class="context-tab" data-view="ontology" onclick="openContext('ontology')">Evidence</button><button class="context-tab" data-view="thread" onclick="openContext('thread')">Thread</button><button class="context-tab" data-view="search" onclick="openContext('search')">Search</button><button class="context-tab" data-view="members" onclick="openContext('members')">People</button></div>
+<div class="context-head"><h2 id="context-title">Thread</h2><button class="icon-button" onclick="closeContext()" aria-label="Close context panel"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.2 4.2 7.6 7.6M11.8 4.2l-7.6 7.6"/></svg></button></div>
 <div class="context-scroll">
 
-<section class="context-view active" data-context-view="branch">
-<div class="panel-section"><div class="panel-title" id="branch-panel-title">No AI branch selected</div><div class="panel-copy" id="branch-panel-copy">Start AI work from the composer. Runs and outputs stay together here.</div><div id="branch-runs"></div></div>
-<div class="outputs-head">
-  <h3>Inspectable outputs</h3>
-  <span class="outputs-count" id="outputs-count">0 authored branches</span>
-</div>
-<div class="outputs-grid" id="outputs-panel"></div>
-<div class="synthesis-gate">
-  <div class="synthesis-row">
-    <div>
-      <div class="synthesis-title" id="selection-summary">No outputs selected</div>
-      <div class="synthesis-meta">Selections are shared with the channel. Every published claim links to its source.</div>
-    </div>
-    <div class="synthesis-actions">
-      <select id="synthesis-type" aria-label="Synthesis type" onchange="updateSelectionSummary()">
-        <option value="GENERAL_SYNTHESIS">General Synthesis</option>
-        <option value="DECISION_BRIEF" selected>Decision Brief</option>
-        <option value="PROGRESS_REPORT">Progress Report</option>
-      </select>
-      <button class="btn-primary" id="synthesize-button" onclick="publishSynthesis()" disabled>Publish</button>
-    </div>
-  </div>
-</div>
-</section>
-
-<section class="meta-panel context-view" data-context-view="meta" id="meta-panel" aria-labelledby="meta-title">
-  <div class="meta-head">
-    <h3 id="meta-title">Ask Meta</h3>
-    <p>Room-scoped answers from the published decision and its governed evidence. Pick a question, or type your own.</p>
-    <div class="meta-presets" id="meta-kinds">
-      <button onclick="askMetaKind('STATUS')">Where things stand</button>
-      <button onclick="askMetaKind('BLOCKERS')">What is blocked</button>
-      <button onclick="askMetaKind('CHANGES')">What changed</button>
-      <button onclick="askMetaKind('DECISIONS_OPEN')">Still to decide</button>
-      <button onclick="askMetaKind('DECISIONS_MADE')">Already decided</button>
-      <button onclick="askMetaKind('DISAGREEMENT')">Where we disagree</button>
-      <button onclick="askMetaKind('WHY_DECISION')">Why this decision?</button>
-      <button onclick="askMetaKind('DECISION_EVIDENCE')">Show supporting evidence</button>
-    </div>
-  </div>
-  <div class="meta-query">
-    <input id="meta-question" placeholder="Ask in your own words" onkeydown="if(event.key==='Enter')askMeta()">
-    <button onclick="askMeta()">Ask</button>
-  </div>
-  <div class="meta-scope" id="meta-scope">Scope: current room · latest Decision Brief · maximum 10 claims</div>
-  <div class="meta-answer" id="meta-answer">Pick a question above, or type one. Why and supporting evidence need a published Decision Brief.</div>
-  <div class="meta-evidence" id="meta-evidence"></div>
-</section>
-
-<section class="ontology-panel context-view" data-context-view="ontology" id="ontology-panel" aria-labelledby="ontology-title">
-  <div class="ontology-head">
-    <div><h3 id="ontology-title">Evidence ontology</h3><p>Decision → Claim → exact AgentOutput. Every inferred link stays reviewable.</p></div>
-    <span class="ontology-mode" id="ontology-mode">Read-only until published</span>
-  </div>
-  <div class="ontology-tree" id="ontology-tree"><div class="ontology-empty">Publish a Decision Brief to materialize its evidence tree.</div></div>
-  <details class="ontology-history" id="ontology-history"><summary>Review history · 0 entries</summary><div id="ontology-history-list"></div></details>
-</section>
-
-<section class="context-view" data-context-view="thread" aria-labelledby="thread-title">
+<section class="context-view active" data-context-view="thread" aria-labelledby="thread-title">
   <div class="panel-section"><div class="panel-title" id="thread-title">No thread open</div><div class="panel-copy" id="thread-copy">Reply to any message to branch the conversation. Reply counts are derived from the replies themselves, never from a stored counter.</div></div>
   <div id="thread-list"></div>
   <form class="thread-reply" id="thread-reply-form" onsubmit="submitThreadReply(event)" hidden><input id="thread-reply-input" placeholder="Reply in thread" aria-label="Reply in thread" autocomplete="off" required><label class="mention-toggle"><input type="checkbox" id="thread-invoke-agents"> Run @agents</label><button class="btn-sm" type="submit">Reply</button></form>
 </section>
 
-<section class="context-view" data-context-view="search" aria-labelledby="search-title">
-  <div class="panel-section"><div class="panel-title" id="search-title">Search</div><div class="panel-copy">Your channel membership constrains the query itself, so results never include a room you cannot read.</div></div>
-  <form class="search-form" onsubmit="runSearch(event)"><input id="search-input" placeholder="Search messages" aria-label="Search messages" autocomplete="off" required><label class="mention-toggle"><input type="checkbox" id="search-this-room" checked> This channel</label><button class="btn-sm" type="submit">Search</button></form>
+<section class="context-view" data-context-view="search" aria-labelledby="context-title">
+  <div class="panel-section"><div class="panel-copy">Your channel membership constrains the query itself, so results never include a room you cannot read.</div></div>
+  <form class="search-form" onsubmit="runSearch(event)">
+    <input id="search-input" placeholder="Search messages" aria-label="Search messages" autocomplete="off" required>
+    <div class="search-form-row">
+      <label class="mention-toggle"><input type="checkbox" id="search-this-room" checked> This channel</label>
+      <button class="icon-button" type="submit" aria-label="Search" title="Search"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.4"/><path d="m10.4 10.4 3 3"/></svg></button>
+    </div>
+  </form>
   <div id="search-results"><div class="panel-copy" style="padding:0 16px">No search yet.</div></div>
 </section>
-
-<section class="context-view" data-context-view="artifacts"><div class="panel-section"><div class="panel-title">Published artifacts</div><div class="panel-copy">Open the shared work product, then inspect its selected inputs.</div></div><div class="panel-section" id="artifact-surface"></div></section>
 
 <section class="context-view" data-context-view="members"><div class="panel-section"><div class="panel-title">People and permissions</div><div class="panel-copy">Your channel role determines which actions are available.</div><div id="posture-panel"></div><div id="members-panel"></div></div><details class="records">
   <summary>Workspace records</summary>
@@ -1041,14 +1180,96 @@ let currentBranchMode = '';
 let currentTurnLock = null;
 let roomOntology = {entities: [], relationships: [], reviews: []};
 let currentRoomRole = 'viewer';
+let currentRoomName = '';
 let myRooms = [];
+let roomMembers = [];
 let roomBranches = [];
 let roomRuns = [];
 let openThreadRootId = '';
 let threadReplyTargetId = '';
 let readCursor = 0;
+let selectedArtifactId = '';
 const QUICK_REACTIONS = ['👍', '🎯', '⚠️'];
 const outputSelections = new Map();
+const SESSION_STORAGE_KEY = 'xyzzy.session';
+
+// A member row's display_name is what a person is called; the server falls back to
+// the raw id only when a payload has not yet grown the field. Never show the id.
+function memberName(id) {
+  if (!id) return 'Unknown';
+  // The member row is server truth for everyone, self included — the typed
+  // sign-in name is only a last-resort fallback before the first snapshot lands.
+  const member = roomMembers.find(item => item.user_id === id);
+  if (member && member.display_name) return member.display_name;
+  if (id === userId) return userName || id;
+  const agent = roomAgents.find(item => item.agent_id === id);
+  if (agent) return agent.name;
+  return id;
+}
+
+function formatTime(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+}
+
+// The one renderer for anything an agent or the room wrote in markdown-ish prose.
+// Escape first, then transform a small fixed set of markers — never raw HTML, no
+// link auto-linking. Human chat messages never pass through this.
+function renderMarkdown(text) {
+  const lines = escHtml(text || '').split('\n');
+  const inline = s => s.replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  let html = '', inList = false, inCode = false, para = [];
+  const flushPara = () => { if (para.length) { html += `<p>${para.join(' ')}</p>`; para = []; } };
+  const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+  lines.forEach(line => {
+    if (line.startsWith('```')) {
+      if (inCode) { html += '</pre>'; inCode = false; } else { flushPara(); closeList(); html += '<pre>'; inCode = true; }
+      return;
+    }
+    if (inCode) { html += line + '\n'; return; }
+    const heading = line.match(/^(#{1,3})\s+(.*)/);
+    if (heading) { flushPara(); closeList(); const l = heading[1].length + 2; html += `<h${l}>${inline(heading[2])}</h${l}>`; return; }
+    if (/^-\s+/.test(line)) {
+      flushPara();
+      if (!inList) { html += '<ul>'; inList = true; }
+      html += `<li>${inline(line.replace(/^-\s+/, ''))}</li>`;
+      return;
+    }
+    closeList();
+    if (line.trim() === '') { flushPara(); return; }
+    para.push(inline(line));
+  });
+  flushPara(); closeList();
+  if (inCode) html += '</pre>';
+  return html;
+}
+
+function persistSession() {
+  try { sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({token: accessToken, name: userName})); }
+  catch (_) { /* Private browsing can disable storage; the tab still holds it in memory. */ }
+}
+function readStoredSession() {
+  try { const raw = sessionStorage.getItem(SESSION_STORAGE_KEY); return raw ? JSON.parse(raw) : null; }
+  catch (_) { return null; }
+}
+function clearStoredSession() {
+  try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) { /* nothing to clear */ }
+}
+function signOut() {
+  clearStoredSession();
+  rememberRoomId('');
+  location.reload();
+}
+
+// The word is always in aria-label so it still reads to a screen reader; on a
+// narrow room header only the dot has room, and a truncated word ("CONNECTEC")
+// is worse than no word at all.
+function setWsStatus(text, connected) {
+  const el = document.getElementById('ws-status');
+  el.textContent = text;
+  el.setAttribute('aria-label', text);
+  el.classList.toggle('connected', Boolean(connected));
+}
 
 function toast(message, tone = '') {
   const region = document.getElementById('toast-region');
@@ -1059,17 +1280,79 @@ function toast(message, tone = '') {
   setTimeout(() => item.remove(), 4200);
 }
 
+// 'branch'/'artifacts'/'meta'/'ontology' are center-view calls; every existing call
+// site that used to open the right panel for these keeps working unchanged. Evidence
+// has no view of its own — it lives with the artifact it supports.
+const CENTER_VIEW_ROUTES = {branch: 'branch', artifacts: 'artifact', ontology: 'artifact', meta: 'meta'};
 function openContext(view = 'branch') {
+  if (CENTER_VIEW_ROUTES[view]) { openCenterView(CENTER_VIEW_ROUTES[view]); return; }
+  openRightPanel(view);
+}
+
+function openRightPanel(view) {
   const panel = document.querySelector('.right-panel');
   panel.classList.add('open');
   document.querySelectorAll('.context-view').forEach(el => el.classList.toggle('active', el.dataset.contextView === view));
-  document.querySelectorAll('.context-tab').forEach(el => el.classList.toggle('active', el.dataset.view === view));
-  const titles = {branch:'AI branch',artifacts:'Artifact',meta:'Meta',ontology:'Evidence',thread:'Thread',search:'Search',members:'People'};
+  const titles = {thread: 'Thread', search: 'Search', members: 'People'};
   document.getElementById('context-title').textContent = titles[view] || 'Context';
+  // Opening search always reveals the form and puts the caret in it, even on
+  // the very first open before any layout has settled.
+  if (view === 'search') {
+    requestAnimationFrame(() => document.getElementById('search-input')?.focus());
+  }
 }
 
 function closeContext() { document.querySelector('.right-panel').classList.remove('open'); }
-function toggleSidebar() { document.getElementById('sidebar').classList.toggle('open'); }
+
+function currentCenterView() {
+  return document.querySelector('.center-view.active')?.dataset.centerView || 'conversation';
+}
+
+function openCenterView(view) {
+  document.querySelectorAll('.center-view').forEach(el => el.classList.toggle('active', el.dataset.centerView === view));
+  document.querySelectorAll('#branches-list .nav-item').forEach(el => el.classList.toggle('active', view === 'branch' && el.dataset.branchId === currentBranchId));
+  document.getElementById('nav-meta')?.classList.toggle('active', view === 'meta');
+  document.getElementById('nav-artifacts')?.classList.toggle('active', view === 'artifact');
+  document.querySelectorAll('#rooms-list .nav-item').forEach(el => el.classList.toggle('active', view === 'conversation' && el.dataset.roomId === roomId));
+  closeSidebarDrawer();
+  updateRoomHeader();
+  if (view === 'conversation') scheduleAutoRead();
+}
+
+function updateRoomHeader() {
+  const view = currentCenterView();
+  const back = document.getElementById('header-back');
+  const hashIcon = document.getElementById('room-hash-icon');
+  const nameEl = document.getElementById('room-name');
+  if (view === 'conversation') {
+    back.classList.add('hidden');
+    hashIcon.classList.remove('hidden');
+    nameEl.textContent = currentRoomName || 'channel';
+    return;
+  }
+  back.classList.remove('hidden');
+  hashIcon.classList.add('hidden');
+  if (view === 'branch') {
+    const branch = roomBranches.find(b => b.branch_id === currentBranchId);
+    nameEl.textContent = branch ? `⑂ ${branchTitle(branch)}` : '⑂ AI work';
+  } else if (view === 'artifact') {
+    nameEl.textContent = 'Artifacts';
+  } else if (view === 'meta') {
+    nameEl.textContent = 'Ask Meta';
+  }
+}
+
+function closeSidebarDrawer() {
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebar-backdrop').classList.remove('open');
+}
+function toggleSidebar(force) {
+  const sidebar = document.getElementById('sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  const open = force === undefined ? !sidebar.classList.contains('open') : force;
+  sidebar.classList.toggle('open', open);
+  backdrop.classList.toggle('open', open);
+}
 function toggleAITray(force) {
   const tray = document.getElementById('ai-tray');
   const open = force === undefined ? !tray.classList.contains('open') : force;
@@ -1097,12 +1380,54 @@ function handleComposerKey(event) {
 }
 
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape') { toggleAITray(false); closeContext(); document.getElementById('sidebar').classList.remove('open'); }
+  if (event.key === 'Escape') {
+    // Frontmost-first: the tray floats above the panel, which floats above the drawer.
+    if (document.getElementById('ai-tray').classList.contains('open')) toggleAITray(false);
+    else if (document.querySelector('.right-panel').classList.contains('open')) closeContext();
+    else if (document.getElementById('sidebar').classList.contains('open')) closeSidebarDrawer();
+  }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.getElementById('msg-input').focus(); }
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && document.getElementById('ai-tray').classList.contains('open')) {
     event.preventDefault();
     if (!document.getElementById('launch-button').disabled) launchParallelAnalyses();
   }
+});
+document.getElementById('messages').addEventListener('scroll', scheduleAutoRead);
+window.addEventListener('focus', scheduleAutoRead);
+
+// Desktop reveals actions on hover; touch has no hover, so a tap on the message
+// body (not on a button, link, or already-interactive control inside it) toggles
+// them instead. Only one message's actions stay open at a time.
+document.getElementById('messages').addEventListener('click', event => {
+  if (event.target.closest('button, a, input, select, textarea, details, summary')) return;
+  const msg = event.target.closest('.msg');
+  if (!msg) return;
+  const wasOpen = msg.classList.contains('actions-open');
+  document.querySelectorAll('.msg.actions-open').forEach(el => el.classList.remove('actions-open'));
+  if (!wasOpen) msg.classList.add('actions-open');
+});
+// Same tap-to-reveal for the thread pane's per-reply "Reply to this" — it
+// shares the .msg-actions reveal rule, so it needs the same touch fallback.
+document.getElementById('thread-list').addEventListener('click', event => {
+  if (event.target.closest('button, a, input, select, textarea, details, summary')) return;
+  const item = event.target.closest('.thread-item');
+  if (!item) return;
+  const wasOpen = item.classList.contains('actions-open');
+  document.querySelectorAll('.thread-item.actions-open').forEach(el => el.classList.remove('actions-open'));
+  if (!wasOpen) item.classList.add('actions-open');
+});
+
+// The sidebar drawer and the fixed-overlay right panel are desktop-safe "open"
+// states that become full-screen sheets under 860px. A resize that crosses that
+// line while one was left open must not let it survive into the drawer layout.
+let wasAboveMobileBreak = window.innerWidth > 860;
+window.addEventListener('resize', () => {
+  const isAboveNow = window.innerWidth > 860;
+  if (wasAboveMobileBreak && !isAboveNow) {
+    closeSidebarDrawer();
+    closeContext();
+  }
+  wasAboveMobileBreak = isAboveNow;
 });
 
 async function api(method, path, body, options = {}) {
@@ -1152,8 +1477,9 @@ function renderRoomsList() {
     list.innerHTML = '<div class="nav-item"><span class="nav-icon">#</span><span class="nav-name">No channels</span></div>';
     return;
   }
+  const roomIsActiveView = currentCenterView() === 'conversation';
   list.innerHTML = myRooms.map(room => `
-    <button class="nav-item${room.room_id === roomId ? ' active' : ''}" data-room-id="${escHtml(room.room_id)}" onclick="switchRoom(this.dataset.roomId)"><span class="nav-icon">#</span><span class="nav-name">${escHtml(room.name)}</span></button>
+    <button class="nav-item${room.room_id === roomId && roomIsActiveView ? ' active' : ''}" data-room-id="${escHtml(room.room_id)}" onclick="switchRoom(this.dataset.roomId)" aria-label="#${escHtml(room.name)}"><span class="nav-icon">#</span><span class="nav-name">${escHtml(room.name)}</span></button>
   `).join('');
 }
 
@@ -1165,7 +1491,14 @@ async function refreshRooms() {
 
 async function switchRoom(targetRoomId) {
   const room = myRooms.find(item => item.room_id === targetRoomId);
-  if (!room || targetRoomId === roomId) return;
+  if (!room) return;
+  if (targetRoomId === roomId) {
+    // Already in this room: the click still means "take me back to the channel".
+    closeSidebarDrawer();
+    openCenterView('conversation');
+    renderRoomsList();
+    return;
+  }
   roomId = room.room_id;
   workspaceId = room.workspace_id;
   rememberRoomId(roomId);
@@ -1174,7 +1507,8 @@ async function switchRoom(targetRoomId) {
   openThreadRootId = '';
   threadReplyTargetId = '';
   readCursor = 0;
-  document.getElementById('sidebar').classList.remove('open');
+  closeSidebarDrawer();
+  openCenterView('conversation');
   renderRoomsList();
   if (ws) ws.close();
   connectWS();
@@ -1187,8 +1521,7 @@ function handleAccessRevoked() {
   const removedName = removedRoom ? removedRoom.name : 'this channel';
   myRooms = myRooms.filter(item => item.room_id !== roomId);
   toast(`You were removed from #${removedName}.`, 'error');
-  document.getElementById('ws-status').textContent = 'Removed';
-  document.getElementById('ws-status').classList.remove('connected');
+  setWsStatus('Removed', false);
   if (myRooms.length) {
     roomId = '';
     switchRoom(myRooms[0].room_id);
@@ -1237,7 +1570,7 @@ async function setup() {
   userName = document.getElementById('setup-name').value.trim();
   accessToken = document.getElementById('setup-token').value;
   const roomName = document.getElementById('setup-room').value.trim();
-  if (!userName || !roomName || !accessToken) return toast('Enter a display name, access token, and channel name.', 'error');
+  if (!userName || !accessToken) return toast('Enter a display name and access token.', 'error');
   const setupButton = document.getElementById('setup-button');
   setupButton.disabled = true;
   setupButton.textContent = 'Opening…';
@@ -1251,9 +1584,20 @@ async function setup() {
     myRooms = context.rooms;
     const savedRoomId = storedRoomId();
     const roomsNamedForDecision = context.rooms.filter(room => room.name === roomName);
+    // Returning members land in a channel they belong to; the channel field only
+    // matters on the first sign-in, where it names the channel being created.
     const room = context.rooms.find(item => item.room_id === savedRoomId)
-      || roomsNamedForDecision[0];
+      || roomsNamedForDecision[0]
+      || context.rooms[0];
 
+    if (!room && !roomName) {
+      toast('First sign-in creates your channel — give it a name.', 'error');
+      setupButton.disabled = false;
+      setupButton.textContent = 'Enter Workspace';
+      document.getElementById('setup-first-run').open = true;
+      document.getElementById('setup-room').focus();
+      return;
+    }
     if (room) {
       roomId = room.room_id;
       workspaceId = room.workspace_id;
@@ -1273,12 +1617,16 @@ async function setup() {
     }
 
     rememberRoomId(roomId);
+    persistSession();
     document.getElementById('setup-screen').style.display = 'none';
     document.getElementById('app-header').style.display = 'flex';
     document.getElementById('app-main').style.display = 'grid';
 
     connectWS();
-    await Promise.all([loadTemplates(), loadState()]);
+    // connectWS()'s onopen already rehydrates state once the socket is live; a second,
+    // explicit loadState() fired here raced it for the same room snapshot and the
+    // dev server 401'd whichever request lost the race, quietly dropping the session.
+    await loadTemplates();
   } catch (err) {
     accessToken = '';
     document.getElementById('setup-token').value = '';
@@ -1286,6 +1634,46 @@ async function setup() {
   } finally {
     setupButton.disabled = false;
     setupButton.textContent = 'Enter Workspace';
+  }
+}
+
+// A page reload used to drop straight back to the sign-in screen even though the
+// token was still good for this tab. sessionStorage is per-tab, so it keeps the
+// same promise the setup card makes ("your token stays in this tab").
+async function resumeStoredSession() {
+  const saved = readStoredSession();
+  if (!saved || !saved.token) return;
+  // The setup form stays visible until this settles; block it so an impatient
+  // click cannot start a second, colliding sign-in while this one is in flight.
+  const setupButton = document.getElementById('setup-button');
+  setupButton.disabled = true;
+  accessToken = saved.token;
+  userName = saved.name || '';
+  try {
+    const context = await api('GET', '/me/context');
+    userId = context.user_id;
+    myRooms = context.rooms;
+    const room = context.rooms.find(item => item.room_id === storedRoomId()) || context.rooms[0];
+    if (!room) throw new Error('No channels for this session.');
+    roomId = room.room_id;
+    workspaceId = room.workspace_id;
+    const existingWorkspace = context.workspaces.find(item => item.workspace_id === workspaceId);
+    orgId = existingWorkspace ? existingWorkspace.org_id : '';
+    rememberRoomId(roomId);
+    document.getElementById('setup-screen').style.display = 'none';
+    document.getElementById('app-header').style.display = 'flex';
+    document.getElementById('app-main').style.display = 'grid';
+    connectWS();
+    // connectWS()'s onopen already rehydrates state once the socket is live; a second,
+    // explicit loadState() fired here raced it for the same room snapshot and the
+    // dev server 401'd whichever request lost the race, quietly dropping the session.
+    await loadTemplates();
+  } catch (_) {
+    accessToken = '';
+    userName = '';
+    clearStoredSession();
+  } finally {
+    setupButton.disabled = false;
   }
 }
 
@@ -1304,8 +1692,7 @@ function connectWS() {
   ws = socket;
   socket.onopen = () => {
     if (socket !== ws) return;
-    document.getElementById('ws-status').textContent = 'Connected';
-    document.getElementById('ws-status').classList.add('connected');
+    setWsStatus('Connected', true);
     wsReconnectDelay = 1000;
     wsReconnectAttempts = 0;
     // Rehydrate durable runs and outputs after every reconnect. Ordered events
@@ -1316,8 +1703,7 @@ function connectWS() {
     // A socket replaced by a channel switch must neither reconnect nor repaint.
     if (socket !== ws) return;
     if (event.code === 4403) { handleAccessRevoked(); return; }
-    document.getElementById('ws-status').textContent = 'Reconnecting';
-    document.getElementById('ws-status').classList.remove('connected');
+    setWsStatus('Reconnecting', false);
     wsReconnectAttempts++;
     const delay = Math.min(wsReconnectDelay * Math.pow(1.5, wsReconnectAttempts - 1), WS_MAX_DELAY);
     wsReconnectTimer = setTimeout(connectWS, delay);
@@ -1334,14 +1720,29 @@ function connectWS() {
   };
 }
 
-async function loadState() {
+// The socket's onopen rehydrates on every reconnect, and a room switch or a fresh
+// sign-in also asks for the snapshot explicitly. Two such calls landing at once used
+// to race for the same room state, and the dev server 401'd whichever lost — this
+// collapses concurrent callers onto the one in-flight request instead of firing two.
+let loadStatePromise = null;
+function loadState() {
+  if (!loadStatePromise) {
+    loadStatePromise = loadStateImpl().finally(() => { loadStatePromise = null; });
+  }
+  return loadStatePromise;
+}
+async function loadStateImpl() {
   const state = await api('GET', `/rooms/${roomId}/state?last_sequence=0`);
-  document.getElementById('room-name').textContent = state.room.name;
+  // Members are read early: message attribution below needs the name lookup, not
+  // just the room-header title.
+  roomMembers = state.members || [];
+  currentRoomName = state.room.name;
   document.getElementById('room-meta').textContent = state.room.description || 'No description';
   const listedRoom = myRooms.find(room => room.room_id === roomId);
   if (listedRoom) listedRoom.name = state.room.name;
   else myRooms.push({room_id: roomId, workspace_id: workspaceId, name: state.room.name});
   renderRoomsList();
+  updateRoomHeader();
 
   // Messages. A reply lives in its thread unless it was explicitly broadcast, and
   // the server applies that rule to the listing, so this renders what it sends.
@@ -1389,6 +1790,11 @@ async function loadState() {
   });
   renderBranches(durableBranches, state.runs || []);
   renderOutputs(roomOutputs, state.runs || []);
+  // renderBranches() just appended branch-activity cards below the last chat message,
+  // after appendMessage()'s own auto-scroll already ran — so the newest item in the
+  // transcript was landing half behind the composer until a manual scroll. Re-settle
+  // once this frame's layout is final.
+  scrollMessagesToBottom();
   currentTurnLock = state.turn_lock || null;
   const messageInput = document.getElementById('msg-input');
   const messageButton = document.getElementById('send-message-button');
@@ -1408,6 +1814,19 @@ async function loadState() {
   // Evidence graph and governance state are part of the reconnect snapshot.
   const currentMember = (state.members || []).find(member => member.user_id === userId);
   currentRoomRole = currentMember ? currentMember.role : 'viewer';
+  // The typed name at setup only matters for first-time bootstrap. Once the server
+  // has a member row, its display_name is the identity everyone else sees too —
+  // showing anything else here would disagree with the People panel for no reason.
+  if (currentMember && currentMember.display_name && currentMember.display_name !== userName) {
+    // Say it once when the typed name loses to the workspace profile, so the
+    // discard is visible instead of silent.
+    if (userName && !sessionStorage.getItem('xyzzy.nameNotice')) {
+      toast(`Signed in as ${currentMember.display_name} — your workspace profile name applies.`);
+      try { sessionStorage.setItem('xyzzy.nameNotice', '1'); } catch (_) { /* fine untracked */ }
+    }
+    userName = currentMember.display_name;
+    if (accessToken) persistSession();
+  }
   document.getElementById('identity-name').textContent = userName || userId;
   document.getElementById('identity-role').textContent = currentRoomRole;
   document.getElementById('identity-avatar').textContent = (userName || userId || '?').slice(0,1).toUpperCase();
@@ -1434,13 +1853,16 @@ async function loadState() {
 
   // Rebuild the canonical audit trail rather than leaving the event panel
   // empty after a page reload. Repeated WS onopen hydration cannot duplicate it.
-  document.getElementById('events-log').innerHTML = '';
+  const eventsLog = document.getElementById('events-log');
+  eventsLog.innerHTML = state.events_since.length ? '' : '<div class="events-empty">Nothing yet.</div>';
   state.events_since.forEach(event => logEvent(event));
+  updateActivityLogSummary();
   lastSequence = state.events_since.length > 0
     ? Math.max(...state.events_since.map(event => event.sequence))
     : 0;
 
   if (openThreadRootId) await refreshThread();
+  updateRoomHeader();
 }
 
 function handleRealtimeEvent(msg) {
@@ -1546,8 +1968,8 @@ function appendMessage(m) {
   msg.className = `msg ${role}`;
   if (m.message_id) msg.dataset.messageId = m.message_id;
   if (m.sequence && m.sequence > readCursor) msg.classList.add('unread');
-  const time = m.created_at ? new Date(m.created_at).toLocaleTimeString() : '';
-  msg.innerHTML = `${attribution(m)}<div class="bubble">${renderMentions(m.content)}</div><div class="time">${time}</div>${messageActions(m)}`;
+  const time = `<div class="time" title="${escHtml(m.created_at || '')}">${formatTime(m.created_at)}</div>`;
+  msg.innerHTML = `${attribution(m)}<div class="bubble">${renderMentions(m.content)}</div>${time}${messageActions(m)}`;
   // The avatar letter is read back off the one renderer's output rather than
   // resolving the name a second time, so the two can never disagree.
   msg.dataset.initial = (msg.querySelector('.sender')?.textContent || '?').trim().slice(0, 1);
@@ -1556,16 +1978,46 @@ function appendMessage(m) {
   // hover rather than repeating down the column.
   const previous = div.lastElementChild;
   const stamp = m.created_at ? Date.parse(m.created_at) : NaN;
+  // A broadcast thread reply is answering a different, older message — grouping
+  // it under whatever happens to be last in the channel (or grouping the next
+  // channel message under it) would borrow its neighbor's identity. Either side
+  // being a thread reply forces a full header.
   if (previous && previous.classList.contains('msg') && !previous.classList.contains('system')
       && role !== 'system' && m.sender_id && previous.dataset.senderId === m.sender_id
+      && !m.is_thread_reply && previous.dataset.isThreadReply !== 'true'
       && Number.isFinite(stamp) && Number.isFinite(Number(previous.dataset.stamp))
       && stamp - Number(previous.dataset.stamp) < 300000) {
     msg.classList.add('grouped');
   }
   if (m.sender_id) msg.dataset.senderId = m.sender_id;
+  msg.dataset.isThreadReply = m.is_thread_reply ? 'true' : 'false';
   if (Number.isFinite(stamp)) msg.dataset.stamp = String(stamp);
   div.appendChild(msg);
+  scrollMessagesToBottom();
+}
+
+// Only meaningful once every sibling that can land below the transcript — branch
+// activity cards included — is already in the DOM. A rAF lets this frame's layout
+// settle first, so the newest item is never left half behind the composer.
+function scrollMessagesToBottom() {
+  const div = document.getElementById('messages');
   div.scrollTop = div.scrollHeight;
+  requestAnimationFrame(() => { div.scrollTop = div.scrollHeight; scheduleAutoRead(); });
+}
+
+// The manual checkmark stays, but a reload used to bring the NEW rule back every
+// time even though the reader had plainly already seen the bottom of the channel.
+// Advance the cursor on their behalf once it is genuinely true: this is the
+// conversation view, the tab has focus, and the scroller is sitting at the bottom
+// — debounced so a fast scroll-past does not count as having read it.
+let autoReadTimer = null;
+function scheduleAutoRead() {
+  clearTimeout(autoReadTimer);
+  if (currentCenterView() !== 'conversation' || !document.hasFocus()) return;
+  if (readCursor >= lastSequence) return;
+  const div = document.getElementById('messages');
+  if (!div || div.scrollHeight - div.scrollTop - div.clientHeight > 24) return;
+  autoReadTimer = setTimeout(markRoomRead, 1500);
 }
 
 // Both panes attribute a message through this one function, because a pane with a
@@ -1577,13 +2029,10 @@ function attribution(m, trailing = '') {
   return `<div class="sender">${escHtml(displayNameFor(m))}${trailing}</div>${agentProvenance(m)}`;
 }
 
-// An agent's id is not a name. The roster knows what it is called, and falls back
-// to the raw id only when the sender is genuinely not in this room.
+// An id is not a name. memberName knows what a member or agent is called, and
+// falls back to the raw id only when the sender is genuinely not in this room.
 function displayNameFor(m) {
-  if (m.sender_id === userId) return userName;
-  const agent = roomAgents.find(a => a.agent_id === m.sender_id);
-  if (agent) return agent.name;
-  return m.sender_id || 'System';
+  return m.sender_id ? memberName(m.sender_id) : 'System';
 }
 
 // Why this agent spoke: what triggered the turn, who asked for it, and a way
@@ -1594,7 +2043,7 @@ function agentProvenance(m) {
   if (!meta.output_id && !meta.triggered_by) return '';
   const trigger = String(meta.triggered_by || 'DIRECT').toLowerCase();
   const invoker = meta.requested_by
-    ? ` · asked by ${escHtml(meta.requested_by === userId ? userName : meta.requested_by)}`
+    ? ` · asked by ${escHtml(memberName(meta.requested_by))}`
     : '';
   const record = meta.output_id
     ? ` · <button class="output-link" data-output-id="${escHtml(meta.output_id)}" onclick="openAgentOutput(this.dataset.outputId, this)">Full output ${escHtml(shortId(meta.output_id))}</button>`
@@ -1621,7 +2070,7 @@ function openAgentOutput(outputId, trigger) {
   const record = document.createElement('div');
   record.className = 'output-record';
   record.innerHTML = `<div class="output-record-head">${escHtml(agent ? agent.name : output.agent_id)} · output <code>${escHtml(shortId(output.output_id))}</code> · run <code>${escHtml(shortId(output.execution_id))}</code></div>
-    <div class="output-record-body">${escHtml(output.content || 'No readable content returned.')}</div>
+    <div class="output-record-body">${renderMarkdown(output.content || 'No readable content returned.')}</div>
     <details class="prompt-detail"><summary>Exact source prompt</summary><div>${escHtml(output.source_prompt || 'Unavailable')}</div></details>`;
   holder.appendChild(record);
   holder.dataset.outputOpen = outputId;
@@ -1648,7 +2097,7 @@ function messageActions(m) {
     groups.set(reaction.emoji, entry);
   });
   const chips = [...groups.entries()].map(([emoji, entry]) =>
-    `<button class="${entry.mine ? 'reacted' : ''}" data-message-id="${id}" data-emoji="${escHtml(emoji)}" data-mine="${entry.mine}" onclick="toggleReaction(this.dataset)" aria-label="React ${escHtml(emoji)}">${escHtml(emoji)}${entry.count ? ` ${entry.count}` : ''}</button>`).join('');
+    `<button class="${entry.mine ? 'reacted' : ''}" data-message-id="${id}" data-emoji="${escHtml(emoji)}" data-mine="${entry.mine}" onclick="toggleReaction(this.dataset)" aria-label="React ${escHtml(emoji)}" title="React ${escHtml(emoji)}">${escHtml(emoji)}${entry.count ? ` ${entry.count}` : ''}</button>`).join('');
   // Every number here was counted from the reply rows on this read: the whole
   // thread, who is in it, and when it last moved.
   const count = m.reply_count || 0;
@@ -1658,11 +2107,21 @@ function messageActions(m) {
     : '';
   // A broadcast reply is already an answer in a thread. Offering it as somewhere to
   // start one said the opposite of what it is.
-  const replyLabel = m.is_thread_reply
+  const standingLabel = m.is_thread_reply
     ? (thread ? `Reply in thread · ${thread}` : 'Reply in thread')
-    : (thread || 'Reply');
+    : thread;
   const lastReply = m.last_reply_at ? ` title="Last reply ${escHtml(new Date(m.last_reply_at).toLocaleString())}"` : '';
-  return `<div class="msg-actions"><button class="thread-open" data-message-id="${id}"${lastReply} onclick="openThread(this.dataset.messageId)">${replyLabel}</button>${chips}</div>`;
+  // An existing thread is a standing fact about the message, so its chip stays
+  // visible without hover. STARTING a thread is an action like reacting, so a
+  // bare "Reply" lives with the other hover-revealed actions instead of putting
+  // a gold link under every message.
+  const threadRow = standingLabel
+    ? `<button class="thread-open" data-message-id="${id}"${lastReply} onclick="openThread(this.dataset.messageId)">${standingLabel}</button>`
+    : '';
+  const replyAction = standingLabel
+    ? ''
+    : `<button class="action" data-message-id="${id}" onclick="openThread(this.dataset.messageId)">Reply</button>`;
+  return `${threadRow}<div class="msg-actions">${replyAction}${chips}</div>`;
 }
 
 async function toggleReaction(data) {
@@ -1712,12 +2171,14 @@ async function refreshThread() {
   }
   const replies = Math.max(thread.length - 1, 0);
   document.getElementById('thread-title').textContent = `Thread · ${replies} ${replies === 1 ? 'reply' : 'replies'}`;
-  document.getElementById('thread-copy').textContent = 'Every count here is counted from the replies themselves on this read.';
+  document.getElementById('thread-copy').textContent = 'Replies stay attached to the message they answer.';
   list.innerHTML = thread.map(entry => `
     <div class="thread-item" style="margin-left:${Math.min(entry.thread_depth, 4) * 12}px">
-      ${attribution(entry, `<span class="thread-counts">#${entry.sequence} · ${entry.reply_count} ${entry.reply_count === 1 ? 'reply' : 'replies'}</span>`)}
+      ${attribution(entry,
+        `<span class="time" title="${escHtml(entry.created_at || '')}">${formatTime(entry.created_at)}</span>` +
+        (entry.reply_count ? `<span class="thread-counts">${entry.reply_count} ${entry.reply_count === 1 ? 'reply' : 'replies'}</span>` : ''))}
       <div class="thread-body">${renderMentions(entry.content)}</div>
-      <div class="msg-actions"><button data-message-id="${escHtml(entry.message_id)}" onclick="setThreadTarget(this.dataset.messageId)">Reply to this</button></div>
+      <div class="msg-actions"><button class="action" data-message-id="${escHtml(entry.message_id)}" onclick="setThreadTarget(this.dataset.messageId)">Reply to this</button></div>
     </div>`).join('');
   form.hidden = !['admin', 'editor', 'member'].includes(currentRoomRole);
 }
@@ -1758,7 +2219,7 @@ async function runSearch(event) {
     }
     results.innerHTML = hits.map(hit => `
       <div class="search-hit" data-object-kind="${escHtml(hit.object_kind)}" data-object-id="${escHtml(hit.object_id)}" data-container-id="${escHtml(hit.container_id || '')}" data-room-id="${escHtml(hit.room_id)}" onclick="openSearchHit(this.dataset)">
-        <div class="hit-meta">#${escHtml(hit.room_name || hit.room_id)} · ${escHtml(hit.object_kind)} · ${escHtml(hit.author_id)} · ${new Date(hit.created_at).toLocaleString()}</div>
+        <div class="hit-meta">#${escHtml(hit.room_name || hit.room_id)} · ${escHtml(hit.object_kind)} · ${escHtml(memberName(hit.author_id))} · ${new Date(hit.created_at).toLocaleString()}</div>
         <div>${highlightExcerpt(hit.excerpt)}</div>
       </div>`).join('');
   } catch (err) {
@@ -1887,21 +2348,42 @@ function renderApprovals(approvals) {
   `).join('');
 }
 
+let lastArtifacts = [];
 function renderArtifacts(arts) {
+  lastArtifacts = arts;
   const panel = document.getElementById('artifacts-panel');
+  const selectorEl = document.getElementById('artifact-selector');
   const surface = document.getElementById('artifact-surface');
-  if (!arts.length) { panel.innerHTML = '<div class="card"><div class="detail">No artifacts</div></div>'; surface.innerHTML = '<div class="empty-outputs">Synthesize reviewed outputs to publish the first Decision Brief.</div>'; return; }
-  const markup = arts.map(a => `
-    <div class="card" data-artifact-id="${escHtml(a.artifact_id)}">
-      <div class="title">${escHtml(a.name)}</div>
-      <div class="detail">${a.type} · version ${a.version}</div>
-      ${a.content ? `<details open><summary>Read artifact</summary><article class="detail">${escHtml(a.content)}</article>
-        <button class="btn-sm" onclick="loadProvenance('${a.version_id}')">Inspect claim provenance</button>
-        <div id="provenance-${a.version_id}"></div></details>` : ''}
-    </div>
-  `).join('');
-  panel.innerHTML = `<div class="card"><div class="detail">${arts.length} published ${arts.length === 1 ? 'artifact' : 'artifacts'}. Open the Artifact tab to read them.</div></div>`;
-  surface.innerHTML = markup;
+  panel.innerHTML = arts.length
+    ? `<div class="card"><div class="detail">${arts.length} published ${arts.length === 1 ? 'artifact' : 'artifacts'}. Open Artifacts to read them.</div></div>`
+    : '<div class="card"><div class="detail">No artifacts</div></div>';
+  if (!arts.length) {
+    selectorEl.innerHTML = '';
+    surface.innerHTML = `<div class="view-empty"><p>A published Decision Brief, Progress Report, or Synthesis reads here as a formatted document with the evidence behind every claim. Review outputs in an AI branch and publish one to see it.</p><button class="btn-primary" onclick="openCenterView('branch')">Open AI branch</button></div>`;
+    return;
+  }
+  if (!arts.some(a => a.artifact_id === selectedArtifactId)) selectedArtifactId = arts[arts.length - 1].artifact_id;
+  selectorEl.innerHTML = arts.length > 1 ? arts.map(a => `
+    <button class="${a.artifact_id === selectedArtifactId ? 'active' : ''}" data-artifact-id="${escHtml(a.artifact_id)}" onclick="selectArtifact('${a.artifact_id}')">${escHtml(a.name)} · v${a.version}</button>
+  `).join('') : '';
+  const selected = arts.find(a => a.artifact_id === selectedArtifactId);
+  // The content itself is data — never rewritten — but when its own first line
+  // is already an H1, the reader's own heading is a second, duplicate title
+  // sitting right above it. The metadata line still says what it needs to say.
+  const firstContentLine = (selected.content || '').split('\n').find(l => l.trim() !== '') || '';
+  const contentHasOwnTitle = /^#\s+\S/.test(firstContentLine.trim());
+  surface.innerHTML = `<article class="artifact-doc" data-artifact-id="${escHtml(selected.artifact_id)}">
+      ${contentHasOwnTitle ? '' : `<h2>${escHtml(selected.name)}</h2>`}
+      <div class="artifact-doc-meta">${escHtml(selected.type)} · version ${selected.version}</div>
+      ${selected.content ? `<div class="artifact-doc-content">${renderMarkdown(selected.content)}</div>
+        <button class="btn-sm" onclick="loadProvenance('${selected.version_id}')">Inspect claim provenance</button>
+        <div id="provenance-${selected.version_id}"></div>` : '<div class="artifact-doc-content">No content on this version.</div>'}
+    </article>`;
+}
+
+function selectArtifact(artifactId) {
+  selectedArtifactId = artifactId;
+  renderArtifacts(lastArtifacts);
 }
 
 function renderDecisions(decs) {
@@ -2145,7 +2627,7 @@ async function declarePosture(posture) {
 function renderMembers(members) {
   const el = document.getElementById('team-list');
   el.innerHTML = members.map(m => `
-    <button class="nav-item" onclick="openContext('members')"><span class="presence-dot"></span><span class="nav-name">${escHtml(m.user_id)}</span><span class="nav-meta">${m.handle ? `@${escHtml(m.handle)}` : escHtml(m.role)}</span></button>
+    <button class="nav-item" onclick="openContext('members')" aria-label="${escHtml(m.display_name || m.user_id)}${m.handle ? ` @${escHtml(m.handle)}` : ` — ${escHtml(m.role)}`}"><span class="presence-dot"></span><span class="nav-name">${escHtml(m.display_name || m.user_id)}</span><span class="nav-meta handle">${m.handle ? `@${escHtml(m.handle)}` : escHtml(m.role)}</span></button>
   `).join('');
   const isAdmin = currentRoomRole === 'admin';
   const canInvite = ['admin','editor','member'].includes(currentRoomRole);
@@ -2155,10 +2637,13 @@ function renderMembers(members) {
   }
   document.getElementById('members-cards').innerHTML = members.map(m => {
     const you = m.user_id === userId ? ' · you' : '';
+    const name = m.display_name || m.user_id;
+    const handle = m.handle ? ` <span class="handle">@${escHtml(m.handle)}</span>` : '';
+    const idLine = `<div class="detail">ID <code>${escHtml(m.user_id)}</code></div>`;
     if (!isAdmin || m.role === 'admin') {
-      return `<div class="card"><div class="title">${escHtml(m.user_id)}${you}</div><div class="detail">${escHtml(roleLabel(m.role))}</div></div>`;
+      return `<div class="card"><div class="title">${escHtml(name)}${handle}${you}</div><div class="detail">${escHtml(roleLabel(m.role))}</div>${idLine}</div>`;
     }
-    return `<div class="card member-row"><div><div class="title">${escHtml(m.user_id)}</div><div class="detail">${escHtml(roleLabel(m.role))}</div></div><select aria-label="Access for ${escHtml(m.user_id)}" data-user-id="${escHtml(m.user_id)}" onchange="changeMemberRole(this.dataset.userId, this.value)"><option value="editor"${m.role === 'editor' ? ' selected' : ''}>Can contribute</option><option value="viewer"${m.role === 'viewer' ? ' selected' : ''}>Read only</option></select><button class="btn-sm" type="button" data-user-id="${escHtml(m.user_id)}" onclick="removeMember(this.dataset.userId)">Remove</button></div>`;
+    return `<div class="card member-row"><div><div class="title">${escHtml(name)}${handle}</div><div class="detail">${escHtml(roleLabel(m.role))}</div>${idLine}</div><select aria-label="Access for ${escHtml(name)}" data-user-id="${escHtml(m.user_id)}" onchange="changeMemberRole(this.dataset.userId, this.value)"><option value="editor"${m.role === 'editor' ? ' selected' : ''}>Can contribute</option><option value="viewer"${m.role === 'viewer' ? ' selected' : ''}>Read only</option></select><button class="btn-sm" type="button" data-user-id="${escHtml(m.user_id)}" onclick="removeMember(this.dataset.userId)">Remove</button></div>`;
   }).join('');
   // The invite form is rebuilt only when the caller's own access changes, so a
   // half-typed user id survives the re-render every membership event triggers.
@@ -2173,7 +2658,7 @@ function renderMembers(members) {
   const copy = isAdmin
     ? 'Invited people see this channel in their sidebar at once. Removing someone ends their live feed and access immediately.'
     : 'Invited people see this channel in their sidebar at once. A channel admin changes access or removes members.';
-  controls.innerHTML = `<form class="invite-form" onsubmit="inviteMember(event)"><input id="invite-user-id" placeholder="User ID" autocomplete="off" aria-label="User ID to invite" required><select id="invite-role" aria-label="Access level"><option value="editor">Can contribute</option><option value="viewer">Read only</option></select><button class="btn-sm" type="submit">Invite</button></form><div class="panel-copy">${copy}</div>`;
+  controls.innerHTML = `<form class="invite-form" onsubmit="inviteMember(event)"><input id="invite-user-id" placeholder="User ID" autocomplete="off" aria-label="User ID to invite" required><select id="invite-role" aria-label="Access level"><option value="editor">Can contribute</option><option value="viewer">Read only</option></select><button class="btn-sm" type="submit">Invite</button></form><div class="panel-copy">Ask the person for their user ID — it shows on their own entry in this list. ${copy}</div>`;
 }
 
 function roleLabel(role) {
@@ -2259,11 +2744,26 @@ function branchStatus(branch, runs) {
   return 'queued';
 }
 
+// Runs can be gone (archived) while the branch's authored outputs persist — a run
+// count of 0 next to two visible output cards was reading as a contradiction. Count
+// whichever roster is actually populated: distinct specialists, not stale executions.
+function branchAgentCount(branch, related) {
+  if (related.length) return related.length;
+  const distinct = new Set(allRoomOutputs.filter(o => o.branch_id === branch.branch_id).map(o => o.agent_id));
+  return distinct.size;
+}
+// A branch always has a real initiator server-side; when the field is missing from
+// this payload, say nothing rather than print a placeholder that reads as a name.
+function branchStarterClause(branch) {
+  return branch.initiating_user_id ? `Started by ${memberName(branch.initiating_user_id)} · ` : '';
+}
+
 function renderBranches(branches, runs) {
   const list = document.getElementById('branches-list');
   if (!branches.length) {
     list.innerHTML = '<div class="nav-item"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span><span class="nav-name">No branches yet</span></div>';
     document.getElementById('branch-panel-title').textContent = 'No AI branch selected';
+    document.getElementById('branch-panel-title').classList.remove('hidden');
     document.getElementById('branch-panel-copy').textContent = 'Start AI work from the composer. Runs and outputs remain together here.';
     document.getElementById('branch-runs').innerHTML = '';
     return;
@@ -2271,13 +2771,20 @@ function renderBranches(branches, runs) {
   list.innerHTML = branches.slice().reverse().map(branch => {
     const related = runs.filter(run => run.branch_id === branch.branch_id);
     const status = branchStatus(branch, runs);
-    return `<button class="nav-item branch-nav ${branch.branch_id === currentBranchId ? 'active' : ''}" onclick="selectBranch('${branch.branch_id}')"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span><span class="nav-name"><span>${escHtml(branchTitle(branch))}</span><span class="branch-summary">${escHtml(status)} · ${related.length} ${related.length === 1 ? 'agent' : 'agents'}</span></span></button>`;
+    const count = branchAgentCount(branch, related);
+    return `<button class="nav-item branch-nav ${branch.branch_id === currentBranchId && currentCenterView() === 'branch' ? 'active' : ''}" data-branch-id="${escHtml(branch.branch_id)}" onclick="selectBranch('${branch.branch_id}')" aria-label="${escHtml(branchTitle(branch))} — ${escHtml(status)}, ${count} ${count === 1 ? 'agent' : 'agents'}"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span><span class="nav-name"><span>${escHtml(branchTitle(branch))}</span><span class="branch-summary">${escHtml(status)} · ${count} ${count === 1 ? 'agent' : 'agents'}</span></span></button>`;
   }).join('');
   const branch = branches.find(item => item.branch_id === currentBranchId) || branches[branches.length - 1];
   const related = runs.filter(run => run.branch_id === branch.branch_id);
   const status = branchStatus(branch, runs);
-  document.getElementById('branch-panel-title').textContent = branchTitle(branch);
-  document.getElementById('branch-panel-copy').textContent = `${branch.mode === 'TURN_LOCKED_SINGLE' ? 'Single agent' : 'Parallel'} · Started by ${branch.initiating_user_id || 'room member'} · ${status}`;
+  const count = branchAgentCount(branch, related);
+  // The room header already carries this branch's title (⑂ + truncated
+  // prompt) whenever this view is open — repeating it in the card beneath
+  // said the same thing twice. The card now carries only what the header
+  // doesn't: mode, status, and how many agents.
+  document.getElementById('branch-panel-title').textContent = '';
+  document.getElementById('branch-panel-title').classList.add('hidden');
+  document.getElementById('branch-panel-copy').textContent = `${branch.mode === 'TURN_LOCKED_SINGLE' ? 'Single agent' : 'Parallel'} · ${status} · ${count} ${count === 1 ? 'agent' : 'agents'}`;
   document.getElementById('branch-runs').innerHTML = related.map(run => {
     const agent = roomAgents.find(item => item.agent_id === run.agent_id);
     return `<div class="card"><div class="title"><span class="status-text ${String(run.status).toLowerCase()}">${escHtml(agent ? agent.name : 'Specialist')} · ${escHtml(run.status)}</span></div><div class="detail">${escHtml(agent ? agent.role : 'Independent analysis')}</div></div>`;
@@ -2291,14 +2798,19 @@ function renderBranchActivity(branches, runs) {
   branches.forEach(branch => {
     const related = runs.filter(run => run.branch_id === branch.branch_id);
     const status = branchStatus(branch, runs);
-    const reviewed = roomOutputs.filter(output => output.branch_id === branch.branch_id && outputSelections.has(output.output_id)).length;
-    messages.insertAdjacentHTML('beforeend', `<article class="branch-activity"><button onclick="selectBranch('${branch.branch_id}')"><span class="branch-symbol"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span><span><span class="branch-title">${escHtml(branchTitle(branch))}</span><span class="branch-detail">Started by ${escHtml(branch.initiating_user_id || 'room member')} · ${related.length} ${related.length === 1 ? 'agent' : 'agents'}</span></span><span class="branch-progress"><span class="status-text ${status}">${escHtml(status)}</span><br>${reviewed} reviewed</span></button></article>`);
+    // One vocabulary everywhere selections are summarized: included/excluded/
+    // unreviewed, never a bare "reviewed" that says nothing about the outcome.
+    const branchOutputs = roomOutputs.filter(output => output.branch_id === branch.branch_id);
+    const included = branchOutputs.filter(output => outputSelections.get(output.output_id) === 'included').length;
+    const excluded = branchOutputs.filter(output => outputSelections.get(output.output_id) === 'excluded').length;
+    const count = branchAgentCount(branch, related);
+    messages.insertAdjacentHTML('beforeend', `<article class="branch-activity"><button onclick="selectBranch('${branch.branch_id}')" aria-label="${escHtml(branchTitle(branch))} — ${escHtml(status)}, ${included} included, ${excluded} excluded"><span class="branch-symbol"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span><span><span class="branch-title">${escHtml(branchTitle(branch))}</span><span class="branch-detail">${escHtml(branchStarterClause(branch))}${count} ${count === 1 ? 'agent' : 'agents'}</span></span><span class="branch-progress"><span class="status-text ${status}">${escHtml(status)}</span><br>${included} included · ${excluded} excluded</span></button></article>`);
   });
 }
 
 async function selectBranch(branchId) {
   currentBranchId = branchId;
-  openContext('branch');
+  openCenterView('branch');
   await loadState();
 }
 
@@ -2408,9 +2920,9 @@ function renderOutputs(outputs, runs) {
     `${outputs.length} specialist ${outputs.length === 1 ? 'output' : 'outputs'}`;
   if (!outputs.length) {
     const active = runs.filter(r => r.status === 'PENDING' || r.status === 'RUNNING').length;
-    panel.innerHTML = `<div class="empty-outputs">${active
-      ? `${active} specialist ${active === 1 ? 'run is' : 'runs are'} in progress. Outputs will reappear here after reconnect.`
-      : 'Launch two or three specialists to compare independent, attributed analyses side by side.'}</div>`;
+    panel.innerHTML = active
+      ? `<div class="empty-outputs">${active} specialist ${active === 1 ? 'run is' : 'runs are'} in progress. Outputs will reappear here after reconnect.</div>`
+      : `<div class="view-empty"><p>This is where specialist branches compare independent, attributed analyses side by side. Launch two or three specialists on a question to fill it.</p><button class="btn-primary" onclick="toggleAITray(true)">Start AI work</button></div>`;
     updateSelectionSummary();
     return;
   }
@@ -2419,18 +2931,18 @@ function renderOutputs(outputs, runs) {
     const agent = roomAgents.find(a => a.agent_id === output.agent_id);
     const selection = outputSelections.get(output.output_id) || '';
     const cardClass = selection ? ` ${selection}` : '';
-    const stateLabel = selection || 'not reviewed';
     return `
       <article class="output-card${cardClass}" data-output-id="${escHtml(output.output_id)}">
         <div class="output-card-head">
           <div><div class="output-author">${escHtml(agent ? agent.name : 'Specialist')}</div>
-          <div class="output-role">${escHtml(agent ? agent.role : output.agent_id)}</div></div>
-          <span class="review-state ${selection}">${stateLabel}</span>
+          ${agent && agent.role && agent.role !== agent.name ? `<div class="output-role">${escHtml(agent.role)}</div>` : ''}</div>
         </div>
-        <div class="output-content">${escHtml(output.content || 'No readable content returned.')}</div>
+        <div class="output-content">${renderMarkdown(output.content || 'No readable content returned.')}</div>
         <div class="output-provenance">
-          Source output <code>${escHtml(shortId(output.output_id))}</code> · run <code>${escHtml(shortId(output.execution_id))}</code>
-          <details class="prompt-detail"><summary>Exact source prompt</summary><div>${escHtml(output.source_prompt || 'Unavailable')}</div></details>
+          <details class="prompt-detail"><summary>Provenance</summary>
+            <div>Source output <code>${escHtml(shortId(output.output_id))}</code> · run <code>${escHtml(shortId(output.execution_id))}</code></div>
+            <div>Exact source prompt: ${escHtml(output.source_prompt || 'Unavailable')}</div>
+          </details>
         </div>
         <div class="review-actions">
           <button class="include ${selection === 'included' ? 'active' : ''}" aria-pressed="${selection === 'included'}" onclick="setOutputSelection('${output.output_id}','included')">Include</button>
@@ -2528,24 +3040,32 @@ async function renderMeta(query) {
   evidence.innerHTML = '';
   try {
     const result = await api('GET', `/rooms/${roomId}/meta?${query}&limit=10`);
+    const scopeRoom = (myRooms.find(item => item.room_id === result.scope.room_id) || {}).name || 'this channel';
     if (!result.decision) {
-      // The kinds answered from assertions rather than one decision brief.
-      document.getElementById('meta-scope').innerHTML = `Scope <code>${escHtml(result.scope.room_id)}</code> · ${escHtml(result.query.kind)} · ` +
-        `head ${result.freshness.authorized_head ?? '—'} · drain lag ${result.freshness.drain_lag_events ?? '—'}`;
-      answer.innerHTML = `<span class="ontology-badge">${escHtml(result.status)}</span> ${escHtml(result.summary)}`;
+      // The kinds answered from assertions rather than one decision brief. The
+      // scope line answers "how fresh is this" in words; the machine values ride
+      // in the title for anyone who needs the exact event head.
+      const lag = result.freshness.drain_lag_events;
+      document.getElementById('meta-scope').innerHTML = `Scope: #${escHtml(scopeRoom)} · ${escHtml(humanizeToken(result.query.kind))}` +
+        `<span title="authorized head ${escHtml(String(result.freshness.authorized_head ?? '—'))}"> · evidence current to event ${escHtml(String(result.freshness.authorized_head ?? '—'))}</span>` +
+        (lag ? ` · ${escHtml(String(lag))} events still syncing` : '');
+      answer.innerHTML = `<span class="ontology-badge" title="${escHtml(result.status)}">${escHtml(humanizeToken(result.status))}</span> ${renderMarkdown(result.summary)}`;
       evidence.innerHTML = [...result.claims, ...result.unconfirmed].map(claim =>
-        `<article class="meta-chain"><span class="ontology-badge ${claim.review_status.toLowerCase()}">${escHtml(claim.assurance)}</span>
-          ${escHtml(claim.text)}<br>Confidence ${Number(claim.confidence).toFixed(2)} · as of ${claim.asserted_at_sequence}
+        `<article class="meta-chain"><span class="ontology-badge ${claim.review_status.toLowerCase()}" title="${escHtml(claim.assurance)}">${escHtml(humanizeToken(claim.assurance))}</span>
+          ${escHtml(claim.text)}<br>Confidence ${Number(claim.confidence).toFixed(2)} · as of event ${claim.asserted_at_sequence}
           · ${claim.current ? 'current' : `${claim.invalidating_events} later events`}
-          · source <code>${escHtml(claim.source_object_kind)}:${escHtml(claim.source_object_id)}</code></article>`).join('');
+          · source ${escHtml(humanizeToken(claim.source_object_kind))} <code title="${escHtml(claim.source_object_id)}">${escHtml(shortId(claim.source_object_id))}</code></article>`).join('');
       return;
     }
     const counts = result.retrieval_counts;
     const freshness = result.freshness;
-    document.getElementById('meta-scope').innerHTML = `Scope <code>${escHtml(result.scope.room_id)}</code> · Decision Brief v${result.scope.version_number} · ` +
-      `head ${freshness.authorized_head} · drain lag ${freshness.drain_lag_events} · ${counts.returned_claims}/${counts.available_claims} claims retrieved`;
+    const decisionLag = freshness.drain_lag_events;
+    document.getElementById('meta-scope').innerHTML = `Scope: #${escHtml(scopeRoom)} · Decision Brief v${result.scope.version_number}` +
+      `<span title="authorized head ${escHtml(String(freshness.authorized_head))}"> · evidence current to event ${escHtml(String(freshness.authorized_head))}</span>` +
+      (decisionLag ? ` · ${escHtml(String(decisionLag))} events still syncing` : '') +
+      ` · ${counts.returned_claims} of ${counts.available_claims} claims`;
     answer.innerHTML = `<span class="ontology-badge ${result.decision.review_status.toLowerCase()}">${escHtml(metaDerivationLabel(result.decision))}</span> ` +
-      `${escHtml(result.summary)}<br><span class="ontology-meta">Confidence ${Number(result.decision.confidence).toFixed(2)} · freshness ${escHtml(freshness.decision_updated_at)}</span>`;
+      `${renderMarkdown(result.summary)}<span class="ontology-meta">Confidence ${Number(result.decision.confidence).toFixed(2)} · freshness ${escHtml(freshness.decision_updated_at)}</span>`;
     evidence.innerHTML = result.evidence_chains.map((chain, index) => {
       const claim = chain.claim;
       const source = chain.exact_source_evidence;
@@ -2557,8 +3077,8 @@ async function renderMeta(query) {
         <strong>Decision → Claim ${index + 1} → AgentOutput</strong><br>
         <span class="ontology-badge ${claim.review_status.toLowerCase()}">${escHtml(metaDerivationLabel(claim))}</span>
         ${escHtml(claim.label)}<br>
-        Confidence ${Number(claim.confidence).toFixed(2)} · output <code>${escHtml(source.output_id)}</code>${correction}<br>
-        Governed link: <span class="ontology-badge ${decisionLink.review_status.toLowerCase()}">${escHtml(decisionLink.kind)}</span>
+        Confidence ${Number(claim.confidence).toFixed(2)} · output <code title="${escHtml(source.output_id)}">${escHtml(shortId(source.output_id))}</code>${correction}<br>
+        Governed link: <span class="ontology-badge ${decisionLink.review_status.toLowerCase()}" title="${escHtml(decisionLink.kind)}">${escHtml(humanizeToken(decisionLink.kind))}</span>
         confidence ${Number(decisionLink.confidence).toFixed(2)}
         <details><summary>Exact provider/source evidence</summary><pre>${escHtml(JSON.stringify({
           source_prompt: source.source_prompt,
@@ -2607,6 +3127,11 @@ function shortId(value) {
   return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
 }
 
+// SCREAMING_SNAKE machine tokens read as debug output; people get the words.
+function humanizeToken(value) {
+  return String(value || '').replace(/_/g, ' ').toLowerCase();
+}
+
 function errorMessage(err) {
   const raw = err && err.message ? err.message : String(err || 'Unknown error');
   try {
@@ -2619,10 +3144,23 @@ function errorMessage(err) {
 
 function logEvent(msg) {
   const log = document.getElementById('events-log');
+  log.querySelector('.events-empty')?.remove();
   const div = document.createElement('div');
   div.textContent = `[${msg.sequence}] ${msg.event_type} by ${msg.actor_id || '?'}`;
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
+  updateActivityLogSummary();
+}
+
+// Collapsed, the "Nothing yet." line inside is invisible — the section header
+// is the only thing anyone sees, so it has to say there is nothing rather
+// than read like every other populated section.
+function updateActivityLogSummary() {
+  const log = document.getElementById('events-log');
+  const summary = document.getElementById('activity-log-summary');
+  if (!log || !summary) return;
+  const isEmpty = log.children.length === 0 || Boolean(log.querySelector('.events-empty'));
+  summary.textContent = isEmpty ? 'Activity log · quiet' : 'Activity log';
 }
 
 async function sendMessage() {
@@ -2669,6 +3207,8 @@ function escHtml(s) {
   if (s === undefined || s === null) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+
+resumeStoredSession();
 </script>
 </body>
 </html>
