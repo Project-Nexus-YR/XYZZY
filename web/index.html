@@ -207,12 +207,17 @@ a,.output-link{text-underline-offset:2px}
 .presence-dot.working{background:var(--accent)}
 
 /* ---------- sign in ---------- */
+/* A grid with a stretch column and a fixed one let the intro sit narrow and
+   right-aligned inside a wide left track, leaving a lopsided gap on the left
+   that the fixed-width card's own padding didn't match on the right. Centering
+   the pair as one flex group keeps the outer margins symmetric regardless of
+   how the two children's own widths differ. */
 #setup-screen{
   position:fixed;inset:0;z-index:100;background:var(--bg);
-  display:grid;grid-template-columns:minmax(0,1fr) minmax(340px,392px);
-  align-items:center;gap:6vw;padding:6vw;overflow:auto;
+  display:flex;justify-content:center;align-items:center;
+  gap:6vw;padding:6vw;overflow:auto;
 }
-.setup-intro{max-width:46ch;justify-self:end}
+.setup-intro{max-width:46ch}
 .setup-mark{display:flex;align-items:center;gap:var(--s-2);font-size:var(--t-ui);font-weight:var(--w-strong);margin-bottom:var(--s-6);letter-spacing:var(--k-ui)}
 .setup-intro h1{font-size:var(--t-display);line-height:1.16;letter-spacing:var(--k-display);font-weight:var(--w-strong)}
 .setup-intro p{font-size:var(--t-title);line-height:1.55;color:var(--text-2);margin-top:var(--s-3);letter-spacing:var(--k-title);text-wrap:pretty}
@@ -226,6 +231,9 @@ a,.output-link{text-underline-offset:2px}
 .setup-card{
   background:var(--raised);border:1px solid var(--line);border-radius:var(--r-3);
   padding:var(--s-5);box-shadow:var(--shadow-2);max-width:392px;
+  /* Reserved for the taller of the two variants (the token form) so revealing
+     whichever one /auth/config resolves to never shifts the page around it. */
+  min-height:328px;
 }
 .setup-card h2{font-size:var(--t-title);font-weight:var(--w-strong);letter-spacing:var(--k-title)}
 .setup-card > p{font-size:var(--t-ui);color:var(--text-2);margin-top:var(--s-2);line-height:1.5;letter-spacing:var(--k-ui)}
@@ -240,12 +248,22 @@ a,.output-link{text-underline-offset:2px}
 .setup-card input:focus-visible{border-color:var(--edge)}
 .setup-card input::placeholder{color:var(--text-3)}
 .setup-card .field-help{font-size:var(--t-small);color:var(--text-3);margin-top:var(--s-2);line-height:1.45;letter-spacing:var(--k-small)}
-#setup-button{
+.setup-card input.error{border-color:var(--danger)}
+.setup-card .field-error{font-size:var(--t-small);color:var(--danger);margin-top:var(--s-2);line-height:1.45;letter-spacing:var(--k-small)}
+#setup-button,#setup-sso-button{
   width:100%;margin-top:var(--s-5);background:var(--accent);color:var(--accent-ink);
   font-weight:var(--w-medium);padding:var(--s-2) var(--s-3);border-radius:var(--r-2);
   font-size:var(--t-ui);letter-spacing:var(--k-ui);transition:background var(--t-fast);
 }
 #setup-button:hover:not(:disabled){background:var(--accent-2)}
+#setup-sso-button:hover{background:var(--accent-2)}
+#setup-token-summary{
+  font-size:var(--t-small);color:var(--text-3);letter-spacing:var(--k-small);
+  cursor:pointer;margin-top:var(--s-5);list-style:none;
+}
+#setup-token-summary::-webkit-details-marker{display:none}
+.setup-card.sso-mode #setup-token-details{margin-top:var(--s-2)}
+.setup-card.sso-mode #setup-token-details[open] #setup-token-summary{margin-bottom:var(--s-4)}
 
 /* ---------- shell ---------- */
 .header{display:none!important}
@@ -310,6 +328,9 @@ a,.output-link{text-underline-offset:2px}
   display:flex;align-items:center;gap:var(--s-2);padding:var(--s-2) var(--s-3);flex-shrink:0;
   border-top:1px solid var(--line);
 }
+/* Footer icon buttons need a real hit area, not just a visible glyph — padding
+   grows the target to 36px without growing the icon itself. */
+.sidebar-footer .icon-button{width:36px;height:36px}
 .identity-avatar{
   width:26px;height:26px;border-radius:var(--r-2);flex-shrink:0;
   border:1px solid var(--line-3);color:var(--text-2);
@@ -859,8 +880,8 @@ a,.output-link{text-underline-offset:2px}
   .sidebar-backdrop.open{display:block}
   .mobile-nav{display:grid!important}
   .right-panel{width:100vw;min-width:0}
-  #setup-screen{grid-template-columns:minmax(0,1fr);gap:var(--s-6);padding:var(--s-6) var(--s-5);align-items:start}
-  .setup-intro{justify-self:stretch}
+  #setup-screen{flex-direction:column;align-items:stretch;justify-content:flex-start;gap:var(--s-6);padding:var(--s-6) var(--s-5)}
+  .setup-intro{max-width:none}
   .setup-intro h1{font-size:var(--t-head);letter-spacing:var(--k-head)}
   .strategy-toggle,.template-grid{grid-template-columns:1fr}
 }
@@ -884,26 +905,37 @@ a,.output-link{text-underline-offset:2px}
   <h1 id="welcome-title">Decide together. Keep every line of reasoning.</h1>
   <p>One durable channel for your team, specialist branches you can compare side by side, and artifacts that link back to the exact evidence behind them.</p>
   <div class="setup-steps">
-    <span><b class="step-no">1</b> Sign in with your access token</span>
+    <span><b class="step-no">1</b> <span id="setup-step-1-text">Sign in with your access token</span></span>
     <span><b class="step-no">2</b> Talk in the shared channel</span>
     <span><b class="step-no">3</b> Branch to specialists when the question is ready</span>
   </div>
 </section>
 <div class="setup-card">
 <h2>Open your workspace</h2>
-<p>Your token stays in this tab. Sign in from another tab with a different token to work together.</p>
+<p id="setup-card-intro">Your token stays in this tab. Sign in from another tab with a different token to work together.</p>
+<!-- Nothing variant-specific (SSO button vs token form) paints until /auth/config
+     resolves — the card reserves its own height (see .setup-card min-height) so
+     revealing this doesn't shift the page, and hiding it up front means the
+     wrong variant never flashes before the right one replaces it. -->
+<div id="setup-card-variant" class="hidden">
+<button id="setup-sso-button" onclick="startSsoLogin()">Continue with single sign-on</button>
+<details id="setup-token-details" open>
+<summary id="setup-token-summary" style="display:none" tabindex="0" role="button" aria-expanded="true" onkeydown="handleSummaryKey(event)">Use an access token instead</summary>
+<label for="setup-token">Access token</label>
+<input id="setup-token" type="password" placeholder="Access token" autocomplete="off" spellcheck="false" oninput="clearTokenError()" onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('setup-button').click();}">
+<div class="field-error hidden" id="setup-token-error" role="alert"></div>
+<details id="setup-first-run" style="margin-top:var(--s-4)">
+<summary class="field-help" style="cursor:pointer;margin-top:0">First time here? Name your channel</summary>
 <label for="setup-name">Display name</label>
 <input id="setup-name" placeholder="Your name">
 <div class="field-help">Used only to create your member record on first sign-in. After that, your name shown here always comes from the workspace.</div>
-<label for="setup-token">Access token</label>
-<input id="setup-token" type="password" placeholder="Access token" autocomplete="off" spellcheck="false">
-<details id="setup-first-run" style="margin-top:var(--s-4)">
-<summary class="field-help" style="cursor:pointer;margin-top:0">First time here? Name your channel</summary>
 <label for="setup-room">Channel name</label>
-<input id="setup-room" placeholder="e.g. Authentication Migration">
+<input id="setup-room" placeholder="e.g. Authentication Migration" onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('setup-button').click();}">
 <div class="field-help">Your first sign-in creates this channel. Returning members land in the channels they belong to.</div>
 </details>
 <button id="setup-button" onclick="setup()">Enter workspace</button>
+</details>
+</div>
 </div>
 </div>
 
@@ -1192,6 +1224,10 @@ let selectedArtifactId = '';
 const QUICK_REACTIONS = ['👍', '🎯', '⚠️'];
 const outputSelections = new Map();
 const SESSION_STORAGE_KEY = 'xyzzy.session';
+let sessionMode = ''; // '' | 'bearer' | 'cookie'
+let ssoConfig = {sso: false, provider_label: 'single sign-on'};
+const COOKIE_401_GUARD_KEY = 'xyzzy.cookie401At';
+let cookieRedirecting = false;
 
 // A member row's display_name is what a person is called; the server falls back to
 // the raw id only when a payload has not yet grown the field. Never show the id.
@@ -1255,7 +1291,13 @@ function readStoredSession() {
 function clearStoredSession() {
   try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch (_) { /* nothing to clear */ }
 }
-function signOut() {
+async function signOut() {
+  if (sessionMode === 'cookie') {
+    try { await api('POST', '/auth/logout', null, {skipAuthRedirect: true}); }
+    catch (_) { /* best effort — clearing local state still ends the session here */ }
+  }
+  sessionMode = '';
+  accessToken = '';
   clearStoredSession();
   rememberRoomId('');
   location.reload();
@@ -1434,8 +1476,12 @@ async function api(method, path, body, options = {}) {
   const url = `${API}${path}`;
   const headers = {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${accessToken}`
+    // The header's presence, not its value, is the CSRF gate for cookie auth — a
+    // cross-origin page cannot add it without a CORS preflight our origins refuse.
+    // Sending it in bearer mode too is harmless.
+    'X-XYZZY-Client': 'web'
   };
+  if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
   if (options.idempotencyKey) headers['Idempotency-Key'] = options.idempotencyKey;
   const opts = { method, headers };
   if (body) opts.body = JSON.stringify(body);
@@ -1449,12 +1495,42 @@ async function api(method, path, body, options = {}) {
     r = await fetch(url, opts);
   }
   if (!r.ok) {
+    if (r.status === 401 && sessionMode === 'cookie' && !options.skipAuthRedirect) {
+      handleCookieUnauthorized();
+    }
     const e = await r.text();
     const error = new Error(e);
     error.status = r.status;
     throw error;
   }
   return r.json();
+}
+
+// A mid-session cookie 401 (the server-minted access token expired) is recovered
+// with one full-page bounce through the IdP's own session, which makes it silent.
+// The guard below stops a misconfigured IdP from redirect-looping the tab: a
+// second 401 within a minute drops back to the setup screen with a visible error
+// instead of bouncing forever.
+function handleCookieUnauthorized() {
+  if (cookieRedirecting) return;
+  const last = Number(sessionStorage.getItem(COOKIE_401_GUARD_KEY) || 0);
+  const now = Date.now();
+  if (now - last < 60000) {
+    cookieRedirecting = true;
+    try { sessionStorage.removeItem(COOKIE_401_GUARD_KEY); } catch (_) { /* nothing to clear */ }
+    sessionMode = '';
+    clearStoredSession();
+    rememberRoomId('');
+    if (ws) { ws.close(); ws = null; }
+    document.getElementById('setup-screen').style.display = '';
+    document.getElementById('app-header').style.display = 'none';
+    document.getElementById('app-main').style.display = 'none';
+    toast('Your sign-in expired. Please sign in again.', 'error');
+    return;
+  }
+  cookieRedirecting = true;
+  try { sessionStorage.setItem(COOKIE_401_GUARD_KEY, String(now)); } catch (_) { /* best effort */ }
+  location.href = `${API}/auth/login`;
 }
 
 function idempotencyKey() {
@@ -1566,11 +1642,29 @@ async function removeMember(memberUserId) {
   } catch (err) { toast(`Could not remove ${memberUserId}: ${errorMessage(err)}`, 'error'); }
 }
 
+// A wrong token used to surface only as a corner toast, gone in seconds and
+// easy to miss. This puts the failure on the field itself: an error border,
+// plain words, and focus — and it clears the moment the person types again.
+function showTokenError(message) {
+  const input = document.getElementById('setup-token');
+  const err = document.getElementById('setup-token-error');
+  input.classList.add('error');
+  err.textContent = message;
+  err.classList.remove('hidden');
+  input.focus();
+}
+function clearTokenError() {
+  document.getElementById('setup-token').classList.remove('error');
+  document.getElementById('setup-token-error').classList.add('hidden');
+}
+
 async function setup() {
   userName = document.getElementById('setup-name').value.trim();
   accessToken = document.getElementById('setup-token').value;
   const roomName = document.getElementById('setup-room').value.trim();
-  if (!userName || !accessToken) return toast('Enter a display name and access token.', 'error');
+  clearTokenError();
+  if (!accessToken) { showTokenError('Enter your access token.'); return; }
+  sessionMode = 'bearer';
   const setupButton = document.getElementById('setup-button');
   setupButton.disabled = true;
   setupButton.textContent = 'Opening…';
@@ -1590,12 +1684,15 @@ async function setup() {
       || roomsNamedForDecision[0]
       || context.rooms[0];
 
-    if (!room && !roomName) {
-      toast('First sign-in creates your channel — give it a name.', 'error');
+    // No room means this token has nothing to resume into: only then does the
+    // first-run pair (display name + channel) actually matter.
+    if (!room && (!userName || !roomName)) {
+      toast('First sign-in creates your channel — give it a name and yourself a display name.', 'error');
       setupButton.disabled = false;
       setupButton.textContent = 'Enter Workspace';
-      document.getElementById('setup-first-run').open = true;
-      document.getElementById('setup-room').focus();
+      const firstRun = document.getElementById('setup-first-run');
+      firstRun.open = true;
+      document.getElementById(userName ? 'setup-room' : 'setup-name').focus();
       return;
     }
     if (room) {
@@ -1618,19 +1715,20 @@ async function setup() {
 
     rememberRoomId(roomId);
     persistSession();
-    document.getElementById('setup-screen').style.display = 'none';
-    document.getElementById('app-header').style.display = 'flex';
-    document.getElementById('app-main').style.display = 'grid';
-
-    connectWS();
+    showWorkspace();
     // connectWS()'s onopen already rehydrates state once the socket is live; a second,
     // explicit loadState() fired here raced it for the same room snapshot and the
     // dev server 401'd whichever request lost the race, quietly dropping the session.
     await loadTemplates();
   } catch (err) {
+    sessionMode = '';
     accessToken = '';
     document.getElementById('setup-token').value = '';
-    toast(`Could not open workspace: ${errorMessage(err)}`, 'error');
+    if (err.status === 401) {
+      showTokenError("That access token wasn't accepted.");
+    } else {
+      toast(`Could not open workspace: ${errorMessage(err)}`, 'error');
+    }
   } finally {
     setupButton.disabled = false;
     setupButton.textContent = 'Enter Workspace';
@@ -1649,6 +1747,7 @@ async function resumeStoredSession() {
   setupButton.disabled = true;
   accessToken = saved.token;
   userName = saved.name || '';
+  sessionMode = 'bearer';
   try {
     const context = await api('GET', '/me/context');
     userId = context.user_id;
@@ -1660,21 +1759,175 @@ async function resumeStoredSession() {
     const existingWorkspace = context.workspaces.find(item => item.workspace_id === workspaceId);
     orgId = existingWorkspace ? existingWorkspace.org_id : '';
     rememberRoomId(roomId);
-    document.getElementById('setup-screen').style.display = 'none';
-    document.getElementById('app-header').style.display = 'flex';
-    document.getElementById('app-main').style.display = 'grid';
-    connectWS();
+    showWorkspace();
     // connectWS()'s onopen already rehydrates state once the socket is live; a second,
     // explicit loadState() fired here raced it for the same room snapshot and the
     // dev server 401'd whichever request lost the race, quietly dropping the session.
     await loadTemplates();
   } catch (_) {
+    sessionMode = '';
     accessToken = '';
     userName = '';
     clearStoredSession();
   } finally {
     setupButton.disabled = false;
   }
+}
+
+function showWorkspace() {
+  document.getElementById('setup-screen').style.display = 'none';
+  document.getElementById('app-header').style.display = 'flex';
+  document.getElementById('app-main').style.display = 'grid';
+  connectWS();
+}
+
+// SSO primary vs. today's token form, decided once from /auth/config. sso:false
+// renders exactly as before — the token fields stay open and primary, no button.
+// The left intro's step 1 is driven by this same config so it never describes
+// a sign-in path the card itself isn't offering.
+function renderSetupScreen() {
+  const card = document.querySelector('.setup-card');
+  const ssoButton = document.getElementById('setup-sso-button');
+  const details = document.getElementById('setup-token-details');
+  const summary = document.getElementById('setup-token-summary');
+  const intro = document.getElementById('setup-card-intro');
+  const step1 = document.getElementById('setup-step-1-text');
+  if (ssoConfig.sso) {
+    card.classList.add('sso-mode');
+    ssoButton.textContent = `Continue with ${ssoConfig.provider_label}`;
+    ssoButton.style.display = 'block';
+    summary.style.display = 'block';
+    summary.textContent = 'Use an access token instead';
+    details.open = false;
+    intro.textContent = `Sign in with ${ssoConfig.provider_label}. One click — your team's sign-in service does the rest.`;
+    step1.textContent = `Sign in with your team's ${ssoConfig.provider_label}`;
+  } else {
+    card.classList.remove('sso-mode');
+    ssoButton.style.display = 'none';
+    summary.style.display = 'none';
+    details.open = true;
+    step1.textContent = 'Sign in with your access token';
+  }
+  // Config has now answered which variant this card shows; reveal it in one
+  // shot instead of letting the pre-JS default (the token form, open) flash
+  // before a resolved SSO config swaps it out from under the person reading it.
+  document.getElementById('setup-card-variant').classList.remove('hidden');
+}
+
+function startSsoLogin() {
+  location.href = `${API}/auth/login`;
+}
+
+// <summary> toggles its <details> on click already, but the critic found it
+// wasn't reliably keyboard-focusable — tabindex + role="button" fix that, and
+// this keeps Enter/Space toggling behavior explicit rather than assumed.
+function handleSummaryKey(event) {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  document.getElementById('setup-token-details').open = !document.getElementById('setup-token-details').open;
+}
+
+// One listener keeps aria-expanded true whenever the details is actually open,
+// regardless of whether it got there by mouse click, the keydown handler
+// above, or renderSetupScreen setting .open directly.
+document.getElementById('setup-token-details').addEventListener('toggle', () => {
+  document.getElementById('setup-token-summary')
+    .setAttribute('aria-expanded', String(document.getElementById('setup-token-details').open));
+});
+
+// A signed-in person with no rooms is one input away from a workspace, not a
+// stranger: the card swaps the sign-in choices for that single input.
+function renderCookieFirstRun() {
+  const ssoButton = document.getElementById('setup-sso-button');
+  const details = document.getElementById('setup-token-details');
+  const intro = document.getElementById('setup-card-intro');
+  ssoButton.style.display = 'none';
+  details.open = true;
+  document.getElementById('setup-token-summary').style.display = 'none';
+  // The name and token fields belong to the credential flows; this person is
+  // already signed in, so only the channel input remains.
+  for (const selector of ['label[for="setup-name"]', '#setup-name', 'label[for="setup-token"]', '#setup-token']) {
+    const el = document.querySelector(selector);
+    if (el) el.style.display = 'none';
+    if (el && el.nextElementSibling && el.nextElementSibling.classList.contains('field-help')) {
+      el.nextElementSibling.style.display = 'none';
+    }
+  }
+  intro.textContent = "You're signed in. Name your first channel to open the workspace.";
+  const firstRun = document.getElementById('setup-first-run');
+  firstRun.open = true;
+  firstRun.querySelector('summary').style.display = 'none';
+  const button = document.getElementById('setup-button');
+  button.textContent = 'Create channel';
+  button.onclick = createFirstChannelFromCookieSession;
+  document.getElementById('setup-room').focus();
+}
+
+async function createFirstChannelFromCookieSession() {
+  const roomName = document.getElementById('setup-room').value.trim();
+  if (!roomName) return toast('First sign-in creates your channel — give it a name.', 'error');
+  const button = document.getElementById('setup-button');
+  button.disabled = true;
+  try {
+    // The users row already holds the provider's name; bootstrap never
+    // overwrites it, so the placeholder display name here can never surface.
+    await api('POST', '/me/bootstrap', {display_name: userId, room_name: roomName});
+    location.reload();
+  } catch (err) {
+    toast(`Could not create the channel: ${errorMessage(err)}`, 'error');
+    button.disabled = false;
+  }
+}
+
+// Cookie mode never puts a credential in JS: signed-in-ness is decided by asking
+// the server, not by reading a token this tab was never given. A 401 here just
+// means there is no cookie session — the setup screen (already rendered) stands.
+async function tryCookieSession() {
+  try {
+    const context = await api('GET', '/me/context', null, {skipAuthRedirect: true});
+    sessionMode = 'cookie';
+    userId = context.user_id;
+    myRooms = context.rooms;
+    const room = context.rooms.find(item => item.room_id === storedRoomId()) || context.rooms[0];
+    if (!room) {
+      // Signed in, but no room yet: the one thing left to do is name the first
+      // channel. Sending this person back to the sign-in screen they just came
+      // from would read as a failed login.
+      renderCookieFirstRun();
+      return;
+    }
+    roomId = room.room_id;
+    workspaceId = room.workspace_id;
+    const existingWorkspace = context.workspaces.find(item => item.workspace_id === workspaceId);
+    orgId = existingWorkspace ? existingWorkspace.org_id : '';
+    rememberRoomId(roomId);
+    try { sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({mode: 'cookie'})); }
+    catch (_) { /* Private browsing can disable storage; the tab still holds it in memory. */ }
+    try { sessionStorage.removeItem(COOKIE_401_GUARD_KEY); } catch (_) { /* nothing to clear */ }
+    showWorkspace();
+    await loadTemplates();
+  } catch (_) {
+    sessionMode = '';
+  }
+}
+
+async function initAuth() {
+  try {
+    const r = await fetch(`${API}/auth/config`);
+    if (r.ok) ssoConfig = await r.json();
+  } catch (_) { /* default sso:false stands — today's token form renders */ }
+  renderSetupScreen();
+
+  const saved = readStoredSession();
+  if (saved && saved.token) {
+    await resumeStoredSession();
+    return;
+  }
+  // No stored bearer session: a cookie session (fresh SSO callback, or a reload
+  // after one) is only discoverable by asking — there is no token to read. But
+  // /auth/config already answered that question for free, so a signed-out load
+  // never has to throw a blind, console-visible 401 at /me/context to find out.
+  if (ssoConfig.authenticated) await tryCookieSession();
 }
 
 let wsReconnectDelay = 1000;
@@ -1685,10 +1938,23 @@ let wsReconnectTimer = null;
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const encRoomId = encodeURIComponent(roomId);
-  const encodedToken = bytesToBase64Url(new TextEncoder().encode(accessToken));
   clearTimeout(wsReconnectTimer);
-  const socket = new WebSocket(`${proto}://${location.host}/ws?room_id=${encRoomId}`,
-    ['xyzzy.v1', `bearer.${encodedToken}`]);
+  // Cookie mode rides the cookie with no token subprotocol at all — the server
+  // Origin-checks the upgrade instead, since a WS handshake can't carry the
+  // custom header the HTTP CSRF gate uses.
+  // The server only ever echoes back a subprotocol it selected itself — cookie
+  // auth selects none (the Origin header stands in for it), and a real browser
+  // aborts the handshake with a 1006 if it offered a subprotocol list the server
+  // didn't pick from. So cookie mode offers none at all, matching what the server
+  // will (not) select.
+  let socket;
+  if (sessionMode === 'cookie') {
+    socket = new WebSocket(`${proto}://${location.host}/ws?room_id=${encRoomId}`);
+  } else {
+    const encodedToken = bytesToBase64Url(new TextEncoder().encode(accessToken));
+    socket = new WebSocket(`${proto}://${location.host}/ws?room_id=${encRoomId}`,
+      ['xyzzy.v1', `bearer.${encodedToken}`]);
+  }
   ws = socket;
   socket.onopen = () => {
     if (socket !== ws) return;
@@ -3208,7 +3474,7 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-resumeStoredSession();
+initAuth();
 </script>
 </body>
 </html>

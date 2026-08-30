@@ -138,11 +138,13 @@ def test_selective_synthesis_persists_choices_and_exact_provenance_on_reconnect(
         assert artifact["version"] == 1
         assert artifact["content"] == brief["content"]
 
-        # The shipped browser flow uses Bearer fetches and a negotiated WS
-        # subprotocol credential, never a query-string identity or token.
+        # The shipped browser flow carries its credential as a Bearer header when
+        # it holds a token and as the HttpOnly cookie when it does not, with the
+        # WS credential in a negotiated subprotocol — never a query-string
+        # identity or token in either mode.
         ui = client.get("/").text
         assert 'id="setup-token"' in ui
-        assert "'Authorization': `Bearer ${accessToken}`" in ui
+        assert "headers['Authorization'] = `Bearer ${accessToken}`" in ui
         assert "['xyzzy.v1', `bearer.${encodedToken}`]" in ui
         assert "output-selections/${outputId}" in ui
         assert "/syntheses`," in ui
