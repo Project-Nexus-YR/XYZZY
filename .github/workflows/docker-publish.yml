@@ -6,7 +6,7 @@ on:
     tags: ["v*"]
 
 # The quickstart everywhere - README, landing page - promises
-# `docker run ... ghcr.io/yasser-ameur/xyzzy`. This workflow is what makes
+# `docker run ... ghcr.io/project-nexus-yr/xyzzy`. This workflow is what makes
 # that one-liner true: every push to main refreshes :latest, every version tag
 # adds its own immutable tag beside it.
 jobs:
@@ -25,7 +25,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/yasser-ameur/xyzzy
+          images: ghcr.io/project-nexus-yr/xyzzy
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}

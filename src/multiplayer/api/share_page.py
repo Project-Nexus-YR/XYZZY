@@ -157,7 +157,7 @@ footer a{{color:inherit}}
 <div class="published">Published {html.escape(published_at)}</div>
 <div class="doc">{body_html}</div>
 <footer>Decided with
-<a href="https://github.com/Yasser-Ameur/XYZZY" rel="noopener">XYZZY</a></footer>
+<a href="https://github.com/Project-Nexus-YR/XYZZY" rel="noopener">XYZZY</a></footer>
 </main>
 </body>
 </html>
