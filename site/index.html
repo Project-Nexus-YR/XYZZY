@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>XYZZY — a shared workspace for hard technical decisions</title>
+<meta name="description" content="A team makes a hard technical decision together with AI, and keeps the receipts. Self-hosted, one process, MIT licensed.">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- og:url and rel=canonical are intentionally omitted until the final domain exists; add both at deploy so shares and search engines canonicalize to the deployed page, not the repo -->
+<meta property="og:title" content="XYZZY — a shared workspace for hard technical decisions">
+<meta property="og:description" content="A team makes a hard technical decision together with AI, and keeps the receipts. Self-hosted, one process, MIT licensed.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://raw.githubusercontent.com/Project-Nexus-YR/XYZZY/main/site/assets/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="XYZZY — a shared workspace for hard technical decisions">
+<meta name="twitter:description" content="A team makes a hard technical decision together with AI, and keeps the receipts. Self-hosted, one process, MIT licensed.">
+<meta name="twitter:image" content="https://raw.githubusercontent.com/Project-Nexus-YR/XYZZY/main/site/assets/og.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231B4529'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='Georgia,serif' font-style='italic' font-weight='600' font-size='20' fill='%23E2B54E'%3EX%3C/text%3E%3C/svg%3E">
+<link rel="alternate icon" href="assets/icon-180.png">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light dark;
+    --paper: #F6F2EB;
+    --raised: #FDFAF3;
+    --sunken: #EFEAE3;
+    --wash: #ECF6EE;
+    --line: #D6E6DA;
+    --line-strong: #C4D9C8;
+    --ground: #1B4529;
+    --on-ground: #FDFAF3;
+    --ink: #262018;
+    --ink-secondary: #5C5548;
+    --accent: #1B4529;
+    --accent-hover: #2F623F;
+    --on-accent: #FDFAF3;
+    --spark: #6D5100;
+    --spark-fill: #D9AC42;
+    --on-spark: #262018;
+    --focus: #1B4529;
+
+    --sans: Segoe UI, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    --serif: "Cormorant Garamond", Georgia, serif;
+    --mono: Consolas, "SFMono-Regular", Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #040905;
+      --raised: #0D150F;
+      --sunken: #020402;
+      --wash: #092814;
+      --line: #202B22;
+      --line-strong: #313E34;
+      --on-ground: #F6F2EB;
+      --ink: #F6F2EB;
+      --ink-secondary: #D7D2C9;
+      --accent: #A1C1A9;
+      --accent-hover: #C4D9C8;
+      --on-accent: #040905;
+      --spark: #E2B54E;
+      --spark-fill: #E2B54E;
+      --on-spark: #040905;
+      --focus: #A1C1A9;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 1rem;
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    a, .cta-primary, .cta-secondary { transition: color 160ms ease-out, background-color 160ms ease-out, border-color 160ms ease-out; }
+  }
+
+  .skip-link {
+    position: absolute; left: -999px; top: 0;
+    background: var(--ground); color: var(--on-ground);
+    padding: 10px 16px; z-index: 10;
+  }
+  .skip-link:focus { left: 12px; top: 12px; }
+
+  a { color: var(--accent); }
+  a:hover { color: var(--accent-hover); }
+  a:focus-visible, button:focus-visible {
+    outline: 2px solid var(--focus); outline-offset: 2px;
+  }
+
+  .wrap { max-width: 68rem; margin: 0 auto; padding: 0 24px; }
+
+  /* Every in-page anchor target needs room for the sticky header (its
+     tallest measured height plus a little breathing room) or a nav click
+     lands with the heading hidden underneath it. */
+  #main, #loop-heading, #different-heading, #quickstart {
+    scroll-margin-top: 84px;
+  }
+
+  /* header: horizontal inset lives on header.site itself, same as a
+     <section>'s own padding — .header-inner then centers at zero padding
+     of its own, so its content lines up exactly with every section's
+     content edge instead of adding a second, redundant inset. */
+  header.site {
+    position: sticky; top: 0; z-index: 40;
+    background: var(--paper);
+    border-bottom: 1px solid transparent;
+    transition: border-color 160ms ease-out;
+    padding: 0 24px;
+  }
+  header.site.is-scrolled { border-bottom-color: var(--line); }
+  .header-inner {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 20px 0; max-width: 68rem; margin: 0 auto; line-height: 1.2;
+  }
+  .wordmark {
+    font-family: var(--serif); font-weight: 600; font-size: 1.375rem;
+    letter-spacing: 0.02em; color: var(--ink); text-decoration: none;
+  }
+  .wordmark em { font-style: italic; color: var(--spark); }
+  header.site nav {
+    display: flex; align-items: center; gap: 28px;
+  }
+  header.site nav a {
+    font-size: 0.875rem; font-weight: 600; text-decoration: none;
+    color: var(--ink-secondary); border-bottom: 1px solid transparent;
+  }
+  header.site nav a:hover { color: var(--ink); border-bottom-color: currentColor; }
+  header.site nav a.nav-github { color: var(--accent); }
+  @media (max-width: 640px) {
+    .header-inner { padding: 13px 0; }
+    header.site nav a:not(.nav-github):not(.nav-quickstart) { display: none; }
+  }
+
+  /* hero */
+  .hero { padding: 32px 24px 0; }
+  .hero-copy { max-width: 46rem; margin: 0 0 28px; }
+  .hero-shot-band { padding: 0 24px 64px; }
+  .hero-shot-frame {
+    max-width: 1200px; margin: 0 auto;
+    background: var(--raised); border: 1px solid var(--line-strong);
+    border-radius: 12px; padding: 8px;
+  }
+  .hero-shot-frame img {
+    width: 100%; height: auto; display: block;
+    border: 1px solid var(--line-strong); border-radius: 6px; vertical-align: middle;
+  }
+  .eyebrow {
+    font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.24em; color: var(--ink-secondary); margin: 0 0 16px;
+  }
+  h1 {
+    font-family: var(--serif); font-weight: 500;
+    font-size: clamp(2rem, 5.4vw, 3.375rem);
+    line-height: 1.15; letter-spacing: -0.01em;
+    margin: 0 0 16px; color: var(--ink); max-width: 22ch;
+  }
+  h1 em { font-style: italic; color: var(--spark); }
+  .lede {
+    font-size: 1.1875rem; line-height: 1.5; color: var(--ink-secondary);
+    max-width: 52ch; margin: 0 0 24px;
+  }
+  .cta-row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .cta-primary, .cta-secondary {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--sans); font-weight: 700; font-size: 0.9375rem;
+    padding: 12px 20px; border-radius: 8px; text-decoration: none;
+    border: 1px solid transparent;
+  }
+  .cta-primary { background: var(--spark-fill); color: var(--on-spark); }
+  .cta-primary:hover { filter: brightness(0.92); }
+  .cta-secondary { border-color: var(--line-strong); color: var(--ink); }
+  .cta-secondary:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* section scaffolding */
+  section { padding: 72px 24px; }
+  section > .wrap { max-width: 68rem; margin: 0 auto; padding: 0; }
+  .section-head { max-width: 46ch; margin-bottom: 48px; }
+  h2 {
+    font-family: var(--serif); font-weight: 600;
+    font-size: clamp(1.625rem, 3vw, 2.125rem); line-height: 1.15;
+    letter-spacing: -0.01em; color: var(--ink); margin: 0 0 12px;
+  }
+  .section-dek { color: var(--ink-secondary); margin: 0; font-size: 1.0625rem; }
+
+  hr.rule { border: 0; border-top: 1px solid var(--line); margin: 0; }
+
+  /* loop diagram */
+  .loop-diagram { width: 100%; height: auto; }
+  .loop-diagram text { font-family: var(--sans); }
+  .loop-diagram-narrow { display: none; }
+  @media (max-width: 700px) {
+    .loop-diagram-wide { display: none; }
+    .loop-diagram-narrow { display: block; }
+  }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
+  /* why different */
+  .cols {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 0;
+    border-top: 1px solid var(--line-strong);
+  }
+  .col {
+    padding: 28px 28px 0 0; border-bottom: 1px solid var(--line-strong);
+  }
+  .col + .col { padding-left: 28px; border-left: 1px solid var(--line); }
+  .col h3 {
+    font-family: var(--serif); font-style: italic; font-weight: 600;
+    color: var(--spark); font-size: 1.5rem; margin: 0 0 12px;
+  }
+  .col p { margin: 0 0 28px; color: var(--ink-secondary); font-size: 0.9375rem; }
+
+  @media (max-width: 780px) {
+    .cols { grid-template-columns: 1fr; }
+    .col + .col { border-left: none; padding-left: 0; }
+  }
+
+  .proof-line {
+    margin: 40px 0 0; padding-top: 24px; border-top: 1px solid var(--line);
+    font-size: 1rem; color: var(--ink-secondary);
+  }
+  .proof-line a { color: var(--ink-secondary); text-decoration: underline; }
+  .proof-line a:hover { color: var(--accent); }
+  .proof-line .proof-num { color: var(--ink); font-weight: 600; letter-spacing: 0.01em; }
+
+  /* quickstart */
+  .quickstart-panel {
+    background: var(--wash); border-left: 2px solid var(--accent);
+    padding: 28px 28px 24px; border-radius: 0 8px 8px 0;
+  }
+  pre.code {
+    font-family: var(--mono); font-size: 0.875rem; line-height: 1.7;
+    background: var(--sunken); color: var(--ink);
+    border: 1px solid var(--line-strong); border-radius: 8px;
+    padding: 18px 20px; margin: 0;
+    white-space: pre; overflow-x: auto;
+  }
+  pre.code code { display: block; }
+  /* The copy button lives in its own row above the code, never over it: at
+     any scroll position inside a horizontally-scrolling pre, a button
+     overlaid on the box would sit on top of whatever text happens to be
+     scrolled underneath it, not just the end of the line. */
+  .code-block { margin: 0 0 16px; }
+  .code-toolbar { display: flex; justify-content: flex-end; margin: 0 0 6px; }
+  .copy-btn {
+    font-family: var(--sans); font-size: 0.75rem; font-weight: 600;
+    color: var(--ink-secondary); background: var(--raised);
+    border: 1px solid var(--line-strong); border-radius: 6px;
+    padding: 4px 10px; cursor: pointer; line-height: 1.4;
+  }
+  .copy-btn:hover { color: var(--ink); border-color: var(--accent); }
+  .quickstart-note { font-size: 0.875rem; color: var(--ink-secondary); margin: 0 0 8px; }
+  .quickstart-note code { font-family: var(--mono); background: var(--sunken); padding: 1px 5px; border-radius: 4px; }
+  .quickstart-note:last-child { margin-bottom: 0; }
+
+  @media (max-width: 480px) {
+    section { padding: 48px 20px; }
+    .hero { padding: 32px 20px 0; }
+    .hero-shot-band { padding: 0 20px 40px; }
+    header.site { padding: 0 20px; }
+    /* The bare clone URL (43 chars) cannot fit unbroken at this width;
+       hiding characters behind a horizontal scrollbar is worse than
+       wrapping them, so every character stays visible here. The copy
+       button remains the canonical way to get the exact, unbroken
+       command onto the clipboard. */
+    pre.code { white-space: pre-wrap; word-break: break-all; overflow-x: auto; }
+  }
+
+  footer.site {
+    border-top: 1px solid var(--line); padding: 40px 24px 32px;
+  }
+  footer.site .wrap {
+    max-width: 68rem; margin: 0 auto; padding: 0;
+    display: flex; justify-content: space-between; align-items: center;
+    flex-wrap: wrap; gap: 12px;
+  }
+  footer.site p { margin: 0; font-size: 0.8125rem; color: var(--ink-secondary); }
+  footer.site nav { display: flex; gap: 20px; }
+  footer.site nav a { font-size: 0.8125rem; }
+</style>
+</head>
+<body>
+
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site">
+  <div class="wrap header-inner">
+    <a class="wordmark" href="#main">XYZZY<em>.</em></a>
+    <nav>
+      <a href="#loop-heading">How it works</a>
+      <a href="#different-heading">Why XYZZY</a>
+      <a class="nav-quickstart" href="#quickstart">Quickstart</a>
+      <a class="nav-github" href="https://github.com/Project-Nexus-YR/XYZZY" target="_blank" rel="noopener">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero">
+    <div class="wrap">
+      <div class="hero-copy">
+        <p class="eyebrow">Multiplayer AI workspace</p>
+        <h1>A team makes a hard technical decision with AI, and <em>keeps</em> the receipts.</h1>
+        <p class="lede">Conversation branches into parallel specialists, your team picks what's worth keeping, and XYZZY synthesizes a decision brief with the evidence traced beneath it.</p>
+        <div class="cta-row">
+          <a class="cta-primary" href="https://github.com/Project-Nexus-YR/XYZZY" target="_blank" rel="noopener">View on GitHub</a>
+          <a class="cta-secondary" href="#quickstart">Run the demo locally</a>
+        </div>
+      </div>
+    </div>
+    <div class="hero-shot-band">
+      <div class="hero-shot-frame">
+        <picture>
+          <source media="(prefers-color-scheme: dark) and (min-width: 641px)" srcset="assets/screenshot-hero-dark.png 1x, assets/screenshot-hero-dark@2x.png 2x" width="1200" height="830">
+          <source media="(prefers-color-scheme: dark)" srcset="assets/screenshot-hero-mobile-dark.png 1x, assets/screenshot-hero-mobile-dark@2x.png 2x" width="720" height="648">
+          <source media="(min-width: 641px)" srcset="assets/screenshot-hero-light.png 1x, assets/screenshot-hero-light@2x.png 2x" width="1200" height="830">
+          <img src="assets/screenshot-hero-mobile-light.png" srcset="assets/screenshot-hero-mobile-light.png 1x, assets/screenshot-hero-mobile-light@2x.png 2x" width="720" height="648" loading="eager" alt="XYZZY workspace: a channel conversation alongside an open thread showing replies to one message.">
+        </picture>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <section aria-labelledby="loop-heading">
+    <div class="wrap">
+      <div class="section-head">
+        <h2 id="loop-heading">The loop</h2>
+        <p class="section-dek">One conversation, several specialists working at once, one accountable decision.</p>
+      </div>
+      <svg class="loop-diagram loop-diagram-wide" viewBox="0 0 1000 300" role="img" aria-labelledby="loopTitleWide loopDescWide" xmlns="http://www.w3.org/2000/svg">
+        <title id="loopTitleWide">The XYZZY loop</title>
+        <desc id="loopDescWide">A conversation branches into three parallel specialist agents. Each output is explicitly included or excluded. What is included is combined into one synthesis, published as a decision brief with provenance.</desc>
+        <g style="stroke:var(--line-strong)" stroke-width="1.5" fill="none">
+          <path d="M160,150 H210" />
+          <path d="M210,45 V255" />
+          <path d="M210,45 H278" />
+          <path d="M210,150 H278" />
+          <path d="M210,255 H278" />
+          <path d="M462,45 H520" />
+          <path d="M462,130 H520" />
+          <path d="M462,255 H520" />
+          <path d="M520,45 V255" />
+          <path d="M520,150 H558" />
+          <path d="M698,150 H760" />
+        </g>
+        <rect x="20" y="120" width="140" height="60" rx="6" style="fill:var(--raised);stroke:var(--line-strong)" />
+        <text x="90" y="146" text-anchor="middle" style="fill:var(--ink);font-weight:700;font-size:15px">Conversation</text>
+        <text x="90" y="164" text-anchor="middle" style="fill:var(--ink-secondary);font-size:13px">shared room</text>
+
+        <rect x="278" y="20" width="150" height="50" rx="6" style="fill:var(--raised);stroke:var(--line-strong)" />
+        <text x="353" y="41" text-anchor="middle" style="fill:var(--ink);font-weight:700;font-size:14px">Architect</text>
+        <text x="353" y="58" text-anchor="middle" style="fill:var(--ink-secondary);font-size:13px">specialist run</text>
+
+        <rect x="278" y="105" width="150" height="50" rx="6" style="fill:var(--raised);stroke:var(--line-strong)" />
+        <text x="353" y="126" text-anchor="middle" style="fill:var(--ink);font-weight:700;font-size:14px">Researcher</text>
+        <text x="353" y="143" text-anchor="middle" style="fill:var(--ink-secondary);font-size:13px">specialist run</text>
+
+        <rect x="278" y="230" width="150" height="50" rx="6" style="fill:var(--raised);stroke:var(--line-strong)" />
+        <text x="353" y="251" text-anchor="middle" style="fill:var(--ink);font-weight:700;font-size:14px">Security</text>
+        <text x="353" y="268" text-anchor="middle" style="fill:var(--ink-secondary);font-size:13px">specialist run</text>
+
+        <circle cx="450" cy="45" r="12" style="fill:var(--wash);stroke:var(--accent)" />
+        <text x="450" y="50" text-anchor="middle" style="fill:var(--accent);font-weight:700;font-size:14px">✓</text>
+        <circle cx="450" cy="130" r="12" style="fill:var(--wash);stroke:var(--accent)" />
+        <text x="450" y="135" text-anchor="middle" style="fill:var(--accent);font-weight:700;font-size:14px">✓</text>
+        <circle cx="450" cy="255" r="12" style="fill:var(--sunken);stroke:var(--line-strong)" />
+        <text x="450" y="260" text-anchor="middle" style="fill:var(--ink-secondary);font-weight:700;font-size:14px">✕</text>
+
+        <rect x="558" y="120" width="140" height="60" rx="6" style="fill:var(--wash);stroke:var(--accent)" />
+        <text x="628" y="146" text-anchor="middle" style="fill:var(--ink);font-weight:700;font-size:15px">Synthesis</text>
+        <text x="628" y="164" text-anchor="middle" style="fill:var(--ink-secondary);font-size:13px">included only</text>
+
+        <path d="M760,110 H910 V190 H780 L760,170 Z" style="fill:var(--raised);stroke:var(--accent);stroke-width:1.5" />
+        <text x="838" y="141" text-anchor="middle" style="fill:var(--ink);font-weight:700;font-size:15px">Decision Brief</text>
+        <text x="838" y="159" text-anchor="middle" style="fill:var(--ink-secondary);font-size:13px">with provenance</text>
+      </svg>
+
+      <svg class="loop-diagram loop-diagram-narrow" viewBox="0 0 340 316" role="img" aria-labelledby="loopTitleNarrow loopDescNarrow" xmlns="http://www.w3.org/2000/svg">
+        <title id="loopTitleNarrow">The XYZZY loop</title>
+        <desc id="loopDescNarrow">A conversation branches into three parallel specialist agents. Each output is explicitly included or excluded. What is included is combined into one synthesis, published as a decision brief with provenance.</desc>
+        <g style="stroke:var(--line-strong)" stroke-width="1.5" fill="none">
+          <path d="M170,44 V54" />
+          <path d="M170,92 V102" />
+          <path d="M170,140 V150" />
+          <path d="M170,188 V198" />
+          <path d="M170,236 V246" />
+        </g>
+        <rect x="20" y="6" width="300" height="38" rx="6" style="fill:var(--raised);stroke:var(--line-strong)" />
+        <text x="170" y="29" text-anchor="middle" style="fill:var(--ink);font-weight:700;font-size:14px">Conversation</text>
+
+        <rect x="20" y="54" width="300" height="38" rx="6" style="fill:var(--raised);stroke:var(--line-strong)" />
+        <text x="34" y="77" style="fill:var(--ink);font-weight:700;font-size:14px">Architect</text>
+        <circle cx="292" cy="73" r="9" style="fill:var(--wash);stroke:var(--accent)" />
+        <text x="292" y="77" text-anchor="middle" style="fill:var(--accent);font-weight:700;font-size:14px">✓</text>
+
+        <rect x="20" y="102" width="300" height="38" rx="6" style="fill:var(--raised);stroke:var(--line-strong)" />
+        <text x="34" y="125" style="fill:var(--ink);font-weight:700;font-size:14px">Researcher</text>
+        <circle cx="292" cy="121" r="9" style="fill:var(--wash);stroke:var(--accent)" />
+        <text x="292" y="125" text-anchor="middle" style="fill:var(--accent);font-weight:700;font-size:14px">✓</text>
+
+        <rect x="20" y="150" width="300" height="38" rx="6" style="fill:var(--raised);stroke:var(--line-strong)" />
+        <text x="34" y="173" style="fill:var(--ink);font-weight:700;font-size:14px">Security</text>
+        <circle cx="292" cy="169" r="9" style="fill:var(--sunken);stroke:var(--line-strong)" />
+        <text x="292" y="173" text-anchor="middle" style="fill:var(--ink-secondary);font-weight:700;font-size:14px">✕</text>
+
+        <rect x="20" y="198" width="300" height="38" rx="6" style="fill:var(--wash);stroke:var(--accent)" />
+        <text x="170" y="221" text-anchor="middle" style="fill:var(--ink);font-weight:700;font-size:14px">Synthesis · included only</text>
+
+        <path d="M20,246 H300 V296 H50 L20,278 Z" style="fill:var(--raised);stroke:var(--accent);stroke-width:1.5" />
+        <text x="170" y="266" text-anchor="middle" style="fill:var(--ink);font-weight:700;font-size:14px">Decision Brief</text>
+        <text x="170" y="282" text-anchor="middle" style="fill:var(--ink-secondary);font-size:14px">with provenance</text>
+      </svg>
+
+      <p class="sr-only">Conversation → parallel specialist branch → select or exclude → synthesis → decision brief with provenance.</p>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <section aria-labelledby="different-heading">
+    <div class="wrap">
+      <div class="section-head">
+        <h2 id="different-heading">Why it's different</h2>
+        <p class="section-dek">Governed execution, a provable audit trail, and infrastructure you control</p>
+      </div>
+      <div class="cols">
+        <div class="col">
+          <h3>Governed</h3>
+          <p>Actions wait for human approval before they execute. What an agent may do is re-read from the room's own state at the moment it acts, so leaving a room or losing access takes effect immediately, mid-task.</p>
+        </div>
+        <div class="col">
+          <h3>Provable</h3>
+          <p>Every room's event log is hash-chained: each event is hashed against the one before it, so altering or deleting a row breaks every hash after it — tamper-evident by construction, checkable with the audit CLI. Each Decision also links to the Claims and AgentOutputs behind it, so a synthesis is inspectable down to the run that produced it.</p>
+        </div>
+        <div class="col">
+          <h3>Yours</h3>
+          <p>One Python process and a SQLite file, self-hosted. Point specialists at Ollama, LM Studio, or any OpenAI-compatible server instead of a hosted API. MIT licensed, source included.</p>
+        </div>
+      </div>
+      <p class="proof-line">MIT licensed. One Python process, no external services required. <a class="proof-num" href="https://github.com/Project-Nexus-YR/XYZZY/tree/main/tests" target="_blank" rel="noopener">857 tests</a> plus Ruff and strict mypy, green on every push. Security posture and disclosure process in <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/SECURITY.md" target="_blank" rel="noopener">SECURITY.md</a>.</p>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <section id="quickstart" aria-labelledby="quickstart-heading">
+    <div class="wrap">
+      <div class="section-head">
+        <h2 id="quickstart-heading">Clone it, run the demo</h2>
+        <p class="section-dek">No account, no signup. It runs on your machine.</p>
+      </div>
+      <div class="quickstart-panel">
+        <div class="code-block">
+          <div class="code-toolbar">
+            <button type="button" class="copy-btn" data-copy-target="quickstart-cmd" title="Copy to clipboard" aria-label="Copy command to clipboard">Copy</button>
+          </div>
+          <pre class="code"><code id="quickstart-cmd">git clone https://github.com/Project-Nexus-YR/XYZZY.git \
+  && cd XYZZY
+docker compose --profile demo up</code></pre>
+        </div>
+        <p class="quickstart-note">Opens a seeded demo workspace at <code>http://localhost:8000</code>, signed in with one click. No account, no config. Building from source instead? See the <a href="https://github.com/Project-Nexus-YR/XYZZY#readme" target="_blank" rel="noopener">README</a>.</p>
+        <p class="quickstart-note">No Docker? It's one Python process — see the <a href="https://github.com/Project-Nexus-YR/XYZZY#readme" target="_blank" rel="noopener">README</a>.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <p>MIT licensed.</p>
+    <nav>
+      <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/SECURITY.md" target="_blank" rel="noopener">Security policy</a>
+      <a href="https://github.com/Project-Nexus-YR/XYZZY" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+  // Hairline border on scroll, not on load: keeps the header quiet until
+  // there's something to separate it from.
+  (function () {
+    var header = document.querySelector('header.site');
+    function onScroll() {
+      header.classList.toggle('is-scrolled', window.scrollY > 4);
+    }
+    document.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  })();
+
+  // Copy-to-clipboard for the quickstart command blocks. Falls back to
+  // selecting the text (via the title attribute) when the Clipboard API
+  // is unavailable, e.g. on http:// origins.
+  document.querySelectorAll('.copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var target = document.getElementById(btn.dataset.copyTarget);
+      if (!target) return;
+      var text = target.textContent;
+      function done() {
+        var original = btn.textContent;
+        btn.textContent = 'Copied';
+        setTimeout(function () { btn.textContent = original; }, 1500);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () {
+          btn.title = 'Select the command and copy manually';
+        });
+      } else {
+        btn.title = 'Select the command and copy manually';
+      }
+    });
+  });
+</script>
+</body>
+</html>
