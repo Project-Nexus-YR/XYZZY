@@ -117,6 +117,7 @@ from ..domain.models import (
     TurnLock,
     TurnLockScopeType,
     TurnLockStatus,
+    User,
     Workspace,
     WorkspaceMember,
     handle_from_display_name,
@@ -781,6 +782,20 @@ class MultiplayerService:
         created_event: RoomEvent | None = None
 
         async with self.db.transaction():
+            # The typed display name is only ever known here; a session-authenticated
+            # principal has no other path that records it. Heal it in on every
+            # bootstrap call, fresh or idempotent, without touching an existing row.
+            if await self.repos.users.get(user_id) is None:
+                await self.repos.users.create(
+                    User(
+                        user_id=user_id,
+                        display_name=display_name,
+                        # No email is known at bootstrap; users.email is UNIQUE, so a
+                        # per-user placeholder keeps two bootstraps from colliding.
+                        email=f"{user_id}@bootstrap.local",
+                    )
+                )
+
             bootstrap = await self.repos.bootstrap_contexts.get(user_id)
             if bootstrap is not None:
                 organization = await self.repos.orgs.get(bootstrap.org_id)
@@ -7765,6 +7780,7 @@ class MultiplayerService:
         room = await self.get_room(room_id)
         events = await self.get_room_events(room_id, last_sequence)
         members = await self.get_room_members(room_id)
+        member_display_names = await self.repos.room_members.display_names(room_id)
         agents = await self.list_room_agents(room_id)
         # The roster is where a reader learns what to type: a participant whose
         # handle the client cannot see is a participant nobody can address.
@@ -7855,6 +7871,7 @@ class MultiplayerService:
                     "user_id": m.user_id,
                     "role": m.role,
                     "handle": handles.get((ParticipantType.USER.value, m.user_id), ""),
+                    "display_name": member_display_names.get(m.user_id, m.user_id),
                 }
                 for m in members
             ],

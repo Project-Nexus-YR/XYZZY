@@ -137,6 +137,16 @@ async def test_room_crud(repos):
 
 
 @pytest.mark.asyncio
+async def test_room_member_display_names_joins_users_and_falls_back_to_user_id(repos):
+    # u1 has a users row ("Alice") from the fixture; u3 does not.
+    await repos.room_members.add(RoomMember(room_id="r1", user_id="u1"))
+    await repos.room_members.add(RoomMember(room_id="r1", user_id="u3"))
+
+    names = await repos.room_members.display_names("r1")
+    assert names == {"u1": "Alice", "u3": "u3"}
+
+
+@pytest.mark.asyncio
 async def test_agent_crud(repos):
     agent = AgentInstance(
         agent_id="a1", template_id="t1", room_id="r1", name="Architect", role="Architect"

@@ -52,6 +52,12 @@ def _roles(client: TestClient, room_id: str) -> dict[str, str]:
     return {member["user_id"]: member["role"] for member in members}
 
 
+def _members(client: TestClient, room_id: str) -> list[dict[str, str]]:
+    response = client.get(f"/api/v1/rooms/{room_id}/members", headers=OWNER)
+    assert response.status_code == 200, response.text
+    return list(response.json())
+
+
 def _events(client: TestClient, room_id: str) -> list[dict[str, Any]]:
     response = client.get(f"/api/v1/rooms/{room_id}/events", headers=OWNER)
     assert response.status_code == 200, response.text
@@ -73,6 +79,14 @@ def test_three_people_share_one_channel_with_two_access_levels() -> None:
         assert room_id in _context_room_ids(client, ALEX)
         assert room_id in _context_room_ids(client, SAM)
         assert _roles(client, room_id) == {"owner": "admin", "alex": "editor", "sam": "viewer"}
+
+        # Bootstrap wrote a users row for "owner" with the typed display name;
+        # alex and sam were only invited, so they still fall back to user_id.
+        assert {m["user_id"]: m["display_name"] for m in _members(client, room_id)} == {
+            "owner": "Person",
+            "alex": "alex",
+            "sam": "sam",
+        }
 
         # Editors contribute to the shared context; viewers read it.
         sent = client.post(
@@ -96,6 +110,28 @@ def test_three_people_share_one_channel_with_two_access_levels() -> None:
         assert duplicate.status_code == 400
         assert _roles(client, room_id)["alex"] == "editor"
         assert _event_types(client, room_id).count("user.invited_room") == 2
+
+
+def test_bootstrap_writes_the_typed_display_name_and_never_overwrites_it() -> None:
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    with TestClient(app) as client:
+        room_id = _bootstrap(client, OWNER, "Auth migration")
+        assert _members(client, room_id) == [
+            {"user_id": "owner", "role": "admin", "display_name": "Person"}
+        ]
+
+        # A second bootstrap for the same principal is the idempotent path; it
+        # must heal nothing further and must not rename the existing user.
+        again = client.post(
+            "/api/v1/me/bootstrap",
+            headers=OWNER,
+            json={"display_name": "Renamed", "room_name": "Auth migration"},
+        )
+        assert again.status_code == 200, again.text
+        assert again.json()["room"]["room_id"] == room_id
+        assert _members(client, room_id) == [
+            {"user_id": "owner", "role": "admin", "display_name": "Person"}
+        ]
 
 
 def test_membership_management_follows_access_levels() -> None:

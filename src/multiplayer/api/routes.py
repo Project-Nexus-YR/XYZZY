@@ -872,7 +872,15 @@ async def list_room_members(
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
     members = await svc.get_room_members(room_id)
-    return [{"user_id": m.user_id, "role": m.role} for m in members]
+    display_names = await svc.repos.room_members.display_names(room_id)
+    return [
+        {
+            "user_id": m.user_id,
+            "role": m.role,
+            "display_name": display_names.get(m.user_id, m.user_id),
+        }
+        for m in members
+    ]
 
 
 @router.patch("/rooms/{room_id}/members/{user_id}")

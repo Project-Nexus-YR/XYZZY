@@ -412,6 +412,13 @@ def test_the_roster_publishes_the_handle_people_have_to_type() -> None:
             "user-a": "user-a",
             "user-b": "user-b",
         }
+        # No users row exists for these test principals, so display_name falls
+        # back to the user_id (the joined-name case is covered at the
+        # repository layer, test_room_member_display_names_...).
+        assert {m["user_id"]: m["display_name"] for m in body["members"]} == {
+            "user-a": "user-a",
+            "user-b": "user-b",
+        }
 
 
 def test_an_http_principal_cannot_react_as_an_agent() -> None:

@@ -1175,6 +1175,16 @@ class RoomMemberRepo:
         )
         return row is not None
 
+    async def display_names(self, room_id: str) -> dict[str, str]:
+        """Member user_id -> users.display_name, falling back to the user_id itself."""
+        rows = await self.db.fetch_all(
+            "SELECT rm.user_id AS user_id, u.display_name AS display_name "
+            "FROM room_members rm LEFT JOIN users u ON u.user_id = rm.user_id "
+            "WHERE rm.room_id = ?",
+            (room_id,),
+        )
+        return {r["user_id"]: (r["display_name"] or r["user_id"]) for r in rows}
+
 
 class AgentRepo:
     def __init__(self, db: Database) -> None:
