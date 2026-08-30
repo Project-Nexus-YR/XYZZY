@@ -817,6 +817,20 @@ class WorkspaceRepo:
         )
         await self.db.commit()
 
+    async def add_member_if_absent(self, member: WorkspaceMember) -> None:
+        """Grant workspace membership without ever overwriting an existing row/role."""
+        await self.db.execute(
+            "INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                member.workspace_id,
+                member.user_id,
+                member.role,
+                serialize_datetime(member.created_at),
+            ),
+        )
+        await self.db.commit()
+
     async def get_member(self, workspace_id: str, user_id: str) -> WorkspaceMember | None:
         row = await self.db.fetch_one(
             "SELECT * FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
@@ -852,6 +866,31 @@ class WorkspaceRepo:
             )
             for row in rows
         ]
+
+    async def list_members(self, workspace_id: str) -> list[WorkspaceMember]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM workspace_members WHERE workspace_id = ? ORDER BY created_at",
+            (workspace_id,),
+        )
+        return [
+            WorkspaceMember(
+                workspace_id=r["workspace_id"],
+                user_id=r["user_id"],
+                role=r["role"],
+                created_at=datetime.fromisoformat(r["created_at"]),
+            )
+            for r in rows
+        ]
+
+    async def member_display_names(self, workspace_id: str) -> dict[str, str]:
+        """Member user_id -> users.display_name, falling back to the user_id itself."""
+        rows = await self.db.fetch_all(
+            "SELECT wm.user_id AS user_id, u.display_name AS display_name "
+            "FROM workspace_members wm LEFT JOIN users u ON u.user_id = wm.user_id "
+            "WHERE wm.workspace_id = ?",
+            (workspace_id,),
+        )
+        return {r["user_id"]: (r["display_name"] or r["user_id"]) for r in rows}
 
 
 class BootstrapContextRepo:

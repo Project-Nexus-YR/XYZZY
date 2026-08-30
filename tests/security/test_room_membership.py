@@ -101,6 +101,14 @@ def test_three_people_share_one_channel_with_two_access_levels() -> None:
         assert state.status_code == 200
         assert [message["content"] for message in state.json()["messages"]] == ["From Alex"]
 
+        # An invitation is durable news, not only a live socket message: the
+        # invitee who was offline at invite time still finds it later.
+        alex_notices = client.get("/api/v1/notifications", headers=ALEX).json()
+        invitation = next(n for n in alex_notices if n["type"] == "invitation")
+        assert invitation["room_id"] == room_id
+        assert "Auth migration" in invitation["title"]
+        assert "Person" in invitation["body"]
+
         # Invitations are idempotent-safe: a second invite is rejected, not duplicated.
         duplicate = client.post(
             f"/api/v1/rooms/{room_id}/members/invitations",
@@ -231,14 +239,180 @@ def test_role_change_takes_effect_immediately() -> None:
         assert same.json() == {"user_id": "sam", "role": "viewer"}
         assert _event_types(client, room_id).count("user.role_changed") == 2
 
-        invalid = client.patch(
+        # Promotion to admin is now allowed (S3); "invalid" role stays rejected.
+        promoted_to_admin = client.patch(
             f"/api/v1/rooms/{room_id}/members/sam", headers=OWNER, json={"role": "admin"}
         )
-        assert invalid.status_code == 400
+        assert promoted_to_admin.status_code == 200, promoted_to_admin.text
+        assert _roles(client, room_id)["sam"] == "admin"
+        bogus_role = client.patch(
+            f"/api/v1/rooms/{room_id}/members/sam", headers=OWNER, json={"role": "owner"}
+        )
+        assert bogus_role.status_code == 400
         unknown = client.patch(
             f"/api/v1/rooms/{room_id}/members/nobody", headers=OWNER, json={"role": "editor"}
         )
         assert unknown.status_code == 400
+
+
+def test_admin_promotion_and_two_admin_demotion() -> None:
+    """S3: role can now promote to admin, and a promoted admin can then administer.
+
+    Demoting one of two admins is fine; self-change is still leave_room's job; the
+    route stays ADMINISTER-gated.
+    """
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    with TestClient(app) as client:
+        room_id = _bootstrap(client, OWNER, "Auth migration")
+        _invite(client, room_id, "alex", "editor")
+        _invite(client, room_id, "sam", "viewer")
+
+        # Promote alex from editor to admin.
+        promoted = client.patch(
+            f"/api/v1/rooms/{room_id}/members/alex", headers=OWNER, json={"role": "admin"}
+        )
+        assert promoted.status_code == 200, promoted.text
+        assert _roles(client, room_id)["alex"] == "admin"
+
+        # A promoted admin can now administer: e.g. change sam's role.
+        administered = client.patch(
+            f"/api/v1/rooms/{room_id}/members/sam", headers=ALEX, json={"role": "editor"}
+        )
+        assert administered.status_code == 200, administered.text
+        assert _roles(client, room_id)["sam"] == "editor"
+
+        # Two admins now (owner, alex): demoting one is fine, since the other remains.
+        demoted = client.patch(
+            f"/api/v1/rooms/{room_id}/members/alex", headers=OWNER, json={"role": "editor"}
+        )
+        assert demoted.status_code == 200, demoted.text
+        assert _roles(client, room_id)["alex"] == "editor"
+
+        # Self-change is still refused ("use leave"), not the last-admin path.
+        self_change = client.patch(
+            f"/api/v1/rooms/{room_id}/members/owner", headers=OWNER, json={"role": "editor"}
+        )
+        assert self_change.status_code == 400
+        assert _roles(client, room_id)["owner"] == "admin"
+
+        # Route stays ADMINISTER-gated: an editor cannot promote anyone.
+        forbidden = client.patch(
+            f"/api/v1/rooms/{room_id}/members/sam", headers=ALEX, json={"role": "admin"}
+        )
+        assert forbidden.status_code == 403, forbidden.text
+
+
+@pytest.mark.asyncio
+async def test_a_channel_is_never_left_without_an_admin() -> None:
+    """The invariant, held by the reachable paths rather than the dead branch.
+
+    A sole admin cannot demote themselves (self-change is leave's job), and no
+    other member can demote them without holding ADMINISTER - which, re-read
+    inside the write's own transaction, only a room admin has. So no authorized
+    sequential call can strip a channel's last admin. An unauthorized changer is
+    refused for lack of authority, and is told exactly that rather than the
+    channel's admin count. With two admins, demoting one is allowed and leaves
+    the other governing.
+    """
+    from multiplayer.db.connection import Database
+    from multiplayer.domain.models import DomainError
+    from multiplayer.realtime.hub import RealtimeHub
+    from multiplayer.security import AuthorizationError
+    from multiplayer.services.service import MultiplayerService
+
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        svc = MultiplayerService(db, RealtimeHub(), known_users=frozenset({"owner", "alex"}))
+        await svc.initialize()
+        org = await svc.create_organization("Acme", "acme", "owner")
+        ws = await svc.create_workspace(org.org_id, "Main", "main", "owner")
+        room = await svc.create_room(ws.workspace_id, "Ops", "owner")
+        await svc.invite_room_member(room.room_id, "alex", "editor", "owner")
+
+        # The sole admin cannot demote themselves out of the seat.
+        with pytest.raises(DomainError, match="use leave"):
+            await svc.update_room_member_role(room.room_id, "owner", "editor", "owner")
+
+        # A non-admin cannot do it for them, and is refused for authority, not
+        # told the admin count.
+        with pytest.raises(AuthorizationError, match="room access forbidden"):
+            await svc.update_room_member_role(room.room_id, "owner", "editor", "alex")
+        owner_member = await svc.repos.room_members.get(room.room_id, "owner")
+        assert owner_member is not None and owner_member.role == "admin"
+
+        # With a second admin, demoting one is allowed and the other keeps the room.
+        await svc.update_room_member_role(room.room_id, "alex", "admin", "owner")
+        await svc.update_room_member_role(room.room_id, "alex", "editor", "owner")
+        remaining = await svc.repos.room_members.get(room.room_id, "owner")
+        assert remaining is not None and remaining.role == "admin"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_invited_member_gains_workspace_access_without_losing_existing_role() -> None:
+    """S1: invite_room_member must grant workspace membership too, or the invitee
+
+    gets 403 "workspace access forbidden" on every workspace-scoped route even
+    though they can now see the room. A pre-existing workspace role must survive
+    the invite untouched.
+    """
+    from multiplayer.api import routes as routes_mod
+    from multiplayer.domain.models import WorkspaceMember
+
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            bootstrap = (
+                await client.post(
+                    "/api/v1/me/bootstrap",
+                    headers=OWNER,
+                    json={"display_name": "Owner", "room_name": "Auth migration"},
+                )
+            ).json()
+            room_id = bootstrap["room"]["room_id"]
+            workspace_id = bootstrap["room"]["workspace_id"]
+
+            # A fresh invitee gets workspace access, not just room access.
+            invited = await client.post(
+                f"/api/v1/rooms/{room_id}/members/invitations",
+                headers=OWNER,
+                json={"user_id": "alex", "role": "editor"},
+            )
+            assert invited.status_code == 200, invited.text
+            create = await client.post(
+                f"/api/v1/workspaces/{workspace_id}/rooms",
+                headers=ALEX,
+                json={"name": "Alex's channel"},
+            )
+            assert create.status_code == 200, create.text
+            listed = await client.get(f"/api/v1/workspaces/{workspace_id}/rooms", headers=ALEX)
+            assert listed.status_code == 200, listed.text
+            assert create.json()["room_id"] in {r["room_id"] for r in listed.json()}
+            members = (
+                await client.get(f"/api/v1/workspaces/{workspace_id}/members", headers=OWNER)
+            ).json()
+            assert {m["user_id"]: m["workspace_role"] for m in members}["alex"] == "member"
+
+            # sam already holds admin on this very workspace; inviting them into the
+            # room must not downgrade that pre-existing role.
+            svc = routes_mod._svc
+            assert svc is not None
+            await svc.repos.workspaces.add_member(
+                WorkspaceMember(workspace_id=workspace_id, user_id="sam", role="admin")
+            )
+            invited_sam = await client.post(
+                f"/api/v1/rooms/{room_id}/members/invitations",
+                headers=OWNER,
+                json={"user_id": "sam", "role": "viewer"},
+            )
+            assert invited_sam.status_code == 200, invited_sam.text
+            members = (
+                await client.get(f"/api/v1/workspaces/{workspace_id}/members", headers=OWNER)
+            ).json()
+            assert {m["user_id"]: m["workspace_role"] for m in members}["sam"] == "admin"
 
 
 def test_removal_revokes_reads_and_closes_the_live_subscription() -> None:
@@ -977,3 +1151,49 @@ async def test_intervene_execution_is_atomic_with_demotion() -> None:
                 if e["actor_type"] == "user" and e["actor_id"] == "sam"
             ]
             assert all(seq < max(demotions) for seq in sam_events), events
+
+
+@pytest.mark.asyncio
+async def test_role_change_rechecks_the_changer_inside_the_transaction() -> None:
+    """The route gate is not the guarantee; the in-transaction re-read is.
+
+    Calling the service directly stands in for the race where the changer lost
+    ADMINISTER between the route's check and the write: a non-admin changer must
+    be refused by the transaction itself, and nothing may be written.
+    """
+    from multiplayer.api import routes as routes_mod
+    from multiplayer.domain.models import DomainError
+    from multiplayer.security import AuthorizationError
+
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            bootstrap = (
+                await client.post(
+                    "/api/v1/me/bootstrap",
+                    headers=OWNER,
+                    json={"display_name": "Owner", "room_name": "Recheck room"},
+                )
+            ).json()
+            room_id = bootstrap["room"]["room_id"]
+            for invitee, role in (("alex", "editor"), ("sam", "viewer")):
+                invited = await client.post(
+                    f"/api/v1/rooms/{room_id}/members/invitations",
+                    headers=OWNER,
+                    json={"user_id": invitee, "role": role},
+                )
+                assert invited.status_code == 200, invited.text
+
+            svc = routes_mod._svc
+            assert svc is not None
+            with pytest.raises((AuthorizationError, DomainError)):
+                await svc.update_room_member_role(room_id, "sam", "admin", "alex")
+
+            roles = {
+                m["user_id"]: m["role"]
+                for m in (
+                    await client.get(f"/api/v1/rooms/{room_id}/members", headers=OWNER)
+                ).json()
+            }
+            assert roles["sam"] == "viewer"

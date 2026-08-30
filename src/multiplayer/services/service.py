@@ -104,6 +104,7 @@ from ..domain.models import (
     Room,
     RoomMember,
     RoomParticipantHandle,
+    RoomStatus,
     RunSettlement,
     SearchHit,
     Session,
@@ -916,18 +917,32 @@ class MultiplayerService:
             description=description,
             created_by=creator_id,
         )
-        await self.repos.rooms.create(room)
-        await self.repos.room_members.add(
-            RoomMember(room_id=room.room_id, user_id=creator_id, role="admin")
-        )
-        await self._issue_handle(room.room_id, ParticipantType.USER, creator_id, creator_id)
-        await self._append_room_event(
-            room.room_id,
-            EventType.ROOM_CREATED,
-            {"name": name, "description": description},
-            creator_id,
-            "user",
-        )
+        async with self.db.transaction():
+            # Serializing the duplicate check and the insert turns a concurrent
+            # duplicate create into a clean rejection rather than two identical
+            # sidebar entries.
+            existing = await self.repos.rooms.list_by_workspace(workspace_id)
+            if any(
+                r.status != RoomStatus.ARCHIVED and r.name.casefold() == name.casefold()
+                for r in existing
+            ):
+                raise DomainError("a channel with that name already exists")
+            await self.repos.rooms.create(room)
+            await self.repos.room_members.add(
+                RoomMember(room_id=room.room_id, user_id=creator_id, role="admin")
+            )
+            await self._issue_handle(room.room_id, ParticipantType.USER, creator_id, creator_id)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room.room_id,
+                    sequence=0,
+                    event_type=EventType.ROOM_CREATED,
+                    payload={"name": name, "description": description},
+                    actor_id=creator_id,
+                    actor_type="user",
+                )
+            )
+        await self._broadcast_persisted_events([event])
         return room
 
     async def get_room(self, room_id: str) -> Room:
@@ -992,7 +1007,19 @@ class MultiplayerService:
                 raise DomainError("no account with that user id")
             if await self.repos.room_members.get(room_id, invited_user_id) is not None:
                 raise DomainError("user is already a channel member")
+            room_for_membership = await self.repos.rooms.get(room_id)
             await self.repos.room_members.add(member)
+            if room_for_membership is not None:
+                # Mirror bootstrap: a room member without workspace membership gets
+                # 403 "workspace access forbidden" on every workspace-scoped route.
+                # Never overwrite an existing row/role - this only fills a gap.
+                await self.repos.workspaces.add_member_if_absent(
+                    WorkspaceMember(
+                        workspace_id=room_for_membership.workspace_id,
+                        user_id=invited_user_id,
+                        role="member",
+                    )
+                )
             await self._issue_handle(
                 room_id, ParticipantType.USER, invited_user_id, invited_user_id
             )
@@ -1004,6 +1031,21 @@ class MultiplayerService:
                     payload={"user_id": invited_user_id, "role": role},
                     actor_id=invited_by,
                     actor_type="user",
+                )
+            )
+            # The durable half of telling them: a live socket message reaches
+            # only whoever is connected this instant, and an invitation is
+            # exactly the message someone offline must still find later.
+            room_name = room_for_membership.name if room_for_membership else room_id
+            inviter_names = await self.repos.room_members.display_names(room_id)
+            await self.repos.notifications.create(
+                Notification(
+                    notification_id=new_id("notif"),
+                    user_id=invited_user_id,
+                    room_id=room_id,
+                    title=f"You were invited to #{room_name}",
+                    body=f"Invited as {role} by {inviter_names.get(invited_by, invited_by)}",
+                    notification_type="invitation",
                 )
             )
         await self._broadcast_persisted_events([event])
@@ -1057,20 +1099,33 @@ class MultiplayerService:
     async def update_room_member_role(
         self, room_id: str, user_id: str, role: str, changed_by: str
     ) -> RoomMember:
-        """Change a non-admin member's access; admins are immutable here and use leave_room."""
+        """Change another member's access, including promoting to or demoting from admin.
+
+        Demoting the room's last admin is refused - the channel must always keep one,
+        the same invariant leave_room enforces. Changing your own membership is still
+        leave_room's job, not this route's.
+        """
         require_human_boundary("member.role")
-        if role not in {"viewer", "editor"}:
-            raise DomainError("member role must be viewer or editor")
+        if role not in {"viewer", "editor", "admin"}:
+            raise DomainError("member role must be viewer, editor, or admin")
         if user_id == changed_by:
             raise DomainError("use leave to change your own membership")
         async with self.db.transaction():
+            # Re-read the changer's authority inside BEGIN IMMEDIATE, like every
+            # other ADMINISTER write here: an admin removed after the route
+            # authorized them must not still hand out admin.
+            await self._require_capability_in_transaction(
+                room_id, changed_by, RoomCapability.ADMINISTER
+            )
             member = await self.repos.room_members.get(room_id, user_id)
             if member is None:
                 raise DomainError("user is not a channel member")
-            if member.role == "admin":
-                raise DomainError("admin membership cannot be changed here")
             if member.role == role:
                 return member
+            if member.role == "admin" and role != "admin":
+                others = await self.repos.room_members.list(room_id)
+                if not any(o.user_id != user_id and o.role == "admin" for o in others):
+                    raise DomainError("cannot demote the last admin of the room")
             await self.repos.room_members.update_role(room_id, user_id, role)
             event = await self.repos.events.append_with_next_sequence_in_transaction(
                 RoomEvent(
@@ -3612,7 +3667,7 @@ class MultiplayerService:
         return await self.select_output(branch.room_id, output_id, disposition, decided_by)
 
     async def synthesize_decision_brief(
-        self, room_id: str, title: str, created_by: str
+        self, room_id: str, title: str | None, created_by: str
     ) -> tuple[Artifact, ArtifactVersion]:
         """Compatibility route: resolve one selected Branch, then synthesize that unit."""
         selections = await self.list_output_selections(room_id)
@@ -3632,7 +3687,7 @@ class MultiplayerService:
     async def synthesize_branch_decision_brief(
         self,
         branch_id: str,
-        title: str,
+        title: str | None,
         created_by: str,
         idempotency_key: str | None = None,
     ) -> tuple[Artifact, ArtifactVersion]:
@@ -3648,19 +3703,25 @@ class MultiplayerService:
     async def synthesize_branch(
         self,
         branch_id: str,
-        title: str,
+        title: str | None,
         created_by: str,
         synthesis_type: str = SynthesisType.DECISION_BRIEF,
         idempotency_key: str | None = None,
     ) -> tuple[Artifact, ArtifactVersion]:
         """Run model-backed synthesis over this Branch's explicit selected outputs."""
         spec = spec_for(synthesis_type)
-        title = self._validate_non_empty(title, f"{spec.artifact_name.lower()} title")
         if idempotency_key is not None:
             idempotency_key = self._validate_idempotency_key(idempotency_key)
+        branch = await self.get_branch(branch_id)
+        if title is None or not title.strip():
+            # No caller-supplied title: derive one from what this branch is actually
+            # about, so every untitled brief is not stamped with the same stale
+            # placeholder decision.
+            prompt = branch.initiating_prompt.strip()
+            title = prompt[:80] if prompt else "Decision"
+        title = self._validate_non_empty(title, f"{spec.artifact_name.lower()} title")
         operation = f"branch.synthesis.{spec.type.lower()}"
         request = {"title": title}
-        branch = await self.get_branch(branch_id)
         outputs = await self.repos.agent_outputs.list_by_branch(branch_id)
         selections = await self.repos.output_selections.list_by_branch(branch_id)
         decisions = {selection.output_id: selection.disposition for selection in selections}

@@ -168,7 +168,10 @@ async def test_a_mentioned_user_is_notified(service: MultiplayerService) -> None
     await service.send_message(room_id, MessageRole.HUMAN, "owner", "@teammate please review")
 
     notifications = await service.list_notifications("teammate")
-    assert [n.notification_type for n in notifications] == ["mention"]
+    # Two durable facts by now: being invited, then being mentioned. The mention
+    # is what this test is about; the invitation row is the invite path's own
+    # promise (see test_room_membership) and rightly sits beside it.
+    assert sorted(n.notification_type for n in notifications) == ["invitation", "mention"]
 
 
 @pytest.mark.asyncio

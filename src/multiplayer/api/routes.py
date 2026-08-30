@@ -430,11 +430,13 @@ class SelectOutputRequest(BaseModel):
 
 
 class SynthesizeDecisionBriefRequest(BaseModel):
-    title: str = "Authentication migration decision"
+    # None lets the service derive a title from the branch's own prompt, rather
+    # than stamping every brief with a stale, someone-else's-decision default.
+    title: str | None = None
 
 
 class SynthesizeBranchRequest(BaseModel):
-    title: str = "Authentication migration decision"
+    title: str | None = None
     synthesis_type: str = SynthesisType.DECISION_BRIEF.value
 
 
@@ -915,6 +917,26 @@ async def create_workspace(
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"workspace_id": ws.workspace_id, "name": ws.name, "slug": ws.slug}
+
+
+@router.get("/workspaces/{workspace_id}/members")
+async def list_workspace_members(
+    workspace_id: str,
+    principal: CurrentUser,
+) -> list[dict[str, str]]:
+    """Backs the invite picker: every durable member of this workspace."""
+    svc = _svc_or_404()
+    await _require_workspace(workspace_id, principal)
+    members = await svc.repos.workspaces.list_members(workspace_id)
+    display_names = await svc.repos.workspaces.member_display_names(workspace_id)
+    return [
+        {
+            "user_id": m.user_id,
+            "display_name": display_names.get(m.user_id, m.user_id),
+            "workspace_role": m.role,
+        }
+        for m in members
+    ]
 
 
 @router.get("/workspaces/{workspace_id}/rooms")
