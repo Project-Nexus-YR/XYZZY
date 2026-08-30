@@ -231,10 +231,17 @@ a,.output-link{text-underline-offset:2px}
 .setup-card{
   background:var(--raised);border:1px solid var(--line);border-radius:var(--r-3);
   padding:var(--s-5);box-shadow:var(--shadow-2);max-width:392px;
-  /* Reserved for the taller of the two variants (the token form) so revealing
-     whichever one /auth/config resolves to never shifts the page around it. */
-  min-height:328px;
 }
+/* Space is reserved only while the variant is still undecided: once revealed,
+   the card sits at its natural height instead of carrying a dead band sized
+   for the taller variant it did not get. */
+.setup-card:has(#setup-card-variant.hidden){min-height:328px}
+/* One primary per screen: with SSO leading, the token submit inside the
+   disclosure reads as the secondary action it is. */
+.setup-card.sso-mode #setup-button{
+  background:transparent;color:var(--text);border:1px solid var(--line-3);
+}
+.setup-card.sso-mode #setup-button:hover:not(:disabled){background:var(--line);}
 .setup-card h2{font-size:var(--t-title);font-weight:var(--w-strong);letter-spacing:var(--k-title)}
 .setup-card > p{font-size:var(--t-ui);color:var(--text-2);margin-top:var(--s-2);line-height:1.5;letter-spacing:var(--k-ui)}
 .setup-card label{
@@ -925,7 +932,7 @@ a,.output-link{text-underline-offset:2px}
 <input id="setup-token" type="password" placeholder="Access token" autocomplete="off" spellcheck="false" oninput="clearTokenError()" onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('setup-button').click();}">
 <div class="field-error hidden" id="setup-token-error" role="alert"></div>
 <details id="setup-first-run" style="margin-top:var(--s-4)">
-<summary class="field-help" style="cursor:pointer;margin-top:0">First time here? Name your channel</summary>
+<summary class="field-help" style="cursor:pointer;margin-top:0">Setting up a new workspace?</summary>
 <label for="setup-name">Display name</label>
 <input id="setup-name" placeholder="Your name">
 <div class="field-help">Used only to create your member record on first sign-in. After that, your name shown here always comes from the workspace.</div>
@@ -1543,7 +1550,12 @@ function storedRoomId() {
 }
 
 function rememberRoomId(value) {
-  try { localStorage.setItem(ACTIVE_ROOM_STORAGE_KEY, value); }
+  // Clearing removes the key outright: on a shared machine the next person to
+  // sign in should inherit no trace of whose workspace was open before.
+  try {
+    if (value) localStorage.setItem(ACTIVE_ROOM_STORAGE_KEY, value);
+    else localStorage.removeItem(ACTIVE_ROOM_STORAGE_KEY);
+  }
   catch (_) { /* Private browsing can disable storage; server discovery still reconnects. */ }
 }
 
@@ -1689,7 +1701,7 @@ async function setup() {
     if (!room && (!userName || !roomName)) {
       toast('First sign-in creates your channel — give it a name and yourself a display name.', 'error');
       setupButton.disabled = false;
-      setupButton.textContent = 'Enter Workspace';
+      setupButton.textContent = 'Enter workspace';
       const firstRun = document.getElementById('setup-first-run');
       firstRun.open = true;
       document.getElementById(userName ? 'setup-room' : 'setup-name').focus();
@@ -1731,7 +1743,7 @@ async function setup() {
     }
   } finally {
     setupButton.disabled = false;
-    setupButton.textContent = 'Enter Workspace';
+    setupButton.textContent = 'Enter workspace';
   }
 }
 
