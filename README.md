@@ -264,6 +264,36 @@ Every refresh also spends the provider's own refresh token, so a person
 disabled, locked out, or password-reset upstream loses this session at the next
 rotation rather than at the absolute clock.
 
+The browser itself never sees either token. `GET /api/v1/auth/callback` sets a
+cookie only when the request prefers `text/html` (a browser arriving by
+redirect); that cookie carries the access token alone, HttpOnly, `__Host-`
+prefixed on an HTTPS deployment, and expires with the session's idle clock.
+Every other caller — curl, an agent, `refresh`/`logout` — still gets the JSON
+body with both tokens, unchanged. A cookie authenticates an HTTP request only
+when it also carries header `X-XYZZY-Client: web`, on every method including
+GET, which is what keeps a mutating GET like `/auth/end-session` out of CSRF
+reach: a cross-origin request cannot attach a custom header without a CORS
+preflight `XYZZY_CORS_ORIGINS` refuses, and a top-level navigation cannot
+attach one at all. A cookie-authed WebSocket cannot carry that header either,
+so it is gated on `Origin` matching `configured_origins()` exactly instead.
+
+**Trying it locally:** `scripts/dev_idp.py` is a throwaway identity provider —
+stdlib/FastAPI, one hardcoded user, a fresh RS256 key generated on every start.
+It refuses to run unless its own issuer is a loopback host, because it trusts
+every caller completely.
+
+```bash
+python scripts/dev_idp.py --port 9100
+# in another shell
+export XYZZY_OIDC_ISSUER="http://127.0.0.1:9100"
+export XYZZY_OIDC_CLIENT_ID="dev-client"
+export XYZZY_OIDC_REDIRECT_URI="http://127.0.0.1:8000/api/v1/auth/callback"
+python -m multiplayer.server
+```
+
+Open http://localhost:8000 and sign in through the provider; `XYZZY_DEV_IDP_SUB`,
+`XYZZY_DEV_IDP_NAME`, and `XYZZY_DEV_IDP_EMAIL` change the one user's claims.
+
 ### Talking to other agents
 
 XYZZY speaks Google's [A2A](https://a2a-protocol.org/) v0.3.0, so an agent built
