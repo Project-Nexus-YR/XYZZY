@@ -457,7 +457,7 @@
   <section id="quickstart" aria-labelledby="quickstart-heading">
     <div class="wrap">
       <div class="section-head">
-        <h2 id="quickstart-heading">Clone it, run the demo</h2>
+        <h2 id="quickstart-heading">Try it in one command</h2>
         <p class="section-dek">No account, no signup. It runs on your machine.</p>
       </div>
       <div class="quickstart-panel">
@@ -465,11 +465,9 @@
           <div class="code-toolbar">
             <button type="button" class="copy-btn" data-copy-target="quickstart-cmd" title="Copy to clipboard" aria-label="Copy command to clipboard">Copy</button>
           </div>
-          <pre class="code"><code id="quickstart-cmd">git clone https://github.com/Project-Nexus-YR/XYZZY.git \
-  && cd XYZZY
-docker compose --profile demo up</code></pre>
+          <pre class="code"><code id="quickstart-cmd">docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/project-nexus-yr/xyzzy</code></pre>
         </div>
-        <p class="quickstart-note">Opens a seeded demo workspace at <code>http://localhost:8000</code>, signed in with one click. No account, no config. Building from source instead? See the <a href="https://github.com/Project-Nexus-YR/XYZZY#readme" target="_blank" rel="noopener">README</a>.</p>
+        <p class="quickstart-note">Opens a seeded demo workspace at <code>http://localhost:8000</code>, signed in with one click. No account, no config. Prefer source? <code>git clone</code> the <a href="https://github.com/Project-Nexus-YR/XYZZY" target="_blank" rel="noopener">repo</a> and run <code>docker compose --profile demo up</code>.</p>
         <p class="quickstart-note">No Docker? It's one Python process — see the <a href="https://github.com/Project-Nexus-YR/XYZZY#readme" target="_blank" rel="noopener">README</a>.</p>
       </div>
     </div>

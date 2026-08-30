@@ -1,10 +1,48 @@
 # XYZZY
 
-A multiplayer AI workspace where multiple humans and AI agents collaborate in persistent shared rooms.
+A team makes a hard technical decision with AI, and keeps the receipts.
 
-## Why
+[![gates](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/ci.yml/badge.svg)](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/ci.yml)
+[![image](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/docker-publish.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Modern AI tools are single-player: one human, one chat, one context. Real work happens in teams. XYZZY lets multiple humans and AI agents share a room with a common event history, artifacts, tasks, and decisions — all persisted in SQLite with WebSocket-driven real-time synchronization.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/assets/screenshot-hero-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="site/assets/screenshot-hero-light.png">
+  <img alt="XYZZY workspace: a channel conversation beside an open thread, with the room sidebar" src="site/assets/screenshot-hero-dark.png">
+</picture>
+
+## Try it
+
+```bash
+docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/project-nexus-yr/xyzzy
+```
+
+Opens a seeded demo workspace at `http://localhost:8000`, signed in with one click. No account,
+no config. Prefer to run from source? `git clone` this repo and run `docker compose --profile
+demo up` instead — see [Docker](#docker) below for the non-demo path.
+
+## What it is
+
+Modern AI tools are single-player: one human, one chat, one context. Real work happens in teams.
+XYZZY lets multiple humans and AI agents share a room — a common event history, artifacts, tasks,
+and decisions — persisted in SQLite with WebSocket-driven real-time sync. Agents branch out in
+parallel, a human selects or excludes what comes back, and the room publishes an immutable
+Decision Brief with the evidence chain behind it.
+
+## Why it's different
+
+**Governed.** Actions wait for human approval before they execute. What an agent may do is
+re-read from the room's own state at the moment it acts, so leaving a room or losing access takes
+effect immediately, mid-task.
+
+**Provable.** Every room's event log is hash-chained: each event is hashed against the one
+before it, so altering or deleting a row breaks every hash after it — tamper-evident by
+construction, checkable with the audit CLI. Each Decision links to the Claims and AgentOutputs
+behind it, so a synthesis is inspectable down to the run that produced it.
+
+**Yours.** One Python process and a SQLite file, self-hosted. Point specialists at Ollama, LM
+Studio, or any OpenAI-compatible server instead of a hosted API. MIT licensed, source included.
 
 ## Core Capabilities
 
@@ -62,7 +100,7 @@ src/multiplayer/
 │   ├── connection.py      # aiosqlite wrapper with transaction support
 │   └── repositories.py    # 16 typed repository classes
 ├── migrations/
-│   └── 0NN_*.sql           # 28 migrations, applied in order at startup
+│   └── 0NN_*.sql           # numbered migrations, applied in order at startup
 ├── services/
 │   ├── service.py         # Core service layer with state machines
 │   └── presence.py        # In-memory presence tracking
@@ -355,7 +393,10 @@ docker build -t xyzzy .
 docker run -p 8000:8000 -v xyzzy-data:/data -e XYZZY_AUTH_TOKENS='{"local-dev-token":"user_local"}' xyzzy
 ```
 
-No account, no config, nothing to try alone: `docker compose --profile demo up` (or `docker run -p 8000:8000 -e XYZZY_DEMO=1 xyzzy` after the build above) opens a seeded demo workspace at http://localhost:8000, signed in with one click.
+No account, no config, nothing to try alone: `docker compose --profile demo up` (or
+`docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/project-nexus-yr/xyzzy`, the published image —
+see [Try it](#try-it) above) opens a seeded demo workspace at http://localhost:8000, signed in
+with one click.
 
 The database is a file under `/data`. Without the volume the room history dies
 with the container.
