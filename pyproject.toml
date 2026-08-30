@@ -24,6 +24,8 @@ dependencies = [
     # verification, which is the one place this deployment must not fail open.
     "pyjwt>=2.8",
     "cryptography>=42",
+    # FastAPI's own multipart form parsing (UploadFile), for the attachment upload route.
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

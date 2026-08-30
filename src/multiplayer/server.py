@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -20,7 +21,14 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .api.a2a import router as a2a_router
-from .api.routes import current_sessions, router, set_authenticator, set_service, set_sessions
+from .api.routes import (
+    current_sessions,
+    max_attachment_bytes,
+    router,
+    set_authenticator,
+    set_service,
+    set_sessions,
+)
 from .db.connection import Database
 from .metrics import Metrics
 from .realtime.hub import RealtimeHub
@@ -50,6 +58,10 @@ DEFAULT_ORIGINS = ("http://localhost:8000", "http://127.0.0.1:8000")
 # Probes exempt from the rate limiter: a monitor polling either must not be
 # able to spend the budget of whoever else shares its address.
 RATE_LIMIT_EXEMPT_PATHS = frozenset({"/api/v1/health", "/metrics"})
+# The one route allowed past the general body cap, and only up to its own —
+# larger — cap: an attachment upload is legitimately bigger than any other
+# request body this API accepts, so it needs its own ceiling, not none at all.
+_ATTACHMENT_UPLOAD_PATH = re.compile(r"^/api/v1/rooms/[^/]+/attachments$")
 
 
 def _positive_int(name: str, default: int) -> int:
@@ -179,9 +191,13 @@ def create_app(
     ) -> Response:
         request_started = time.monotonic()
         declared = request.headers.get("content-length", "")
+        is_attachment_upload = request.method == "POST" and bool(
+            _ATTACHMENT_UPLOAD_PATH.match(request.url.path)
+        )
+        body_limit = max_attachment_bytes() if is_attachment_upload else max_body_bytes
         # A request that declares its size is refused before the body is read. A
         # chunked request declares nothing, so this caps the honest case only.
-        if declared.isdigit() and int(declared) > max_body_bytes:
+        if declared.isdigit() and int(declared) > body_limit:
             response: Response = JSONResponse(
                 status_code=413, content={"detail": "request body too large"}
             )

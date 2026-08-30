@@ -258,6 +258,13 @@ class AgentTemplate:
     preferred_tools: tuple[str, ...] = ()
     avatar_url: str = ""
     created_at: datetime = field(default_factory=utcnow)
+    # None means built-in: seeded once at startup, never owned by a workspace.
+    workspace_id: str | None = None
+    created_by: str | None = None
+    # A written fact, not a removed row: an agent already spawned from this
+    # template copied its fields onto itself, so retiring the template must not
+    # break the FK agent_instances.template_id still holds against it.
+    deleted_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -712,6 +719,26 @@ class Message:
     root_message_id: str | None = None
     thread_depth: int = 0
     broadcast_to_room: bool = True
+    created_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass(frozen=True, slots=True)
+class Attachment:
+    """A file a member uploaded, unbound to any message until send claims it.
+
+    data is the blob itself; it is never included in any dict a route or a
+    model path builds from this record — only the fields below it are.
+    """
+
+    attachment_id: str
+    room_id: str
+    uploader_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    sha256: str
+    data: bytes = b""
+    message_id: str | None = None
     created_at: datetime = field(default_factory=utcnow)
 
 

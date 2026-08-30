@@ -10,8 +10,18 @@ from typing import Annotated, Any, TypeVar
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ..domain.meta import MetaQuestionKind
@@ -112,6 +122,33 @@ def _svc_or_404() -> MultiplayerService:
 # navigation (the shape of a CSRF attack against a mutating GET) never carries
 # custom headers at all. Its presence, not its value, is what gates the cookie.
 WEB_CLIENT_HEADER = "x-xyzzy-client"
+
+# 5 MiB: generous enough for a screenshot or a short document, small enough that
+# the SQLite row it lands in stays a row rather than a reason to page differently.
+DEFAULT_MAX_ATTACHMENT_BYTES = 5_242_880
+# What is safe to serve with its own declared type; everything else — including
+# image/svg+xml, which can carry a script — is served as application/octet-stream.
+ATTACHMENT_CONTENT_TYPE_ALLOWLIST = frozenset(
+    {"image/png", "image/jpeg", "image/webp", "image/gif"}
+)
+
+
+def max_attachment_bytes() -> int:
+    """XYZZY_MAX_ATTACHMENT_BYTES, read fresh so the server's own middleware and
+    this route agree on one cap without either importing a cached value from
+    the other."""
+    raw = os.environ.get("XYZZY_MAX_ATTACHMENT_BYTES", str(DEFAULT_MAX_ATTACHMENT_BYTES)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_ATTACHMENT_BYTES
+    return value if value > 0 else DEFAULT_MAX_ATTACHMENT_BYTES
+
+
+def _sanitize_attachment_filename(filename: str) -> str:
+    """Strip what could break out of the Content-Disposition header value."""
+    cleaned = "".join(ch for ch in filename if ch not in '"\r\n\\').strip()
+    return cleaned or "attachment"
 
 
 async def _current_user(
@@ -291,6 +328,12 @@ class CreateRoomRequest(BaseModel):
     description: str = ""
 
 
+class CreateAgentTemplateRequest(BaseModel):
+    name: str
+    role: str
+    system_prompt: str
+
+
 class BootstrapWorkspaceRequest(BaseModel):
     display_name: str
     room_name: str
@@ -357,6 +400,7 @@ class CreateMessageRequest(BaseModel):
     # Mentions are derived from the content, never accepted from the client.
     # Addressing an agent only records and notifies unless this is explicitly set.
     invoke_mentioned_agents: bool = False
+    attachment_ids: list[str] = []
 
 
 class CreateReplyRequest(BaseModel):
@@ -1322,6 +1366,19 @@ async def list_room_events(
     ]
 
 
+@router.get("/rooms/{room_id}/audit-export")
+async def export_room_audit(room_id: str, principal: CurrentUser) -> StreamingResponse:
+    """Every event this room ever recorded, as JSON Lines, chain-verified on read."""
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.ADMINISTER)
+    filename = f"xyzzy-audit-{room_id}-{utcnow().date().isoformat()}.jsonl"
+    return StreamingResponse(
+        svc.export_room_audit(room_id),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ── Agents ───────────────────────────────────────────────────────────────────
 
 
@@ -1341,6 +1398,60 @@ async def list_agent_templates(
         }
         for t in templates
     ]
+
+
+def _workspace_template_record(t: Any) -> dict[str, Any]:
+    record = {
+        "template_id": t.template_id,
+        "name": t.name,
+        "description": t.description,
+        "role": t.role,
+        "capabilities": sorted(t.capabilities),
+        "builtin": t.workspace_id is None,
+    }
+    if t.workspace_id is not None:
+        record["created_by"] = t.created_by
+    return record
+
+
+@router.post("/workspaces/{workspace_id}/agent-templates")
+async def create_agent_template(
+    workspace_id: str, req: CreateAgentTemplateRequest, principal: CurrentUser
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _require_workspace(workspace_id, principal)
+    try:
+        template = await svc.create_agent_template(
+            workspace_id, req.name, req.role, req.system_prompt, principal.user_id
+        )
+    except DomainError as e:
+        raise HTTPException(400, str(e)) from e
+    return _workspace_template_record(template)
+
+
+@router.get("/workspaces/{workspace_id}/agent-templates")
+async def list_workspace_agent_templates(
+    workspace_id: str, principal: CurrentUser
+) -> list[dict[str, Any]]:
+    svc = _svc_or_404()
+    await _require_workspace(workspace_id, principal)
+    templates = await svc.list_workspace_agent_templates(workspace_id)
+    return [_workspace_template_record(t) for t in templates]
+
+
+@router.delete("/workspaces/{workspace_id}/agent-templates/{template_id}")
+async def delete_agent_template(
+    workspace_id: str, template_id: str, principal: CurrentUser
+) -> dict[str, str]:
+    svc = _svc_or_404()
+    await _require_workspace(workspace_id, principal)
+    try:
+        await svc.delete_agent_template(workspace_id, template_id, principal.user_id)
+    except AuthorizationError as e:
+        raise HTTPException(403, str(e)) from e
+    except DomainError as e:
+        raise HTTPException(404 if "not found" in str(e) else 400, str(e)) from e
+    return {"status": "deleted"}
 
 
 def _addressing_record(addressing: AgentAddressing) -> dict[str, Any]:
@@ -2071,6 +2182,65 @@ async def cancel_task(
     return {"status": "cancelled"}
 
 
+# ── Attachments ──────────────────────────────────────────────────────────────
+
+
+@router.post("/rooms/{room_id}/attachments")
+async def upload_attachment(
+    room_id: str,
+    principal: CurrentUser,
+    file: Annotated[UploadFile, File()],
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _require_room(room_id, principal, RoomCapability.MUTATE)
+    data = await file.read()
+    try:
+        attachment = await svc.upload_attachment(
+            room_id,
+            principal.user_id,
+            file.filename or "",
+            file.content_type or "application/octet-stream",
+            data,
+            max_attachment_bytes(),
+        )
+    except DomainError as e:
+        status = 413 if "exceeds" in str(e) else 400
+        raise HTTPException(status, str(e)) from e
+    return {
+        "attachment_id": attachment.attachment_id,
+        "filename": attachment.filename,
+        "content_type": attachment.content_type,
+        "size_bytes": attachment.size_bytes,
+    }
+
+
+@router.get("/attachments/{attachment_id}")
+async def download_attachment(attachment_id: str, principal: CurrentUser) -> Response:
+    svc = _svc_or_404()
+    try:
+        attachment = await svc.get_attachment(attachment_id)
+    except DomainError as e:
+        raise HTTPException(404, str(e)) from e
+    await _require_room(attachment.room_id, principal, RoomCapability.READ)
+    # Serve exactly what was stored only for the images it is safe to render;
+    # everything else, including image/svg+xml, is served generically so a
+    # browser never executes it as the type the uploader merely claimed it was.
+    served_type = (
+        attachment.content_type
+        if attachment.content_type in ATTACHMENT_CONTENT_TYPE_ALLOWLIST
+        else "application/octet-stream"
+    )
+    safe_name = _sanitize_attachment_filename(attachment.filename)
+    return Response(
+        content=attachment.data,
+        media_type=served_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 # ── Messages ─────────────────────────────────────────────────────────────────
 
 
@@ -2097,6 +2267,7 @@ async def send_message(
             req.content,
             idempotency_key=idempotency_key,
             invoke_mentioned_agents=req.invoke_mentioned_agents,
+            attachment_ids=req.attachment_ids,
         )
     except IdempotencyConflict as e:
         raise HTTPException(409, str(e)) from e
@@ -2116,13 +2287,14 @@ async def list_messages(
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
     messages = await svc.list_room_messages(room_id, limit, after_sequence)
-    return [_message_summary(m) for m in messages]
+    return [await _message_summary(m) for m in messages]
 
 
 # ── Threads, mentions, reactions, read state, search ─────────────────────────
 
 
-def _message_summary(message: Message) -> dict[str, Any]:
+async def _message_summary(message: Message) -> dict[str, Any]:
+    attachments = await _svc_or_404().list_message_attachments(message.message_id)
     return {
         "message_id": message.message_id,
         "role": message.role.value,
@@ -2137,6 +2309,16 @@ def _message_summary(message: Message) -> dict[str, Any]:
         "thread_depth": message.thread_depth,
         "broadcast_to_room": message.broadcast_to_room,
         "created_at": message.created_at.isoformat(),
+        # Metadata only — filename, content type, size. Never the blob.
+        "attachments": [
+            {
+                "attachment_id": a.attachment_id,
+                "filename": a.filename,
+                "content_type": a.content_type,
+                "size_bytes": a.size_bytes,
+            }
+            for a in attachments
+        ],
     }
 
 
@@ -2157,7 +2339,7 @@ async def _message_response(
     svc = _svc_or_404()
     mentions = await svc.list_message_mentions(message.message_id)
     return {
-        **_message_summary(message),
+        **(await _message_summary(message)),
         "mentions": [
             {
                 "target_type": mention.target_type.value,
@@ -2228,7 +2410,7 @@ async def get_thread(
     thread = await svc.list_thread(message_id, limit)
     return [
         # reply_count is counted over the reply rows on this read, never stored.
-        {**_message_summary(entry.message), "reply_count": entry.reply_count}
+        {**(await _message_summary(entry.message)), "reply_count": entry.reply_count}
         for entry in thread
     ]
 

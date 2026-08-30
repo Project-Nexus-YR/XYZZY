@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -60,6 +60,7 @@ from ..domain.models import (
     ArtifactClaim,
     ArtifactType,
     ArtifactVersion,
+    Attachment,
     BootstrapContext,
     Branch,
     BranchMode,
@@ -153,7 +154,7 @@ from ..harness.adapters import MODEL_PROVIDER_HARNESS_ID
 from ..model_providers import ModelProviderError
 from ..nexus_bridge.agent_bridge import NexusAgentBridge
 from ..realtime.hub import RealtimeHub
-from ..security.audit import GENESIS_HASH, event_chain_hash
+from ..security.audit import GENESIS_HASH, event_chain_hash, verify_event_chain
 from ..security.authorization import (
     AuthorizationError,
     RoomCapability,
@@ -1300,6 +1301,67 @@ class MultiplayerService:
     async def list_agent_templates(self) -> list[AgentTemplate]:
         return await self.repos.agents.list_templates()
 
+    async def list_workspace_agent_templates(self, workspace_id: str) -> list[AgentTemplate]:
+        """Built-ins plus this workspace's own live templates."""
+        return await self.repos.agents.list_visible_to_workspace(workspace_id)
+
+    async def create_agent_template(
+        self, workspace_id: str, name: str, role: str, system_prompt: str, created_by: str
+    ) -> AgentTemplate:
+        """A workspace-authored specialist. Its prompt is member text, not developer text."""
+        require_human_boundary("agent_template.create")
+        name = self._validate_non_empty(name, "template name")
+        role = self._validate_non_empty(role, "template role")
+        system_prompt = self._validate_non_empty(system_prompt, "template system_prompt")
+        template = AgentTemplate(
+            template_id=new_id("tmpl"),
+            name=name,
+            description="",
+            role=role,
+            system_prompt=system_prompt,
+            # The creation body names no capabilities (spec: {name, role, system_prompt}),
+            # and the five-way intersection in _lendable_terms bounds a run by the
+            # narrowest of user/agent/skill/channel/workspace — an empty skill term
+            # here would make every agent spawned from this template unusable by
+            # anyone, forever. The built-ins each carry a real, non-empty subset for
+            # the same reason; this grants the full set and lets the other four terms
+            # do the actual narrowing, same as an "admin"/"editor" room role does.
+            capabilities=CAPABILITIES,
+            workspace_id=workspace_id,
+            created_by=created_by,
+        )
+        async with self.db.transaction():
+            # The route already confirmed membership; re-read it here so a removal
+            # committing in between cannot let a former member's write land.
+            await self.authorization.require_workspace_member(workspace_id, created_by)
+            existing = await self.repos.agents.list_visible_to_workspace(workspace_id)
+            if any(t.name.casefold() == name.casefold() for t in existing):
+                raise DomainError(f"a template named {name!r} already exists in this workspace")
+            await self.repos.agents.create_template(template)
+        return template
+
+    async def delete_agent_template(
+        self, workspace_id: str, template_id: str, requested_by: str
+    ) -> None:
+        require_human_boundary("agent_template.delete")
+        async with self.db.transaction():
+            template = await self.repos.agents.get_template(template_id)
+            if template is None:
+                raise DomainError(f"agent template not found: {template_id}")
+            if template.workspace_id is None:
+                raise DomainError("built-in agent templates cannot be deleted")
+            if template.workspace_id != workspace_id:
+                raise DomainError(f"agent template not found in workspace: {template_id}")
+            member = await self.repos.workspaces.get_member(workspace_id, requested_by)
+            is_admin = member is not None and member.role == "admin"
+            if not is_admin and requested_by != template.created_by:
+                raise AuthorizationError("workspace access forbidden")
+            # Agents already spawned from this template copied its fields onto
+            # themselves at spawn time, so marking it deleted rather than removing
+            # the row breaks nothing they still read, and keeps the FK
+            # agent_instances.template_id holds against this row intact.
+            await self.repos.agents.soft_delete_template(template_id, utcnow())
+
     async def spawn_agent(
         self,
         room_id: str,
@@ -1318,21 +1380,31 @@ class MultiplayerService:
         template = await self.repos.agents.get_template(template_id)
         if not template:
             raise DomainError(f"agent template not found: {template_id}")
+        if template.deleted_at is not None:
+            raise DomainError(f"agent template was deleted: {template_id}")
         if harness_id not in KNOWN_HARNESS_IDS:
             raise DomainError(f"no harness is registered as {harness_id!r}")
+        room = await self.repos.rooms.get(room_id)
+        if template.workspace_id is not None:
+            if room is None or template.workspace_id != room.workspace_id:
+                raise DomainError(f"agent template {template_id} belongs to a different workspace")
+            # A workspace member wrote this prompt, not this deployment's developer.
+            # It reaches the model exactly like any other member-authored text does.
+            template_system_prompt = fenced(screen(template.system_prompt, "agent template"))
+        else:
+            template_system_prompt = template.system_prompt
         agent = AgentInstance(
             agent_id=new_id("agent"),
             template_id=template_id,
             room_id=room_id,
             name=name or template.name,
             role=template.role,
-            system_prompt=system_prompt or template.system_prompt,
+            system_prompt=system_prompt or template_system_prompt,
             capabilities=template.capabilities,
             model_provider=model_provider,
             model_name=model_name,
             harness_id=harness_id,
         )
-        room = await self.repos.rooms.get(room_id)
         identity = AgentIdentity(
             identity_id=new_id("ident"),
             agent_id=agent.agent_id,
@@ -4973,6 +5045,7 @@ class MultiplayerService:
         parent_message_id: str | None = None,
         broadcast_to_room: bool = True,
         invoke_mentioned_agents: bool = False,
+        attachment_ids: list[str] | None = None,
     ) -> Message:
         content = self._validate_non_empty(content, "message content")
         if idempotency_key is not None:
@@ -5056,6 +5129,9 @@ class MultiplayerService:
                                 "root_message_id": msg.root_message_id,
                                 "thread_depth": msg.thread_depth,
                                 "broadcast_to_room": msg.broadcast_to_room,
+                                # Filenames and sizes only, never bytes — the message
+                                # event is what a model path and an export both read.
+                                "attachment_ids": list(attachment_ids or []),
                                 "mentions": [
                                     {
                                         "target_type": mention.target_type.value,
@@ -5072,6 +5148,16 @@ class MultiplayerService:
                 )
                 events.append(message_event)
                 msg = replace(msg, event_sequence=message_event.sequence)
+                for attachment_id in attachment_ids or []:
+                    # Same room, same uploader, still unbound — checked and claimed
+                    # in one statement, inside the transaction that writes the
+                    # message. The message row must exist first: the FK this binds
+                    # against is on the message this attachment is claimed for.
+                    bound = await self.repos.attachments.bind_to_message_in_transaction(
+                        attachment_id, room_id, sender_id, msg.message_id
+                    )
+                    if not bound:
+                        raise DomainError(f"attachment not available to bind: {attachment_id}")
                 for mention in mentions:
                     await self.repos.mentions.create(
                         replace(mention, invoked_execution_id=invoked.get(mention.target_id))
@@ -5124,6 +5210,48 @@ class MultiplayerService:
 
     async def list_message_mentions(self, message_id: str) -> list[MessageMention]:
         return await self.repos.mentions.list_for_message(message_id)
+
+    async def list_message_attachments(self, message_id: str) -> list[Attachment]:
+        return await self.repos.attachments.list_for_message(message_id)
+
+    async def upload_attachment(
+        self,
+        room_id: str,
+        uploader_id: str,
+        filename: str,
+        content_type: str,
+        data: bytes,
+        max_bytes: int,
+    ) -> Attachment:
+        """Store a file a member uploaded, unbound until a message claims it.
+
+        The bytes never leave this method except into the row: nothing here
+        builds a model prompt, and nothing downstream of this call is handed
+        the blob — only filename/content_type/size_bytes ever ride a message.
+        """
+        filename = self._validate_non_empty(filename, "filename")
+        if len(data) > max_bytes:
+            raise DomainError(f"attachment exceeds the {max_bytes}-byte limit")
+        attachment = Attachment(
+            attachment_id=new_id("att"),
+            room_id=room_id,
+            uploader_id=uploader_id,
+            filename=filename,
+            content_type=content_type,
+            size_bytes=len(data),
+            sha256=hashlib.sha256(data).hexdigest(),
+            data=data,
+        )
+        async with self.db.transaction():
+            await self._require_mutate_in_transaction(room_id, uploader_id)
+            await self.repos.attachments.create(attachment)
+        return attachment
+
+    async def get_attachment(self, attachment_id: str) -> Attachment:
+        attachment = await self.repos.attachments.get(attachment_id)
+        if attachment is None:
+            raise DomainError(f"attachment not found: {attachment_id}")
+        return attachment
 
     async def get_message(self, message_id: str) -> Message:
         message = await self.repos.messages.get(message_id)
@@ -7806,6 +7934,66 @@ class MultiplayerService:
     async def get_room_events(self, room_id: str, after_sequence: int = 0) -> list[RoomEvent]:
         return await self.repos.events.list_since(room_id, max(0, after_sequence))
 
+    async def export_room_audit(self, room_id: str) -> AsyncIterator[str]:
+        """Every event this room ever recorded, one JSON line each, then a summary.
+
+        Pages on after_sequence rather than trusting one read: list_since's own
+        page is capped at 500, and a room with more events than that would have
+        its export silently stop there — the same shape of bug 030's migration
+        already named once in this codebase, reborn in a new reader.
+        """
+        room = await self.repos.rooms.get(room_id)
+        if room is None:
+            raise DomainError(f"room not found: {room_id}")
+        after_sequence = 0
+        exported = 0
+        while True:
+            page = await self.repos.events.list_since_with_chain(room_id, after_sequence)
+            if not page:
+                break
+            for row in page:
+                exported += 1
+                yield (
+                    json.dumps(
+                        {
+                            "sequence": row["sequence"],
+                            "event_type": row["event_type"],
+                            "actor": {"actor_id": row["actor_id"], "actor_type": row["actor_type"]},
+                            "created_at": row["timestamp"],
+                            "payload": json.loads(row["payload"]),
+                            "event_hash": row["event_hash"],
+                            "prev_hash": row["prev_hash"],
+                        }
+                    )
+                    + "\n"
+                )
+            after_sequence = int(page[-1]["sequence"])
+        sequence_counter = await self.repos.events.get_sequence_counter(room_id)
+        _, breaks = await verify_event_chain(self.db)
+        # A break already covers a divergent hash or a missing sequence; it does not
+        # cover this reader stopping early. verify_event_chain makes exactly this
+        # comparison for its own break detection (log end vs. room counter) — the
+        # same fact, read here instead of recomputed, because a reader whose page
+        # count silently fell short of the counter is unverified for the same
+        # reason a broken hash is: what it exported is not what the room holds.
+        chain_verified = (
+            not any(b.room_id == room_id for b in breaks) and exported == sequence_counter
+        )
+        yield (
+            json.dumps(
+                {
+                    "export_summary": {
+                        "room_id": room_id,
+                        "events": exported,
+                        "sequence_counter": sequence_counter,
+                        "chain_verified": chain_verified,
+                        "verified_at": utcnow().isoformat(),
+                    }
+                }
+            )
+            + "\n"
+        )
+
     # ── Room State (for reconnect) ───────────────────────────────────────────
 
     @staticmethod
@@ -8070,6 +8258,16 @@ class MultiplayerService:
                     **self._thread_state(m, thread_summaries),
                     "reactions": reactions.get(m.message_id, []),
                     "created_at": m.created_at.isoformat(),
+                    # Metadata only, never the blob.
+                    "attachments": [
+                        {
+                            "attachment_id": a.attachment_id,
+                            "filename": a.filename,
+                            "content_type": a.content_type,
+                            "size_bytes": a.size_bytes,
+                        }
+                        for a in await self.repos.attachments.list_for_message(m.message_id)
+                    ],
                 }
                 for m in messages
             ],

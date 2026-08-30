@@ -39,6 +39,7 @@ from ..domain.models import (
     ArtifactClaim,
     ArtifactType,
     ArtifactVersion,
+    Attachment,
     BootstrapContext,
     Branch,
     BranchMode,
@@ -153,6 +154,7 @@ class Repos:
         self.agent_tasks = AgentTaskRepo(db)
         self.messages = MessageRepo(db)
         self.mentions = MessageMentionRepo(db)
+        self.attachments = AttachmentRepo(db)
         self.handles = RoomParticipantHandleRepo(db)
         self.reactions = MessageReactionRepo(db)
         self.read_cursors = ReadCursorRepo(db)
@@ -1232,8 +1234,8 @@ class AgentRepo:
     async def create_template(self, template: AgentTemplate) -> AgentTemplate:
         await self.db.execute(
             "INSERT INTO agent_templates(template_id, name, description, role, system_prompt, "
-            "capabilities, preferred_tools, avatar_url, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "capabilities, preferred_tools, avatar_url, created_at, workspace_id, created_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 template.template_id,
                 template.name,
@@ -1244,6 +1246,8 @@ class AgentRepo:
                 json.dumps(list(template.preferred_tools)),
                 template.avatar_url,
                 serialize_datetime(template.created_at),
+                template.workspace_id,
+                template.created_by,
             ),
         )
         await self.db.commit()
@@ -1256,8 +1260,27 @@ class AgentRepo:
         return None if row is None else self._template_from_row(row)
 
     async def list_templates(self) -> list[AgentTemplate]:
-        rows = await self.db.fetch_all("SELECT * FROM agent_templates ORDER BY created_at")
+        """Built-ins only: workspace_id IS NULL. Kept for the global (unscoped) route."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM agent_templates WHERE workspace_id IS NULL ORDER BY created_at"
+        )
         return [self._template_from_row(r) for r in rows]
+
+    async def list_visible_to_workspace(self, workspace_id: str) -> list[AgentTemplate]:
+        """Every built-in plus this workspace's own, live templates only."""
+        rows = await self.db.fetch_all(
+            "SELECT * FROM agent_templates WHERE deleted_at IS NULL "
+            "AND (workspace_id IS NULL OR workspace_id = ?) ORDER BY created_at",
+            (workspace_id,),
+        )
+        return [self._template_from_row(r) for r in rows]
+
+    async def soft_delete_template(self, template_id: str, deleted_at: datetime) -> None:
+        await self.db.execute(
+            "UPDATE agent_templates SET deleted_at = ? WHERE template_id = ?",
+            (serialize_datetime(deleted_at), template_id),
+        )
+        await self.db.commit()
 
     async def create_instance(self, agent: AgentInstance) -> AgentInstance:
         await self.db.execute(
@@ -1402,6 +1425,11 @@ class AgentRepo:
             preferred_tools=tuple(json.loads(row["preferred_tools"])),
             avatar_url=row["avatar_url"],
             created_at=datetime.fromisoformat(row["created_at"]),
+            workspace_id=row.get("workspace_id"),
+            created_by=row.get("created_by"),
+            deleted_at=(
+                datetime.fromisoformat(row["deleted_at"]) if row.get("deleted_at") else None
+            ),
         )
 
     def _instance_from_row(self, row: dict[str, Any]) -> AgentInstance:
@@ -3338,6 +3366,94 @@ class MessageMentionRepo:
         )
 
 
+class AttachmentRepo:
+    """Uploaded files: unbound until a message claims them, always scoped to a room."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create(self, attachment: Attachment) -> Attachment:
+        await self.db.execute(
+            "INSERT INTO attachments(attachment_id, room_id, uploader_id, filename, "
+            "content_type, size_bytes, sha256, created_at, message_id, data) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                attachment.attachment_id,
+                attachment.room_id,
+                attachment.uploader_id,
+                attachment.filename,
+                attachment.content_type,
+                attachment.size_bytes,
+                attachment.sha256,
+                serialize_datetime(attachment.created_at),
+                attachment.message_id,
+                attachment.data,
+            ),
+        )
+        await self.db.commit()
+        return attachment
+
+    async def get(self, attachment_id: str) -> Attachment | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM attachments WHERE attachment_id = ?", (attachment_id,)
+        )
+        return None if row is None else self._from_row(row)
+
+    async def get_metadata_only(self, attachment_id: str) -> Attachment | None:
+        """Every column but the blob, for a caller that only ever needs metadata."""
+        row = await self.db.fetch_one(
+            "SELECT attachment_id, room_id, uploader_id, filename, content_type, "
+            "size_bytes, sha256, created_at, message_id FROM attachments "
+            "WHERE attachment_id = ?",
+            (attachment_id,),
+        )
+        return None if row is None else self._from_row(row, with_data=False)
+
+    async def bind_to_message_in_transaction(
+        self, attachment_id: str, room_id: str, uploader_id: str, message_id: str
+    ) -> bool:
+        """Claim an unbound upload for a message. False if it is not eligible.
+
+        Eligible means: exists, belongs to this room, was uploaded by this sender,
+        and nothing has bound it yet — all three checked in the same statement so
+        a concurrent second bind can claim at most one of two identical uploads.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("attachment bind requires transaction ownership")
+        cursor = await self.db.execute(
+            "UPDATE attachments SET message_id = ? WHERE attachment_id = ? AND room_id = ? "
+            "AND uploader_id = ? AND message_id IS NULL",
+            (message_id, attachment_id, room_id, uploader_id),
+        )
+        bound = cursor.rowcount > 0
+        await cursor.close()
+        return bound
+
+    async def list_for_message(self, message_id: str) -> list[Attachment]:
+        rows = await self.db.fetch_all(
+            "SELECT attachment_id, room_id, uploader_id, filename, content_type, "
+            "size_bytes, sha256, created_at, message_id FROM attachments "
+            "WHERE message_id = ? ORDER BY created_at",
+            (message_id,),
+        )
+        return [self._from_row(r, with_data=False) for r in rows]
+
+    @staticmethod
+    def _from_row(r: dict[str, Any], *, with_data: bool = True) -> Attachment:
+        return Attachment(
+            attachment_id=r["attachment_id"],
+            room_id=r["room_id"],
+            uploader_id=r["uploader_id"],
+            filename=r["filename"],
+            content_type=r["content_type"],
+            size_bytes=int(r["size_bytes"]),
+            sha256=r["sha256"],
+            data=r["data"] if with_data else b"",
+            message_id=r.get("message_id"),
+            created_at=datetime.fromisoformat(r["created_at"]),
+        )
+
+
 class RoomParticipantHandleRepo:
     """The room's address book: one handle per participant, unique in the room."""
 
@@ -3807,6 +3923,31 @@ class EventRepo:
             (room_id,),
         )
         return int(row["seq"]) if row else 0
+
+    async def get_sequence_counter(self, room_id: str) -> int:
+        """The room's own event counter — what an export's line count must equal."""
+        row = await self.db.fetch_one(
+            "SELECT seq FROM room_sequences WHERE room_id = ?", (room_id,)
+        )
+        return int(row["seq"]) if row else 0
+
+    async def list_since_with_chain(
+        self, room_id: str, after_sequence: int, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """One page of raw rows, hash-chain fields included, for an export.
+
+        list_since's RoomEvent leaves prev_hash and event_hash off — nothing but
+        an export needs them — and its own 500-row default is exactly the cap a
+        caller reading the whole room has to page past rather than trust as a
+        single read.
+        """
+        rows = await self.db.fetch_all(
+            "SELECT event_id, room_id, sequence, event_type, payload, actor_id, actor_type, "
+            "timestamp, schema_version, prev_hash, event_hash FROM room_events "
+            "WHERE room_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?",
+            (room_id, after_sequence, limit),
+        )
+        return rows
 
 
 class ArtifactRepo:
