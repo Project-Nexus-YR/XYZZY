@@ -219,7 +219,13 @@ def create_app(
 
         @app.get("/")
         async def serve_ui() -> FileResponse:
-            return FileResponse(str(static_dir / "index.html"))
+            # no-cache means revalidate, not never-store: the browser keeps a copy
+            # but asks before using it, so a deploy is visible on the next load
+            # instead of whenever the heuristic cache happens to expire.
+            return FileResponse(
+                str(static_dir / "index.html"),
+                headers={"Cache-Control": "no-cache"},
+            )
 
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
