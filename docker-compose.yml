@@ -1,0 +1,18 @@
+services:
+  xyzzy:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - xyzzy-data:/data
+    environment:
+      # Dev-only bootstrap token. Replace before deploying anywhere real:
+      # anyone with this token can act as user_admin.
+      XYZZY_AUTH_TOKENS: '{"change-me-dev-token":"user_admin"}'
+      # XYZZY_CORS_ORIGINS: "https://example.com"
+      # XYZZY_PORT: "8000"
+      # OPENAI_API_KEY: ""
+      # XYZZY_LOCAL_MODEL_BASE_URL: "http://host.docker.internal:11434/v1"
+
+volumes:
+  xyzzy-data:
