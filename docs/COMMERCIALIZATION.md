@@ -49,6 +49,11 @@ after they arrive needs every contributor's consent):
 says MIT and stays as it is. Revisit only if a competing hosted fork actually
 materializes, knowing a change can then only apply to future versions.
 
+**Revised 2026-08-31: Apache 2.0.** Same adoption bet, same permissiveness for
+users, plus the explicit patent grant — the Supabase main-repo choice. Done
+before the repo goes public, while no external contributions exist and the
+switch needs nobody's consent but the author's.
+
 ## Adoption prerequisites (before any of the above matters)
 
 1. **One-command self-host** — `docker compose up` from a fresh clone to a

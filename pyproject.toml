@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Persistent shared workspace where multiple humans and AI agents work together"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 dependencies = [
     "fastapi>=0.110",
     "httpx>=0.27",

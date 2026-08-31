@@ -4,7 +4,7 @@ A team makes a hard technical decision with AI, and keeps the receipts.
 
 [![gates](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/ci.yml/badge.svg)](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/ci.yml)
 [![image](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/docker-publish.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="site/assets/screenshot-hero-dark.png">
@@ -42,7 +42,7 @@ construction, checkable with the audit CLI. Each Decision links to the Claims an
 behind it, so a synthesis is inspectable down to the run that produced it.
 
 **Yours.** One Python process and a SQLite file, self-hosted. Point specialists at Ollama, LM
-Studio, or any OpenAI-compatible server instead of a hosted API. MIT licensed, source included.
+Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 licensed, source included.
 
 ## Core Capabilities
 
@@ -454,4 +454,4 @@ The suite covers:
 
 ## License
 
-MIT
+Apache 2.0 — see [LICENSE](LICENSE).
