@@ -22,6 +22,16 @@ Opens a seeded demo workspace at `http://localhost:8000`, signed in with one cli
 no config. Prefer to run from source? `git clone` this repo and run `docker compose --profile
 demo up` instead — see [Docker](#docker) below for the non-demo path.
 
+### What the demo opens
+
+<img src="site/assets/demo.gif" alt="Tour of the seeded XYZZY demo workspace: one-click entry into the workspace, the General channel conversation between two teammates, an open thread attached to one of those messages, the branch view comparing two specialist outputs side by side, the top of the published Decision Brief, the Decision to Claim to AgentOutput evidence chain beneath it, and an Ask Meta answer summarizing where the room's decision stands." width="960">
+
+One click drops you into a workspace already mid-decision: a channel conversation, a branch with
+two specialist outputs to compare, and a published Decision Brief with its evidence chain intact.
+No API key is configured for this recording, so the specialist outputs and the brief show the
+conspicuously labelled SIMULATED workflow output described above — the collaboration mechanics
+are the same either way.
+
 ## What it is
 
 Modern AI tools are single-player: one human, one chat, one context. Real work happens in teams.
