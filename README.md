@@ -434,24 +434,6 @@ The suite covers:
   HTTP transport; a real Responses API run requires a server-side `OPENAI_API_KEY`
 - **Single-process** — no Redis/Postgres for horizontal scaling
 
-## Roadmap
-
-- [x] OpenAI Responses API model-provider integration
-- [x] Local model support (Ollama, LM Studio, any OpenAI-compatible endpoint)
-- [x] Persistent file-backed SQLite storage
-- [x] Opaque Bearer identity and room authorization
-- [x] External SSO and production session lifecycle
-- [x] Agent-to-agent messaging and negotiation
-- [x] File attachments on messages, with a hard model boundary
-- [x] Custom agent templates per workspace
-- [x] Streaming audit export (ndjson, chain-verified)
-- [x] Zero-config demo mode
-- [x] Public read-only share links for decision briefs
-- [ ] Room templates and quickstart configurations
-- [ ] Agent template sharing across workspaces
-- [ ] Multi-node deployment and horizontal scaling
-- [ ] Native desktop and mobile clients
-
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).

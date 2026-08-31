@@ -1,4 +1,22 @@
-# Client backlog
+# Backlog
+
+## Deferred epics (moved from the README roadmap, 2026-08-31)
+
+Deliberately not scheduled: each is weeks of work whose payoff scales with
+adoption the project does not yet have.
+
+- **Multi-node deployment and horizontal scaling.** The server is one process
+  on SQLite by design (SECURITY.md's threat model and the event-chain writer
+  assume a single writer). Going multi-node means Postgres or a fan-out layer
+  and a rethink of sequence allocation — do it when a real deployment hits the
+  ceiling, not before.
+- **Native desktop and mobile clients.** The web SPA is the only client. A
+  Slack/Discord bridge is the cheaper adoption lever and should come first.
+- **Template marketplace beyond the org.** Org-wide sharing shipped; public
+  distribution needs trust machinery (provenance display, versioning,
+  takedown) that stays parked until there are strangers to share with.
+
+## Client backlog
 
 Out of scope for the completeness pass ([spec](../web/index.html) round). Each
 line: what the API already supports, and why the UI still waits.
@@ -31,6 +49,12 @@ line: what the API already supports, and why the UI still waits.
   channels shows non-member rooms as "by invitation" only; a self-serve
   request-to-join flow (with an admin approval step) is a workflow the server
   route alone doesn't define and this round left for a follow-up.
+- **Launch-round server features with no client surface yet.** Custom agent
+  templates (create/delete/share), file attachments (upload/bind/download),
+  audit export (download button), room templates (picker at channel
+  creation), and share-link management (create/list/revoke on an artifact)
+  all ship server-side with tests; each needs its own UI slice against the
+  existing route contracts.
 
 ## Asked and answered 2026-08-30 (owner roadmap questions)
 
