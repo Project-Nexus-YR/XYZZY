@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-31
+
 ### Added
 
 - Governance is structurally outside the agent surface: while a model-driven
