@@ -437,14 +437,20 @@ The suite covers:
 ## Roadmap
 
 - [x] OpenAI Responses API model-provider integration
+- [x] Local model support (Ollama, LM Studio, any OpenAI-compatible endpoint)
 - [x] Persistent file-backed SQLite storage
 - [x] Opaque Bearer identity and room authorization
 - [x] External SSO and production session lifecycle
 - [x] Agent-to-agent messaging and negotiation
-- [ ] File upload and binary artifact support
+- [x] File attachments on messages, with a hard model boundary
+- [x] Custom agent templates per workspace
+- [x] Streaming audit export (ndjson, chain-verified)
+- [x] Zero-config demo mode
+- [x] Public read-only share links for decision briefs
 - [ ] Room templates and quickstart configurations
-- [ ] Agent marketplace and custom agent creation
-- [ ] Audit log export and compliance reporting
+- [ ] Agent template sharing across workspaces
+- [ ] Multi-node deployment and horizontal scaling
+- [ ] Native desktop and mobile clients
 
 ## License
 
