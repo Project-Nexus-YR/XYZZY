@@ -79,11 +79,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the durable ordered log clients already have, and a server that advertises
   false and then accepts the call is worse than one that declines.
 
+- Custom agent templates (migration 038): a workspace writes its own
+  specialists as rows beside the built-ins, create membership-gated with the
+  capability re-checked inside the write transaction, names unique
+  case-insensitively across built-ins and the workspace's own, delete
+  creator-or-admin and soft because spawned agents hold an enforced foreign
+  key against the row vanishing. A workspace-authored system prompt is
+  untrusted member text and reaches the provider only through
+  screen()+fenced(), unlike the trusted built-ins, and a deleted template's
+  agents keep working because the template id is resolved at spawn time, not
+  re-read afterward.
+- File attachments (migration 039): multipart upload, capped by
+  `XYZZY_MAX_ATTACHMENT_BYTES` with the body-cap middleware exempting exactly
+  that route, binding to a message in-transaction and requiring same room,
+  same uploader, unbound. Serving is nosniff and filename-sanitized, and only
+  the png/jpeg/webp/gif allowlist keeps its real content type; attachment
+  bytes never enter any model, screening, or synthesis path, so only fenced
+  filename and size metadata can appear in message text.
+- Streaming audit export at `GET /rooms/{id}/audit-export` streams a room's
+  event log as ndjson with its stored hash-chain fields, paging past the
+  repository layer's 500-row default so no event is silently dropped; the
+  summary line reuses `verify_event_chain` and reports `chain_verified` false
+  unless the exported count equals the room's own sequence counter, so the
+  claim is checked against production, not just against a test.
+- Zero-config demo mode: `XYZZY_DEMO=1`, `--demo`, or
+  `docker compose --profile demo up` boots a seeded workspace — a real
+  conversation with a thread and reactions, two specialists run in a parallel
+  branch offline through the simulated provider, a published Decision Brief —
+  behind one-click entry with no token, channel, or account. Demo mode
+  refuses to coexist with OIDC or real auth tokens, so it can never be bolted
+  onto a live deployment, and the seed is idempotent across restarts with
+  message timestamps staggered across a plausible morning while the event
+  chain keeps its true times and still verifies.
+- Public read-only share links (migration 040): a room admin can publish an
+  artifact to a public URL, create/list/revoke gated on the admin capability
+  and re-checked inside the write transaction, and the token is returned
+  exactly once with only its sha256 stored. The public page serves the
+  artifact's escaped content and nothing else — no member names, no room
+  name, no ids — and answers a constant 404 for unknown, revoked, and
+  malformed tokens alike.
+- The public landing page under `site/`: a single self-contained
+  `site/index.html` with every claim on the page checked against the README
+  and `SECURITY.md`, product screenshots that are real captures of the seeded
+  demo workspace in both themes, and no invented logos, stars, or
+  testimonials.
+- The image workflow publishes `ghcr.io/project-nexus-yr/xyzzy` on every push
+  to `main` and on version tags, so the quickstart in both the README and the
+  landing page reduces to `docker run` with `XYZZY_DEMO=1` and nothing else.
+- Room templates (migration 041): a workspace saves a recipe of name,
+  description, and preselected specialists, and creating a room from one
+  commits the room and every specialist spawn in a single transaction, so a
+  recipe whose specialist vanished mid-flight creates nothing at all rather
+  than a room with half its team. The recipe's id rides the room-creation
+  event, so the audit trail shows where a room came from.
+- Template sharing (migration 042): a workspace template can be shared
+  org-wide, visible and spawnable from sibling workspaces, marked with its
+  origin, and revocable at any moment with the revocation re-checked inside
+  the spawn transaction. A shared prompt stays exactly as untrusted as it was
+  at home, since screen()+fenced() applies identically wherever it is
+  spawned; cross-org sharing stays refused, and built-ins have nothing to
+  share.
+
 ### Changed
 
 - `GET /api/v1/health` reads from the database instead of returning a constant,
   and answers 503 when it cannot. A process listening with a database it cannot
   open is no longer reported ready.
+- The license changes from MIT to Apache 2.0, the same permissiveness plus an
+  explicit patent grant, switched while the author is still the only
+  contributor and the change needs nobody else's consent; the badge, landing
+  page, project metadata, and the commercialization decision record all
+  follow.
+- The roadmap section leaves the README: everything on it that could be
+  checked is shipped and tested, so it needs no list. The two
+  deliberately-unscheduled epics and the beyond-the-org marketplace move to
+  `docs/BACKLOG.md` with their reasoning, alongside a record of which
+  launch-round server features still await a client surface.
 - The product is now XYZZY. The distribution is `xyzzy`, the environment
   variables are `XYZZY_AUTH_TOKENS`, `XYZZY_OPENAI_MODEL` and
   `XYZZY_MODEL_TIMEOUT_SECONDS`, and the WebSocket subprotocol is `xyzzy.v1`.
@@ -110,6 +181,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The README documented the sign-in endpoints at `/auth/...` when every one of
   them is mounted under `/api/v1`, which would have sent a deployment's
   `XYZZY_OIDC_REDIRECT_URI` somewhere that answers 404.
+- Custom agent templates seeded no capabilities, so an agent spawned from one
+  could never execute a turn; template creation now seeds real capabilities
+  alongside the row.
+- Creating a room from a template spawned its specialists outside the room's
+  creation transaction, so a specialist that vanished mid-flight could leave
+  a room with half its team; room and every specialist spawn now commit in
+  one transaction, caught in review before it shipped.
 
 ## [0.2.0] - 2026-08-24
 

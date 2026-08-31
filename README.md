@@ -125,7 +125,7 @@ tests/
 
 ## How It Uses NEXUS
 
-XYZZY includes an optional integration with [NEXUS](../NEXUS/), a lightweight agent runtime. The `NexusAgentBridge` adapts NEXUS into the multiplayer context:
+XYZZY includes an optional integration with [NEXUS](https://github.com/Project-Nexus-YR/NEXUS), a lightweight agent runtime. The `NexusAgentBridge` adapts NEXUS into the multiplayer context:
 
 - **AgentExecutor** manages agent run lifecycle (create, reason, pause, resume, cancel)
 - **Budget** enforces token limits, wall time, and tool call limits
