@@ -1,0 +1,10 @@
+// Cloudflare deployment config for the landing page only: a static-assets
+// Worker that serves site/ and runs no code. The app server itself does not
+// deploy to Cloudflare (it needs a persistent process and a disk).
+{
+  "name": "xyzzy",
+  "compatibility_date": "2026-08-31",
+  "assets": {
+    "directory": "./site"
+  }
+}
