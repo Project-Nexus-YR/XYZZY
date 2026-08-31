@@ -2,6 +2,8 @@
 
 A team makes a hard technical decision with AI, and keeps the receipts.
 
+Live page: [xyzzy.yasserameur-dev.workers.dev](https://xyzzy.yasserameur-dev.workers.dev/)
+
 [![gates](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/ci.yml/badge.svg)](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/ci.yml)
 [![image](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Project-Nexus-YR/XYZZY/actions/workflows/docker-publish.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
