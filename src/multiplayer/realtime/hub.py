@@ -6,12 +6,22 @@ import asyncio
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from ..domain.events import RoomEvent
 from ..domain.models import new_id
 
 log = logging.getLogger(__name__)
+
+
+class FanoutPublisher(Protocol):
+    """What the hub needs from a cross-process transport (see realtime/fanout.py).
+
+    Defined here rather than imported so hub.py never imports redis, or
+    anything that does, when XYZZY_REDIS_URL is unset.
+    """
+
+    async def publish(self, message: dict[str, Any]) -> None: ...
 
 
 @dataclass
@@ -30,10 +40,23 @@ class RealtimeHub:
     then delivers outside the lock to avoid holding it during I/O.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, fanout: FanoutPublisher | None = None) -> None:
         self._subscriptions: dict[str, RealtimeSubscription] = {}
         self._room_subscriptions: dict[str, set[str]] = defaultdict(set)
         self._lock = asyncio.Lock()
+        # None (the default) is single-process mode: no cross-process transport,
+        # every method below behaves exactly as it did before this existed.
+        self._fanout = fanout
+
+    def attach_fanout(self, fanout: FanoutPublisher) -> None:
+        """Wire a fan-out layer in after construction.
+
+        Exists because RedisFanout needs the hub to deliver received messages
+        into, and the hub needs the fanout to publish to — server.py breaks
+        that cycle by constructing the hub first, then the fanout, then
+        calling this.
+        """
+        self._fanout = fanout
 
     async def subscribe(self, room_id: str, user_id: str) -> RealtimeSubscription:
         # Minted the way every other id here is minted, and deliberately not from
@@ -60,8 +83,13 @@ class RealtimeHub:
             if sub:
                 self._room_subscriptions[sub.room_id].discard(subscription_id)
 
-    async def revoke_room_access(self, user_id: str, room_id: str) -> int:
-        """Drop a user's live subscriptions to a room and tell each socket to close."""
+    async def revoke_room_access(self, user_id: str, room_id: str, *, publish: bool = True) -> int:
+        """Drop a user's live subscriptions to a room and tell each socket to close.
+
+        `publish=False` is for the fan-out subscriber replaying another
+        process's revocation locally — it must not re-publish, or two
+        processes would echo the same revocation at each other forever.
+        """
         async with self._lock:
             revoked = [
                 sub
@@ -76,6 +104,11 @@ class RealtimeHub:
                 sub.queue.put_nowait({"type": "access_revoked", "room_id": room_id})
             except asyncio.QueueFull:
                 log.debug("Queue full for revoked subscription %s", sub.subscription_id)
+        if publish and self._fanout is not None:
+            # Published unconditionally, even when nothing was revoked locally:
+            # the whole point is telling OTHER processes, which may hold the
+            # live socket this one never saw.
+            await self._fanout.publish({"kind": "revoke", "room_id": room_id, "user_id": user_id})
         return len(revoked)
 
     async def broadcast_to_room(self, room_id: str, event: dict[str, Any]) -> list[str]:
@@ -99,8 +132,16 @@ class RealtimeHub:
                     log.debug("Queue full for subscription %s, dropping event", sub.subscription_id)
         return delivered
 
-    async def broadcast_room_event(self, room_event: RoomEvent) -> list[str]:
-        """Broadcast a RoomEvent to all room subscribers."""
+    async def broadcast_room_event(
+        self, room_event: RoomEvent, *, publish: bool = True
+    ) -> list[str]:
+        """Broadcast a RoomEvent to all room subscribers.
+
+        Local delivery (`broadcast_to_room` below) never waits on the
+        publish: it already happened by the time `publish` runs, and a slow
+        or dead Redis cannot delay or block it. `publish=False` is for the
+        fan-out subscriber replaying another process's event locally.
+        """
         payload = {
             "type": "room_event",
             "event_type": room_event.event_type.value,
@@ -111,9 +152,16 @@ class RealtimeHub:
             "timestamp": room_event.timestamp.isoformat(),
             "event_id": room_event.event_id,
         }
-        return await self.broadcast_to_room(room_event.room_id, payload)
+        delivered = await self.broadcast_to_room(room_event.room_id, payload)
+        if publish and self._fanout is not None:
+            await self._fanout.publish(
+                {"kind": "room_event", "room_id": room_event.room_id, "event": payload}
+            )
+        return delivered
 
-    async def send_to_user(self, user_id: str, event: dict[str, Any]) -> bool:
+    async def send_to_user(
+        self, user_id: str, event: dict[str, Any], *, publish: bool = True
+    ) -> bool:
         """Send event to all subscriptions belonging to a user. Returns True if delivered."""
         delivered = False
         async with self._lock:
@@ -124,6 +172,8 @@ class RealtimeHub:
                         delivered = True
                     except asyncio.QueueFull:
                         pass
+        if publish and self._fanout is not None:
+            await self._fanout.publish({"kind": "send_to_user", "user_id": user_id, "event": event})
         return delivered
 
     async def room_subscriber_count(self, room_id: str) -> int:

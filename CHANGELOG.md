@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The realtime hub scales past one process: with `XYZZY_REDIS_URL` set
+  (install `xyzzy[redis]`), room events, session revocations, and user
+  notifications fan out across processes through Redis pub/sub, and presence
+  stays correct cluster-wide through keys that expire on silence. Transport
+  is deliberately best-effort: the sequence-numbered log with reconnect
+  replay remains the single source of truth, so a dropped message costs
+  latency, never correctness. When Redis is down each process degrades to
+  single-process behavior on its own, and local delivery never waits on a
+  publish.
+- A `live-provider` workflow, triggered by hand, spends one real API call to
+  prove the genuine provider path produces model-written output. The gate
+  suite keeps its fake transport; this is the opt-in other half, and the
+  test behind it skips loudly when no `OPENAI_API_KEY` is present.
+
 ## [0.3.0] - 2026-08-31
 
 ### Added

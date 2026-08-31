@@ -27,6 +27,7 @@ class Metrics:
         self._version = version
         self._requests_total: dict[tuple[str, str], int] = defaultdict(int)
         self._rate_limited_total = 0
+        self._redis_publish_failures_total = 0
         self._websocket_connections = 0
         self._request_seconds_bucket_counts: dict[float, int] = dict.fromkeys(_LATENCY_BUCKETS, 0)
         self._request_seconds_sum = 0.0
@@ -42,6 +43,9 @@ class Metrics:
 
     def record_rate_limited(self) -> None:
         self._rate_limited_total += 1
+
+    def record_redis_publish_failure(self) -> None:
+        self._redis_publish_failures_total += 1
 
     def set_websocket_connections(self, count: int) -> None:
         self._websocket_connections = count
@@ -78,6 +82,9 @@ class Metrics:
             "# HELP xyzzy_websocket_connections Live WebSocket subscriptions.",
             "# TYPE xyzzy_websocket_connections gauge",
             f"xyzzy_websocket_connections {self._websocket_connections}",
+            "# HELP xyzzy_redis_publish_failures_total Redis fan-out publishes that failed.",
+            "# TYPE xyzzy_redis_publish_failures_total counter",
+            f"xyzzy_redis_publish_failures_total {self._redis_publish_failures_total}",
             "# HELP xyzzy_build_info Build metadata; the value is always 1.",
             "# TYPE xyzzy_build_info gauge",
             f'xyzzy_build_info{{version="{self._version}"}} 1',

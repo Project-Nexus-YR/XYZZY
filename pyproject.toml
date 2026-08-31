@@ -34,8 +34,12 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.6",
     "mypy>=1.11",
+    "fakeredis>=2.20",
 ]
 nexus = []
+# Cross-process fan-out for the realtime hub (XYZZY_REDIS_URL). The single
+# process default needs none of this; see src/multiplayer/realtime/fanout.py.
+redis = ["redis>=5.0"]
 
 [project.scripts]
 xyzzy = "multiplayer.server:main"

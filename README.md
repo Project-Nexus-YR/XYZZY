@@ -20,7 +20,7 @@ docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/project-nexus-yr/xyzzy
 
 Opens a seeded demo workspace at `http://localhost:8000`, signed in with one click. No account,
 no config. Prefer to run from source? `git clone` this repo and run `docker compose --profile
-demo up` instead — see [Docker](#docker) below for the non-demo path.
+demo up` instead (see [Docker](#docker) below for the non-demo path).
 
 ### What the demo opens
 
@@ -29,14 +29,14 @@ demo up` instead — see [Docker](#docker) below for the non-demo path.
 One click drops you into a workspace already mid-decision: a channel conversation, a branch with
 two specialist outputs to compare, and a published Decision Brief with its evidence chain intact.
 No API key is configured for this recording, so the specialist outputs and the brief show the
-conspicuously labelled SIMULATED workflow output described above — the collaboration mechanics
+conspicuously labelled SIMULATED workflow output described above; the collaboration mechanics
 are the same either way.
 
 ## What it is
 
 Modern AI tools are single-player: one human, one chat, one context. Real work happens in teams.
-XYZZY lets multiple humans and AI agents share a room — a common event history, artifacts, tasks,
-and decisions — persisted in SQLite with WebSocket-driven real-time sync. Agents branch out in
+XYZZY lets multiple humans and AI agents share a room: a common event history, artifacts, tasks,
+and decisions, persisted in SQLite with WebSocket-driven real-time sync. Agents branch out in
 parallel, a human selects or excludes what comes back, and the room publishes an immutable
 Decision Brief with the evidence chain behind it.
 
@@ -47,7 +47,7 @@ re-read from the room's own state at the moment it acts, so leaving a room or lo
 effect immediately, mid-task.
 
 **Provable.** Every room's event log is hash-chained: each event is hashed against the one
-before it, so altering or deleting a row breaks every hash after it — tamper-evident by
+before it, so altering or deleting a row breaks every hash after it: tamper-evident by
 construction, checkable with the audit CLI. Each Decision links to the Claims and AgentOutputs
 behind it, so a synthesis is inspectable down to the run that produced it.
 
@@ -57,16 +57,16 @@ Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 lice
 ## Core Capabilities
 
 - **Persistent rooms** with durable event sourcing (every action is an ordered event)
-- **Multi-agent orchestration** — spawn, pause, resume, redirect, and delegate between agents
-- **Human-in-the-loop** — request/approve/reject agent actions before execution
-- **Artifact versioning** — create and version documents, code, and other artifacts
-- **Selective synthesis** — explicitly include/exclude outputs and publish immutable Decision Briefs
-- **Evidence ontology** — typed, reviewable Decision → Claim → AgentOutput relationships
-- **Bounded Meta** — permission-aware “why” and decision-evidence answers with exact drill-down
-- **Decision tracking** — record and audit architectural and product decisions
-- **Shared memory** — room-scoped, workspace-scoped, and org-scoped memory
-- **Real-time collaboration** — WebSocket broadcasting of all room events
-- **Reconnect support** — full state snapshot + incremental event replay on reconnect
+- **Multi-agent orchestration:** spawn, pause, resume, redirect, and delegate between agents
+- **Human-in-the-loop:** request/approve/reject agent actions before execution
+- **Artifact versioning:** create and version documents, code, and other artifacts
+- **Selective synthesis:** explicitly include/exclude outputs and publish immutable Decision Briefs
+- **Evidence ontology:** typed, reviewable Decision → Claim → AgentOutput relationships
+- **Bounded Meta:** permission-aware “why” and decision-evidence answers with exact drill-down
+- **Decision tracking:** record and audit architectural and product decisions
+- **Shared memory:** room-scoped, workspace-scoped, and org-scoped memory
+- **Real-time collaboration:** WebSocket broadcasting of all room events
+- **Reconnect support:** full state snapshot + incremental event replay on reconnect
 
 ## Architecture
 
@@ -174,8 +174,8 @@ pip install -e ".[dev]"
 
 macOS has shipped no `python` command since 12.3, and `/usr/bin/python3` is a
 stub that offers to install the Command Line Tools rather than an interpreter
-worth building against, so create the virtualenv with a real `python3` —
-`brew install python@3.13`, or the installer from python.org. Once `.venv` is
+worth building against, so create the virtualenv with a real `python3`
+(`brew install python@3.13`, or the installer from python.org). Once `.venv` is
 activated, plain `python` is that virtualenv's interpreter and every command
 below works as written. Apple silicon needs nothing special: every dependency
 resolves to an arm64 wheel.
@@ -189,7 +189,7 @@ simulator, which is enough for the whole workflow.
 Credentials live in the database, hashed, one row per token, revocable
 without a restart. `XYZZY_AUTH_TOKENS` is bootstrap only: its tokens are
 ingested at startup, and a token an operator revoked stays revoked across
-restarts. Mint and revoke real credentials with the operator CLI — the token
+restarts. Mint and revoke real credentials with the operator CLI: the token
 is printed once at mint time and never stored:
 
 ```bash
@@ -214,10 +214,10 @@ python -m multiplayer.server
 ### Local models
 
 Set `XYZZY_LOCAL_MODEL_BASE_URL` to point specialists at any OpenAI-compatible
-chat-completions server instead of the OpenAI API — Ollama, LM Studio, vLLM,
-and llama.cpp's server all qualify. It takes priority over `OPENAI_API_KEY`
+chat-completions server instead of the OpenAI API (Ollama, LM Studio, vLLM,
+and llama.cpp's server all qualify). It takes priority over `OPENAI_API_KEY`
 when both are set. `XYZZY_OPENAI_MODEL` still names the model; `OPENAI_API_KEY`
-is optional here and, when set, is sent as a bearer token — to the host the base
+is optional here and, when set, is sent as a bearer token to the host the base
 URL names, so unset the key (or use a placeholder) when pointing at a local
 runtime you do not want your OpenAI key sent to.
 
@@ -275,8 +275,8 @@ fleet.
 
 ### Signing in through an identity provider
 
-SSO is additive. With none of these set the server behaves exactly as before —
-bootstrap tokens and `manage token mint` — so a deployment without a provider is
+SSO is additive. With none of these set the server behaves exactly as before:
+bootstrap tokens and `manage token mint`, so a deployment without a provider is
 untouched.
 
 | Variable | What it decides |
@@ -287,9 +287,9 @@ untouched.
 | `XYZZY_OIDC_REDIRECT_URI` | Where the provider sends the browser back. |
 | `XYZZY_OIDC_SCOPES` | Space separated; `openid profile email` by default. |
 | `XYZZY_OIDC_POST_LOGOUT_REDIRECTS` | Comma-separated allowlist. A redirect target taken from a request would be an open redirect. |
-| `XYZZY_SESSION_IDLE_SECONDS` | Idle clock, 1800 by default — Keycloak's. |
-| `XYZZY_SESSION_ABSOLUTE_SECONDS` | Absolute ceiling, 36000 by default — Keycloak's. |
-| `XYZZY_SESSION_ACCESS_SECONDS` | How long one access credential lives before it must be refreshed, 300 by default — Keycloak's. |
+| `XYZZY_SESSION_IDLE_SECONDS` | Idle clock, 1800 by default (Keycloak's). |
+| `XYZZY_SESSION_ABSOLUTE_SECONDS` | Absolute ceiling, 36000 by default (Keycloak's). |
+| `XYZZY_SESSION_ACCESS_SECONDS` | How long one access credential lives before it must be refreshed, 300 by default (Keycloak's). |
 | `XYZZY_OIDC_ALLOW_UNVERIFIABLE_SESSIONS` | Accept a login from a provider that issues no refresh token. Off by default, because such a session can never be re-checked; when on, it is capped at 15 minutes. |
 
 `GET /api/v1/auth/login` starts the flow, `GET /api/v1/auth/callback` finishes it
@@ -302,7 +302,7 @@ must too.
 
 Three things worth knowing before you deploy it. A refresh token is spendable
 once, and presenting a spent one revokes the entire session rather than that
-token — a replay means a copy exists somewhere it should not, and revoking only
+token: a replay means a copy exists somewhere it should not, and revoking only
 the copy leaves whoever holds the original inside. And an SSO login is keyed on
 the provider's issuer and subject, never on the email address, so it does **not**
 attach to an operator-created account that happens to share an email. Linking
@@ -321,7 +321,7 @@ The browser itself never sees either token. `GET /api/v1/auth/callback` sets a
 cookie only when the request prefers `text/html` (a browser arriving by
 redirect); that cookie carries the access token alone, HttpOnly, `__Host-`
 prefixed on an HTTPS deployment, and expires with the session's idle clock.
-Every other caller — curl, an agent, `refresh`/`logout` — still gets the JSON
+Every other caller (curl, an agent, `refresh`/`logout`) still gets the JSON
 body with both tokens, unchanged. A cookie authenticates an HTTP request only
 when it also carries header `X-XYZZY-Client: web`, on every method including
 GET, which is what keeps a mutating GET like `/auth/end-session` out of CSRF
@@ -330,7 +330,7 @@ preflight `XYZZY_CORS_ORIGINS` refuses, and a top-level navigation cannot
 attach one at all. A cookie-authed WebSocket cannot carry that header either,
 so it is gated on `Origin` matching `configured_origins()` exactly instead.
 
-**Trying it locally:** `scripts/dev_idp.py` is a throwaway identity provider —
+**Trying it locally:** `scripts/dev_idp.py` is a throwaway identity provider:
 stdlib/FastAPI, one hardcoded user, a fresh RS256 key generated on every start.
 It refuses to run unless its own issuer is a loopback host, because it trusts
 every caller completely.
@@ -365,7 +365,7 @@ document.
 `tasks/get`, `tasks/cancel`, `tasks/resubscribe`,
 `agent/getAuthenticatedExtendedCard`, and the two `tasks/pushNotificationConfig`
 methods. The card advertises `pushNotifications: false` and those two refuse by
-name — a webhook fan-out would be a second delivery path with weaker guarantees
+name, because a webhook fan-out would be a second delivery path with weaker guarantees
 than the durable ordered log clients already have. Streaming is
 Server-Sent-Events over that same log, not a parallel one.
 
@@ -376,7 +376,7 @@ imaginary; a task you may not read answers exactly as a task that does not exist
 
 Two rules about delegation are worth knowing before you wire agents to each
 other. What a delegate may spend is its asker's own authority intersected with
-its own, re-read from durable rows at the moment of spending — narrow the asker
+its own, re-read from durable rows at the moment of spending: narrow the asker
 mid-task and the delegate narrows with it, and an asker that has left the room
 lends nothing. And the chain a delegation belongs to is read from the delegating
 agent's own open run rather than taken from the request, so an agent cannot
@@ -404,7 +404,7 @@ docker run -p 8000:8000 -v xyzzy-data:/data -e XYZZY_AUTH_TOKENS='{"local-dev-to
 ```
 
 No account, no config, nothing to try alone: `docker compose --profile demo up` (or
-`docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/project-nexus-yr/xyzzy`, the published image —
+`docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/project-nexus-yr/xyzzy`, the published image;
 see [Try it](#try-it) above) opens a seeded demo workspace at http://localhost:8000, signed in
 with one click.
 
@@ -427,7 +427,7 @@ python -m pytest tests/regression/ -v
 
 ## Current Status
 
-The current repository gate is 857 passing tests plus Ruff format/check and strict `mypy src`,
+The current repository gate is 954 passing tests plus Ruff format/check and strict `mypy src`,
 run on every push and pull request by `.github/workflows/ci.yml`.
 The suite covers:
 - Unit tests for domain models
@@ -438,12 +438,33 @@ The suite covers:
 - Regression tests for reconnect correctness
 - File-backed acknowledgement latency and exact zero-loss event persistence
 
-## Known Limitations
+## Scaling out
 
-- **Live model credentials are not exercised in CI** — provider behavior is verified with a fake
-  HTTP transport; a real Responses API run requires a server-side `OPENAI_API_KEY`
-- **Single-process** — no Redis/Postgres for horizontal scaling
+One process is the default and the recommendation until a real deployment
+outgrows it. When one does, set `XYZZY_REDIS_URL` (install with
+`pip install "xyzzy[redis]"`) and run several server processes against the
+same database file: room events, session revocations, and user notifications
+fan out across processes through Redis pub/sub, and presence stays correct
+cluster-wide through keys that expire on silence. Redis carries no state
+worth backing up. If it goes down, each process degrades to single-process
+behavior and clients recover anything missed through the reconnect replay
+path, because the event log stays the single source of truth.
+
+Two boundaries to respect: all processes must share one real local
+filesystem for the database (network filesystems such as NFS or SMB are
+unsupported), and rate limits count per process, so divide the budget or
+limit at the load balancer.
+
+## Verifying the live provider path
+
+CI verifies provider behavior against a fake HTTP transport on every push,
+which keeps the gates free and deterministic. The `live-provider` workflow
+is the opt-in other half: trigger it by hand (Actions tab) with an
+`OPENAI_API_KEY` repository secret configured, and it spends one real API
+call proving the genuine provider path produces model-written output.
+Locally, the same test runs whenever the key is exported and skips loudly
+when it is not.
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0, see [LICENSE](LICENSE).

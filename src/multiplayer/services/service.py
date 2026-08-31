@@ -415,12 +415,16 @@ class _TurnContinuation:
 
 class MultiplayerService:
     def __init__(
-        self, db: Database, hub: RealtimeHub, known_users: frozenset[str] | None = None
+        self,
+        db: Database,
+        hub: RealtimeHub,
+        known_users: frozenset[str] | None = None,
+        presence_redis: Any | None = None,
     ) -> None:
         self.db = db
         self.repos = Repos(db)
         self.hub = hub
-        self.presence = PresenceService()
+        self.presence = PresenceService(redis_client=presence_redis)
         self.nexus = NexusAgentBridge(db_path=":memory:")
         self.authorization = RoomPolicy(self.repos)
         # Principals the server authenticates; an invitation must name one of them

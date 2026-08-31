@@ -1,0 +1,22 @@
+name: live-provider
+
+# The main gates verify provider behavior against a fake transport, which
+# keeps every push free and deterministic. This workflow is the opt-in other
+# half: triggered by hand, it spends one real API call to prove the genuine
+# provider path produces model-written output. It needs the OPENAI_API_KEY
+# repository secret; without it the test skips and the run says so.
+on:
+  workflow_dispatch:
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/integration/test_live_provider.py -v
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

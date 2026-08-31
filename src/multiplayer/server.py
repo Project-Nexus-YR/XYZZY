@@ -126,8 +126,24 @@ def create_app(
     demo: bool | None = None,
 ) -> FastAPI:
     db = Database(db_path)
-    hub = RealtimeHub()
     metrics = Metrics(version=__version__)
+
+    # Absent (the default): one process, exactly today's behavior, and no
+    # redis import ever happens. Present: the hub gains a cross-process
+    # fan-out layer and presence moves from process memory to Redis TTL keys.
+    # See src/multiplayer/realtime/fanout.py for the guarantee this upholds.
+    redis_url = os.environ.get("XYZZY_REDIS_URL", "").strip()
+    hub = RealtimeHub()
+    fanout = None
+    presence_redis = None
+    if redis_url:
+        import redis.asyncio as redis_asyncio
+
+        from .realtime.fanout import RedisFanout
+
+        presence_redis = redis_asyncio.from_url(redis_url)
+        fanout = RedisFanout(presence_redis, hub, metrics=metrics)
+        hub.attach_fanout(fanout)
     demo_requested = _demo_mode_requested() if demo is None else demo
     if auth_tokens is None:
         raw_tokens = os.environ.get("XYZZY_AUTH_TOKENS", "{}")
@@ -150,7 +166,9 @@ def create_app(
                 "or XYZZY_AUTH_TOKENS"
             )
         auth_tokens = {DEMO_BEARER_TOKEN: DEMO_USER_ID}
-    svc = MultiplayerService(db, hub, known_users=frozenset(auth_tokens.values()))
+    svc = MultiplayerService(
+        db, hub, known_users=frozenset(auth_tokens.values()), presence_redis=presence_redis
+    )
     sessions = SessionService(
         db=db,
         repos=svc.repos,
@@ -184,7 +202,11 @@ def create_app(
         set_sessions(sessions)
         set_demo_enabled(demo_requested)
         sweeper = asyncio.create_task(sweep_run_leases())
+        if fanout is not None:
+            fanout.start()
         yield
+        if fanout is not None:
+            await fanout.stop()
         sweeper.cancel()
         with suppress(asyncio.CancelledError):
             await sweeper
