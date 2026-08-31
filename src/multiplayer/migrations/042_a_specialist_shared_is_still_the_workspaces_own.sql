@@ -1,0 +1,31 @@
+-- A specialist shared is still the workspace's own.
+--
+-- Every agent_template row so far answers to exactly one workspace (038) or
+-- to nobody (a built-in). Sharing needs a third state: a workspace's own
+-- template, visible to every other workspace in the same organization, still
+-- owned and still retractable by the workspace that wrote it. shared_at is
+-- that state as a written fact, the same idiom deleted_at already uses here:
+-- null means private, a timestamp means "visible org-wide since this
+-- moment," and unsetting it is a write, not a delete.
+--
+-- The smallest honest slice of "sharing" stops at the organization boundary
+-- distribution or trust machinery beyond it is explicitly parked, so this
+-- migration adds one column, not a grants table. A built-in (workspace_id
+-- NULL) is already global and never needs this column set; the service layer
+-- refuses to set it on one.
+--
+-- Visibility crosses workspaces, so listing a workspace's shared-in templates
+-- joins agent_templates to workspaces on org_id — a query 038's
+-- idx_agent_templates_workspace does not serve, since that index answers "this
+-- workspace's own rows," not "every workspace in this org." No new index is
+-- added for it: the join's selectivity comes from shared_at IS NOT NULL,
+-- which is expected to stay a small fraction of all templates, and this
+-- workspace round does not carry a benchmark showing that scan matters yet.
+--
+-- Spawning a shared template is the same check-then-use class this workspace
+-- has relocated eighteen times already (033-040): the capability that made a
+-- template spawnable — here, its shared_at being set and the two workspaces
+-- sharing an org — must be re-read inside the transaction that spawns, or an
+-- unshare committing between the check and the write would spawn an agent
+-- from a template the sharing workspace had already revoked.
+ALTER TABLE agent_templates ADD COLUMN shared_at TEXT;

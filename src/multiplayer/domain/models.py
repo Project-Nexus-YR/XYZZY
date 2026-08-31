@@ -265,6 +265,30 @@ class AgentTemplate:
     # template copied its fields onto itself, so retiring the template must not
     # break the FK agent_instances.template_id still holds against it.
     deleted_at: datetime | None = None
+    # None means private to workspace_id; a timestamp means visible org-wide
+    # since that moment. Never set on a built-in (workspace_id is None) —
+    # a built-in is already global.
+    shared_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RoomTemplate:
+    """A workspace's saved room recipe: a name and the specialists to preselect.
+
+    agent_template_ids names templates, not rows the DB enforces referentially:
+    an id can legitimately point at a template deleted after this recipe was
+    saved, and that is a refused DomainError at room-creation time, not a
+    dangling FK at save time.
+    """
+
+    template_id: str
+    workspace_id: str
+    name: str
+    description: str = ""
+    agent_template_ids: tuple[str, ...] = ()
+    created_by: str = ""
+    created_at: datetime = field(default_factory=utcnow)
+    deleted_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

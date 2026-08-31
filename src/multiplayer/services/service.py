@@ -108,6 +108,7 @@ from ..domain.models import (
     RoomMember,
     RoomParticipantHandle,
     RoomStatus,
+    RoomTemplate,
     RunSettlement,
     SearchHit,
     Session,
@@ -1042,7 +1043,12 @@ class MultiplayerService:
     # ── Room ─────────────────────────────────────────────────────────────────
 
     async def create_room(
-        self, workspace_id: str, name: str, creator_id: str, description: str = ""
+        self,
+        workspace_id: str,
+        name: str,
+        creator_id: str,
+        description: str = "",
+        room_template_id: str | None = None,
     ) -> Room:
         name = self._validate_non_empty(name, "room name")
         room = Room(
@@ -1052,6 +1058,13 @@ class MultiplayerService:
             description=description,
             created_by=creator_id,
         )
+        room_template: RoomTemplate | None = None
+        if room_template_id is not None:
+            room_template = await self.repos.room_templates.get(room_template_id)
+            if room_template is None or room_template.deleted_at is not None:
+                raise DomainError(f"room template not found: {room_template_id}")
+            if room_template.workspace_id != workspace_id:
+                raise DomainError(f"room template not found in workspace: {room_template_id}")
         async with self.db.transaction():
             # Serializing the duplicate check and the insert turns a concurrent
             # duplicate create into a clean rejection rather than two identical
@@ -1062,22 +1075,70 @@ class MultiplayerService:
                 for r in existing
             ):
                 raise DomainError("a channel with that name already exists")
+            # A recipe is read once, at save time, and again here, fresh: a
+            # specialist it named can have been deleted or unshared since. This
+            # room must not exist half-populated, so the whole create is refused
+            # before a single row is written.
+            spawn_templates: list[AgentTemplate] = []
+            if room_template is not None:
+                for agent_template_id in room_template.agent_template_ids:
+                    agent_template = await self.repos.agents.get_template(agent_template_id)
+                    if agent_template is None or not await self._agent_template_usable_in_workspace(
+                        agent_template, workspace_id
+                    ):
+                        raise DomainError(
+                            "room template names a specialist no longer available: "
+                            f"{agent_template_id}"
+                        )
+                    spawn_templates.append(agent_template)
             await self.repos.rooms.create(room)
             await self.repos.room_members.add(
                 RoomMember(room_id=room.room_id, user_id=creator_id, role="admin")
             )
             await self._issue_handle(room.room_id, ParticipantType.USER, creator_id, creator_id)
-            event = await self.repos.events.append_with_next_sequence_in_transaction(
-                RoomEvent(
-                    room_id=room.room_id,
-                    sequence=0,
-                    event_type=EventType.ROOM_CREATED,
-                    payload={"name": name, "description": description},
-                    actor_id=creator_id,
-                    actor_type="user",
+            payload: dict[str, Any] = {"name": name, "description": description}
+            if room_template_id is not None:
+                payload["room_template_id"] = room_template_id
+            events = [
+                await self.repos.events.append_with_next_sequence_in_transaction(
+                    RoomEvent(
+                        room_id=room.room_id,
+                        sequence=0,
+                        event_type=EventType.ROOM_CREATED,
+                        payload=payload,
+                        actor_id=creator_id,
+                        actor_type="user",
+                    )
                 )
-            )
-        await self._broadcast_persisted_events([event])
+            ]
+            # The room row and every preselected specialist commit or roll back
+            # together: writing the spawns here, inside this same transaction,
+            # rather than as separate spawn_agent calls after commit, closes the
+            # 19th appearance of the check-then-use class — a template deleted or
+            # unshared in the gap between commit and a later spawn call would
+            # otherwise leave a committed room half-populated.
+            for agent_template in spawn_templates:
+                if agent_template.workspace_id is not None:
+                    agent_template_prompt = fenced(
+                        screen(agent_template.system_prompt, "agent template")
+                    )
+                else:
+                    agent_template_prompt = agent_template.system_prompt
+                _agent, agent_events = await self._spawn_agent_writes_in_transaction(
+                    room.room_id,
+                    agent_template,
+                    agent_template_prompt,
+                    None,
+                    None,
+                    "",
+                    "",
+                    creator_id,
+                    NEXUS_HARNESS_ID,
+                    AddressingMode.ANYONE,
+                    room,
+                )
+                events.extend(agent_events)
+        await self._broadcast_persisted_events(events)
         return room
 
     async def get_room(self, room_id: str) -> Room:
@@ -1439,6 +1500,28 @@ class MultiplayerService:
         """Built-ins plus this workspace's own live templates."""
         return await self.repos.agents.list_visible_to_workspace(workspace_id)
 
+    async def _is_shared_into(self, template: AgentTemplate, target_workspace_id: str) -> bool:
+        """Whether a shared template is currently spawnable from another workspace.
+
+        Re-read fresh at every call site, never cached: unsetting shared_at must
+        revoke spawnability from outside the origin workspace immediately.
+        """
+        if template.shared_at is None or template.workspace_id is None:
+            return False
+        target = await self.repos.workspaces.get(target_workspace_id)
+        origin = await self.repos.workspaces.get(template.workspace_id)
+        return target is not None and origin is not None and target.org_id == origin.org_id
+
+    async def _agent_template_usable_in_workspace(
+        self, template: AgentTemplate, workspace_id: str
+    ) -> bool:
+        """A built-in, this workspace's own live template, or one shared into it."""
+        if template.deleted_at is not None:
+            return False
+        if template.workspace_id is None or template.workspace_id == workspace_id:
+            return True
+        return await self._is_shared_into(template, workspace_id)
+
     async def create_agent_template(
         self, workspace_id: str, name: str, role: str, system_prompt: str, created_by: str
     ) -> AgentTemplate:
@@ -1496,6 +1579,202 @@ class MultiplayerService:
             # agent_instances.template_id holds against this row intact.
             await self.repos.agents.soft_delete_template(template_id, utcnow())
 
+    async def list_org_shared_agent_templates(self, workspace_id: str) -> list[AgentTemplate]:
+        """Live templates other workspaces in this workspace's organization shared."""
+        workspace = await self.repos.workspaces.get(workspace_id)
+        if workspace is None:
+            raise DomainError(f"workspace not found: {workspace_id}")
+        return await self.repos.agents.list_shared_for_org(workspace.org_id, workspace_id)
+
+    async def share_agent_template(
+        self, workspace_id: str, template_id: str, requested_by: str
+    ) -> AgentTemplate:
+        """Distribution/trust machinery beyond the organization stays parked (spec §G):
+        this only flips org-wide visibility on, owned and retractable by this workspace.
+        """
+        require_human_boundary("agent_template.share")
+        async with self.db.transaction():
+            template = await self.repos.agents.get_template(template_id)
+            if template is None:
+                raise DomainError(f"agent template not found: {template_id}")
+            if template.workspace_id is None:
+                raise DomainError("built-in agent templates are already global")
+            if template.workspace_id != workspace_id:
+                raise DomainError(f"agent template not found in workspace: {template_id}")
+            if template.deleted_at is not None:
+                raise DomainError(f"agent template was deleted: {template_id}")
+            member = await self.repos.workspaces.get_member(workspace_id, requested_by)
+            is_admin = member is not None and member.role == "admin"
+            if not is_admin and requested_by != template.created_by:
+                raise AuthorizationError("workspace access forbidden")
+            shared_at = utcnow()
+            await self.repos.agents.share_template(template_id, shared_at)
+        return replace(template, shared_at=shared_at)
+
+    async def unshare_agent_template(
+        self, workspace_id: str, template_id: str, requested_by: str
+    ) -> AgentTemplate:
+        require_human_boundary("agent_template.unshare")
+        async with self.db.transaction():
+            template = await self.repos.agents.get_template(template_id)
+            if template is None:
+                raise DomainError(f"agent template not found: {template_id}")
+            if template.workspace_id != workspace_id:
+                raise DomainError(f"agent template not found in workspace: {template_id}")
+            member = await self.repos.workspaces.get_member(workspace_id, requested_by)
+            is_admin = member is not None and member.role == "admin"
+            if not is_admin and requested_by != template.created_by:
+                raise AuthorizationError("workspace access forbidden")
+            await self.repos.agents.unshare_template(template_id)
+        return replace(template, shared_at=None)
+
+    # ── Room templates ───────────────────────────────────────────────────────
+
+    async def create_room_template(
+        self,
+        workspace_id: str,
+        name: str,
+        description: str,
+        agent_template_ids: list[str],
+        created_by: str,
+    ) -> RoomTemplate:
+        """A workspace's saved room recipe. Every specialist it names must be one
+        this workspace could spawn right now, or the recipe would make a promise
+        room creation could not keep."""
+        require_human_boundary("room_template.create")
+        name = self._validate_non_empty(name, "room template name")
+        template = RoomTemplate(
+            template_id=new_id("rtmpl"),
+            workspace_id=workspace_id,
+            name=name,
+            description=description,
+            agent_template_ids=tuple(agent_template_ids),
+            created_by=created_by,
+        )
+        async with self.db.transaction():
+            await self.authorization.require_workspace_member(workspace_id, created_by)
+            existing = await self.repos.room_templates.list_live_by_workspace(workspace_id)
+            if any(t.name.casefold() == name.casefold() for t in existing):
+                raise DomainError(
+                    f"a room template named {name!r} already exists in this workspace"
+                )
+            for agent_template_id in agent_template_ids:
+                agent_template = await self.repos.agents.get_template(agent_template_id)
+                if agent_template is None or not await self._agent_template_usable_in_workspace(
+                    agent_template, workspace_id
+                ):
+                    raise DomainError(
+                        f"agent template not spawnable in this workspace: {agent_template_id}"
+                    )
+            await self.repos.room_templates.create(template)
+        return template
+
+    async def list_room_templates(self, workspace_id: str) -> list[RoomTemplate]:
+        return await self.repos.room_templates.list_live_by_workspace(workspace_id)
+
+    async def delete_room_template(
+        self, workspace_id: str, template_id: str, requested_by: str
+    ) -> None:
+        require_human_boundary("room_template.delete")
+        async with self.db.transaction():
+            template = await self.repos.room_templates.get(template_id)
+            if template is None or template.deleted_at is not None:
+                raise DomainError(f"room template not found: {template_id}")
+            if template.workspace_id != workspace_id:
+                raise DomainError(f"room template not found in workspace: {template_id}")
+            member = await self.repos.workspaces.get_member(workspace_id, requested_by)
+            is_admin = member is not None and member.role == "admin"
+            if not is_admin and requested_by != template.created_by:
+                raise AuthorizationError("workspace access forbidden")
+            await self.repos.room_templates.soft_delete(template_id, utcnow())
+
+    async def _spawn_agent_writes_in_transaction(
+        self,
+        room_id: str,
+        template: AgentTemplate,
+        template_system_prompt: str,
+        name: str | None,
+        system_prompt: str | None,
+        model_provider: str,
+        model_name: str,
+        requested_by: str,
+        harness_id: str,
+        addressing_mode: AddressingMode,
+        room: Room | None,
+    ) -> tuple[AgentInstance, list[RoomEvent]]:
+        """The write phase of a spawn, assuming the caller already holds an open
+        transaction and has already validated the template. Shared by spawn_agent's
+        own transaction and by create_room's room-plus-recipe transaction, so a
+        room created from a template either commits with every specialist or not
+        at all — never half-populated.
+        """
+        agent = AgentInstance(
+            agent_id=new_id("agent"),
+            template_id=template.template_id,
+            room_id=room_id,
+            name=name or template.name,
+            role=template.role,
+            system_prompt=system_prompt or template_system_prompt,
+            capabilities=template.capabilities,
+            model_provider=model_provider,
+            model_name=model_name,
+            harness_id=harness_id,
+        )
+        identity = AgentIdentity(
+            identity_id=new_id("ident"),
+            agent_id=agent.agent_id,
+            proof_mode=ProofMode.IN_PROCESS,
+        )
+        addressing = AgentAddressing(
+            agent_id=agent.agent_id,
+            room_id=room_id,
+            mode=addressing_mode,
+            owner_user_id=requested_by or (room.created_by if room is not None else ""),
+            updated_by=requested_by or "system",
+        )
+        await self.repos.agents.create_instance(agent)
+        await self.repos.agents.add_room_membership(
+            AgentRoomMembership(agent_id=agent.agent_id, room_id=room_id)
+        )
+        await self.repos.agent_identities.create_in_transaction(identity)
+        await self.repos.agent_addressing.upsert_in_transaction(addressing)
+        handle = await self._issue_handle(
+            room_id, ParticipantType.AGENT, agent.agent_id, agent.name
+        )
+        events = [
+            await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.AGENT_JOINED_ROOM,
+                    payload={
+                        "agent_id": agent.agent_id,
+                        "name": agent.name,
+                        "handle": handle,
+                        "role": agent.role,
+                    },
+                    actor_id=agent.agent_id,
+                    actor_type="agent",
+                )
+            ),
+            await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=room_id,
+                    sequence=0,
+                    event_type=EventType.AGENT_IDENTITY_REGISTERED,
+                    payload={
+                        "agent_id": agent.agent_id,
+                        "identity_id": identity.identity_id,
+                        "proof_mode": identity.proof_mode.value,
+                        "harness_id": harness_id,
+                    },
+                    actor_id=agent.agent_id,
+                    actor_type="agent",
+                )
+            ),
+        ]
+        return agent, events
+
     async def spawn_agent(
         self,
         room_id: str,
@@ -1519,85 +1798,49 @@ class MultiplayerService:
         if harness_id not in KNOWN_HARNESS_IDS:
             raise DomainError(f"no harness is registered as {harness_id!r}")
         room = await self.repos.rooms.get(room_id)
+        cross_workspace = False
         if template.workspace_id is not None:
-            if room is None or template.workspace_id != room.workspace_id:
+            if room is None:
+                raise DomainError(f"agent template {template_id} belongs to a different workspace")
+            cross_workspace = template.workspace_id != room.workspace_id
+            if cross_workspace and not await self._is_shared_into(template, room.workspace_id):
                 raise DomainError(f"agent template {template_id} belongs to a different workspace")
             # A workspace member wrote this prompt, not this deployment's developer.
-            # It reaches the model exactly like any other member-authored text does.
+            # It reaches the model exactly like any other member-authored text does,
+            # whether the spawning room belongs to the authoring workspace or to
+            # another workspace this template was shared into.
             template_system_prompt = fenced(screen(template.system_prompt, "agent template"))
         else:
             template_system_prompt = template.system_prompt
-        agent = AgentInstance(
-            agent_id=new_id("agent"),
-            template_id=template_id,
-            room_id=room_id,
-            name=name or template.name,
-            role=template.role,
-            system_prompt=system_prompt or template_system_prompt,
-            capabilities=template.capabilities,
-            model_provider=model_provider,
-            model_name=model_name,
-            harness_id=harness_id,
-        )
-        identity = AgentIdentity(
-            identity_id=new_id("ident"),
-            agent_id=agent.agent_id,
-            proof_mode=ProofMode.IN_PROCESS,
-        )
-        # An agent spawned into a shared channel answers that channel; narrowing it is
-        # an explicit ADMINISTER act. The room membership and the capability
-        # intersection still bound what any of them can make it do.
-        addressing = AgentAddressing(
-            agent_id=agent.agent_id,
-            room_id=room_id,
-            mode=addressing_mode,
-            owner_user_id=requested_by or (room.created_by if room is not None else ""),
-            updated_by=requested_by or "system",
-        )
         async with self.db.transaction():
             if require_member:
                 await self._require_mutate_in_transaction(room_id, requested_by)
-            await self.repos.agents.create_instance(agent)
-            await self.repos.agents.add_room_membership(
-                AgentRoomMembership(agent_id=agent.agent_id, room_id=room_id)
-            )
-            await self.repos.agent_identities.create_in_transaction(identity)
-            await self.repos.agent_addressing.upsert_in_transaction(addressing)
-            handle = await self._issue_handle(
-                room_id, ParticipantType.AGENT, agent.agent_id, agent.name
-            )
-            events = [
-                await self.repos.events.append_with_next_sequence_in_transaction(
-                    RoomEvent(
-                        room_id=room_id,
-                        sequence=0,
-                        event_type=EventType.AGENT_JOINED_ROOM,
-                        payload={
-                            "agent_id": agent.agent_id,
-                            "name": agent.name,
-                            "handle": handle,
-                            "role": agent.role,
-                        },
-                        actor_id=agent.agent_id,
-                        actor_type="agent",
+            if cross_workspace:
+                # The check-then-use class this schema has relocated eighteen
+                # times (033-040): re-read shared_at fresh, inside the
+                # transaction that spawns, so an unshare committing in between
+                # the check above and this write revokes spawnability in time.
+                assert room is not None
+                fresh_template = await self.repos.agents.get_template(template_id)
+                if fresh_template is None or not await self._is_shared_into(
+                    fresh_template, room.workspace_id
+                ):
+                    raise DomainError(
+                        f"agent template {template_id} belongs to a different workspace"
                     )
-                ),
-                await self.repos.events.append_with_next_sequence_in_transaction(
-                    RoomEvent(
-                        room_id=room_id,
-                        sequence=0,
-                        event_type=EventType.AGENT_IDENTITY_REGISTERED,
-                        payload={
-                            "agent_id": agent.agent_id,
-                            "identity_id": identity.identity_id,
-                            "proof_mode": identity.proof_mode.value,
-                            "harness_id": harness_id,
-                        },
-                        actor_id=agent.agent_id,
-                        actor_type="agent",
-                    )
-                ),
-            ]
+            agent, events = await self._spawn_agent_writes_in_transaction(
+                room_id,
+                template,
+                template_system_prompt,
+                name,
+                system_prompt,
+                model_provider,
+                model_name,
+                requested_by,
+                harness_id,
+                addressing_mode,
+                room,
+            )
         await self._broadcast_persisted_events(events)
         return agent
 

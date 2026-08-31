@@ -90,6 +90,7 @@ from ..domain.models import (
     RoomMember,
     RoomParticipantHandle,
     RoomStatus,
+    RoomTemplate,
     RunSettlement,
     SearchHit,
     SearchObjectKind,
@@ -139,6 +140,7 @@ class Repos:
         self.room_postures = RoomPostureRepo(db)
         self.room_members = RoomMemberRepo(db)
         self.agents = AgentRepo(db)
+        self.room_templates = RoomTemplateRepo(db)
         self.agent_identities = AgentIdentityRepo(db)
         self.agent_addressing = AgentAddressingRepo(db)
         self.agent_runs = AgentRunRepo(db)
@@ -1284,6 +1286,38 @@ class AgentRepo:
         )
         await self.db.commit()
 
+    async def share_template(self, template_id: str, shared_at: datetime) -> None:
+        await self.db.execute(
+            "UPDATE agent_templates SET shared_at = ? WHERE template_id = ?",
+            (serialize_datetime(shared_at), template_id),
+        )
+        await self.db.commit()
+
+    async def unshare_template(self, template_id: str) -> None:
+        await self.db.execute(
+            "UPDATE agent_templates SET shared_at = NULL WHERE template_id = ?",
+            (template_id,),
+        )
+        await self.db.commit()
+
+    async def list_shared_for_org(
+        self, org_id: str, exclude_workspace_id: str
+    ) -> list[AgentTemplate]:
+        """Live templates other workspaces in this organization opted to share.
+
+        Joins to workspaces on org_id: idx_agent_templates_workspace (038)
+        answers "this workspace's own rows," not "every workspace in this org."
+        """
+        rows = await self.db.fetch_all(
+            "SELECT t.* FROM agent_templates t "
+            "JOIN workspaces w ON w.workspace_id = t.workspace_id "
+            "WHERE w.org_id = ? AND t.workspace_id != ? "
+            "AND t.shared_at IS NOT NULL AND t.deleted_at IS NULL "
+            "ORDER BY t.created_at",
+            (org_id, exclude_workspace_id),
+        )
+        return [self._template_from_row(r) for r in rows]
+
     async def create_instance(self, agent: AgentInstance) -> AgentInstance:
         await self.db.execute(
             "INSERT INTO agent_instances(agent_id, template_id, room_id, name, role, status, "
@@ -1432,6 +1466,7 @@ class AgentRepo:
             deleted_at=(
                 datetime.fromisoformat(row["deleted_at"]) if row.get("deleted_at") else None
             ),
+            shared_at=(datetime.fromisoformat(row["shared_at"]) if row.get("shared_at") else None),
         )
 
     def _instance_from_row(self, row: dict[str, Any]) -> AgentInstance:
@@ -1448,6 +1483,63 @@ class AgentRepo:
             model_name=row["model_name"],
             harness_id=row.get("harness_id") or "nexus",
             created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+
+class RoomTemplateRepo:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create(self, template: RoomTemplate) -> RoomTemplate:
+        await self.db.execute(
+            "INSERT INTO room_templates(template_id, workspace_id, name, description, "
+            "agent_template_ids, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                template.template_id,
+                template.workspace_id,
+                template.name,
+                template.description,
+                json.dumps(list(template.agent_template_ids)),
+                template.created_by,
+                serialize_datetime(template.created_at),
+            ),
+        )
+        await self.db.commit()
+        return template
+
+    async def get(self, template_id: str) -> RoomTemplate | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM room_templates WHERE template_id = ?", (template_id,)
+        )
+        return None if row is None else self._from_row(row)
+
+    async def list_live_by_workspace(self, workspace_id: str) -> list[RoomTemplate]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM room_templates WHERE workspace_id = ? AND deleted_at IS NULL "
+            "ORDER BY created_at",
+            (workspace_id,),
+        )
+        return [self._from_row(r) for r in rows]
+
+    async def soft_delete(self, template_id: str, deleted_at: datetime) -> None:
+        await self.db.execute(
+            "UPDATE room_templates SET deleted_at = ? WHERE template_id = ?",
+            (serialize_datetime(deleted_at), template_id),
+        )
+        await self.db.commit()
+
+    def _from_row(self, row: dict[str, Any]) -> RoomTemplate:
+        return RoomTemplate(
+            template_id=row["template_id"],
+            workspace_id=row["workspace_id"],
+            name=row["name"],
+            description=row["description"],
+            agent_template_ids=tuple(json.loads(row["agent_template_ids"])),
+            created_by=row["created_by"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            deleted_at=(
+                datetime.fromisoformat(row["deleted_at"]) if row.get("deleted_at") else None
+            ),
         )
 
 

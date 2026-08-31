@@ -47,6 +47,7 @@ from ..domain.models import (
     OntologyRelationshipKind,
     OntologyReviewAction,
     OutputDisposition,
+    RoomTemplate,
     Session,
     Task,
     TaskPriority,
@@ -332,12 +333,19 @@ class CreateWorkspaceRequest(BaseModel):
 class CreateRoomRequest(BaseModel):
     name: str
     description: str = ""
+    room_template_id: str | None = None
 
 
 class CreateAgentTemplateRequest(BaseModel):
     name: str
     role: str
     system_prompt: str
+
+
+class CreateRoomTemplateRequest(BaseModel):
+    name: str
+    description: str = ""
+    agent_template_ids: list[str] = []
 
 
 class BootstrapWorkspaceRequest(BaseModel):
@@ -1021,7 +1029,9 @@ async def create_room(
     svc = _svc_or_404()
     await _require_workspace(workspace_id, principal)
     try:
-        room = await svc.create_room(workspace_id, req.name, principal.user_id, req.description)
+        room = await svc.create_room(
+            workspace_id, req.name, principal.user_id, req.description, req.room_template_id
+        )
     except DomainError as e:
         raise HTTPException(400, str(e)) from e
     return {"room_id": room.room_id, "name": room.name, "description": room.description}
@@ -1417,10 +1427,22 @@ def _workspace_template_record(t: Any) -> dict[str, Any]:
         "role": t.role,
         "capabilities": sorted(t.capabilities),
         "builtin": t.workspace_id is None,
+        "shared": t.shared_at is not None,
     }
     if t.workspace_id is not None:
         record["created_by"] = t.created_by
     return record
+
+
+def _room_template_record(t: RoomTemplate) -> dict[str, Any]:
+    return {
+        "template_id": t.template_id,
+        "name": t.name,
+        "description": t.description,
+        "agent_template_ids": list(t.agent_template_ids),
+        "created_by": t.created_by,
+        "created_at": t.created_at.isoformat(),
+    }
 
 
 @router.post("/workspaces/{workspace_id}/agent-templates")
@@ -1445,7 +1467,11 @@ async def list_workspace_agent_templates(
     svc = _svc_or_404()
     await _require_workspace(workspace_id, principal)
     templates = await svc.list_workspace_agent_templates(workspace_id)
-    return [_workspace_template_record(t) for t in templates]
+    shared = await svc.list_org_shared_agent_templates(workspace_id)
+    return [_workspace_template_record(t) for t in templates] + [
+        {**_workspace_template_record(t), "shared": True, "origin_workspace_id": t.workspace_id}
+        for t in shared
+    ]
 
 
 @router.delete("/workspaces/{workspace_id}/agent-templates/{template_id}")
@@ -1456,6 +1482,74 @@ async def delete_agent_template(
     await _require_workspace(workspace_id, principal)
     try:
         await svc.delete_agent_template(workspace_id, template_id, principal.user_id)
+    except AuthorizationError as e:
+        raise HTTPException(403, str(e)) from e
+    except DomainError as e:
+        raise HTTPException(404 if "not found" in str(e) else 400, str(e)) from e
+    return {"status": "deleted"}
+
+
+@router.post("/workspaces/{workspace_id}/agent-templates/{template_id}/share")
+async def share_agent_template(
+    workspace_id: str, template_id: str, principal: CurrentUser
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _require_workspace(workspace_id, principal)
+    try:
+        template = await svc.share_agent_template(workspace_id, template_id, principal.user_id)
+    except AuthorizationError as e:
+        raise HTTPException(403, str(e)) from e
+    except DomainError as e:
+        raise HTTPException(404 if "not found" in str(e) else 400, str(e)) from e
+    return _workspace_template_record(template)
+
+
+@router.delete("/workspaces/{workspace_id}/agent-templates/{template_id}/share")
+async def unshare_agent_template(
+    workspace_id: str, template_id: str, principal: CurrentUser
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _require_workspace(workspace_id, principal)
+    try:
+        template = await svc.unshare_agent_template(workspace_id, template_id, principal.user_id)
+    except AuthorizationError as e:
+        raise HTTPException(403, str(e)) from e
+    except DomainError as e:
+        raise HTTPException(404 if "not found" in str(e) else 400, str(e)) from e
+    return _workspace_template_record(template)
+
+
+@router.post("/workspaces/{workspace_id}/room-templates")
+async def create_room_template(
+    workspace_id: str, req: CreateRoomTemplateRequest, principal: CurrentUser
+) -> dict[str, Any]:
+    svc = _svc_or_404()
+    await _require_workspace(workspace_id, principal)
+    try:
+        template = await svc.create_room_template(
+            workspace_id, req.name, req.description, req.agent_template_ids, principal.user_id
+        )
+    except DomainError as e:
+        raise HTTPException(400, str(e)) from e
+    return _room_template_record(template)
+
+
+@router.get("/workspaces/{workspace_id}/room-templates")
+async def list_room_templates(workspace_id: str, principal: CurrentUser) -> list[dict[str, Any]]:
+    svc = _svc_or_404()
+    await _require_workspace(workspace_id, principal)
+    templates = await svc.list_room_templates(workspace_id)
+    return [_room_template_record(t) for t in templates]
+
+
+@router.delete("/workspaces/{workspace_id}/room-templates/{template_id}")
+async def delete_room_template(
+    workspace_id: str, template_id: str, principal: CurrentUser
+) -> dict[str, str]:
+    svc = _svc_or_404()
+    await _require_workspace(workspace_id, principal)
+    try:
+        await svc.delete_room_template(workspace_id, template_id, principal.user_id)
     except AuthorizationError as e:
         raise HTTPException(403, str(e)) from e
     except DomainError as e:
