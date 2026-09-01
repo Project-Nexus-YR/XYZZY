@@ -247,7 +247,7 @@ async def test_the_workflow_only_provider_satisfies_the_model_provider_harness()
     )
 
     assert result.stop_reason is StopReason.END_TURN
-    assert result.provenance["provider_name"] == "workflow-only"
+    assert result.provenance["provider_name"] == "simulated"
     assert "SIMULATED" in seen[0].payload["content"]
 
 

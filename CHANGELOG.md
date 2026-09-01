@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A spawn's per agent model_provider and model_name are no longer accepted
+  and then ignored. Each provider now carries a verified identity read off
+  what it already puts in a response, spawn refuses a caller supplied
+  identity that disagrees with the one this process actually runs, and an
+  empty field is stored as that configured identity so the agent row
+  describes itself. Provenance no longer falls back to an agent declared
+  string when a response omits its own identity; it falls back to the
+  configured provider instead, so an unverified caller string can no longer
+  enter the audit trail.
+
 ### Added
 
 - The realtime hub scales past one process: with `XYZZY_REDIS_URL` set

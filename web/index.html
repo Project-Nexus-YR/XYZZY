@@ -3178,7 +3178,7 @@ function renderOntology(ontology) {
           ? roomOutputs.find(candidate => candidate.output_id === output.source_object_id)
           : null;
         const provider = persistedOutput
-          ? `${persistedOutput.provider_name || 'workflow-only'} / ${persistedOutput.provider_model || 'simulated'}`
+          ? `${persistedOutput.provider_name || 'simulated'} / ${persistedOutput.provider_model || 'simulated'}`
           : 'provider snapshot unavailable';
         const outputHtml = output ? `<div class="ontology-node output" data-ontology-kind="AgentOutput">
           <div class="ontology-node-head"><div class="ontology-label">AgentOutput · ${escHtml(shortId(output.source_object_id))}</div>${ontologyBadge(output)}</div>

@@ -44,6 +44,14 @@ class OpenAIChatCompletionsProvider:
         self._async_transport = async_transport
         self._sync_transport = sync_transport
 
+    #: The verified identity of this provider, reused wherever a response
+    #: omits its own — never a caller-supplied string.
+    provider_name = "openai-chat-completions"
+
+    @property
+    def provider_model(self) -> str:
+        return self.model
+
     @property
     def _url(self) -> str:
         return f"{self._base_url}/chat/completions"
@@ -151,8 +159,8 @@ class OpenAIChatCompletionsProvider:
                 "simulated": False,
             },
             "token_usage": token_usage if isinstance(token_usage, int) else 0,
-            "provider_name": "openai-chat-completions",
-            "provider_model": self.model,
+            "provider_name": self.provider_name,
+            "provider_model": self.provider_model,
             "provider_response_id": (
                 str(payload["id"]) if isinstance(payload.get("id"), str) else ""
             ),

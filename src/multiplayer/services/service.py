@@ -1128,14 +1128,18 @@ class MultiplayerService:
                     )
                 else:
                     agent_template_prompt = agent_template.system_prompt
+                # Template spawns carry no caller-declared model identity, so
+                # resolution can never refuse here; it still runs so the row
+                # stores the configured identity, same as any direct spawn.
+                resolved_provider, resolved_model = self._resolve_model_identity("", "")
                 _agent, agent_events = await self._spawn_agent_writes_in_transaction(
                     room.room_id,
                     agent_template,
                     agent_template_prompt,
                     None,
                     None,
-                    "",
-                    "",
+                    resolved_provider,
+                    resolved_model,
                     creator_id,
                     NEXUS_HARNESS_ID,
                     AddressingMode.ANYONE,
@@ -1692,6 +1696,28 @@ class MultiplayerService:
                 raise AuthorizationError("workspace access forbidden")
             await self.repos.room_templates.soft_delete(template_id, utcnow())
 
+    def _resolve_model_identity(self, model_provider: str, model_name: str) -> tuple[str, str]:
+        """Refuse configuration a spawn cannot honor; fill in what it means when unset.
+
+        A non-empty ``model_provider``/``model_name`` that disagrees with the
+        provider this process actually runs would let the API accept
+        configuration it silently ignores, and the mismatch would then read
+        back from the agent row as if it had been honored. Empty stays
+        allowed and means "the configured provider" - which is what actually
+        runs - and is stored as such so the row describes itself.
+        """
+        configured_provider, configured_model = self.nexus.provider_identity
+        if model_provider and model_provider != configured_provider:
+            raise DomainError(
+                f"model provider {model_provider!r} was requested but this deployment "
+                f"runs {configured_provider!r}"
+            )
+        if model_name and model_name != configured_model:
+            raise DomainError(
+                f"model {model_name!r} was requested but this deployment runs {configured_model!r}"
+            )
+        return model_provider or configured_provider, model_name or configured_model
+
     async def _spawn_agent_writes_in_transaction(
         self,
         room_id: str,
@@ -1794,6 +1820,7 @@ class MultiplayerService:
         addressing_mode: AddressingMode = AddressingMode.ANYONE,
     ) -> AgentInstance:
         require_human_boundary("agent.spawn")
+        model_provider, model_name = self._resolve_model_identity(model_provider, model_name)
         template = await self.repos.agents.get_template(template_id)
         if not template:
             raise DomainError(f"agent template not found: {template_id}")

@@ -60,8 +60,6 @@ class _SpecialistContext:
     name: str
     role: str
     instructions: str
-    provider_name: str
-    provider_model: str
 
 
 class StubMemoryProvider:
@@ -123,6 +121,19 @@ class NexusAgentBridge:
         """The configured provider, for a harness that talks to it directly."""
         return self._model
 
+    @property
+    def provider_identity(self) -> tuple[str, str]:
+        """The verified (provider, model) this process actually runs.
+
+        Read from the provider instance's own attributes, never from a caller
+        or an agent row: this is the one identity a spawn or a provenance
+        record is allowed to trust.
+        """
+        return (
+            str(getattr(self._model, "provider_name", "") or ""),
+            str(getattr(self._model, "provider_model", "") or ""),
+        )
+
     def create_nexus_agent(self, agent_instance: AgentInstance) -> Agent:
         """Convert a multiplayer AgentInstance to a NEXUS Agent."""
         if not _HAS_NEXUS:
@@ -148,8 +159,6 @@ class NexusAgentBridge:
             name=agent_instance.name,
             role=agent_instance.role,
             instructions=agent_instance.system_prompt,
-            provider_name=agent_instance.model_provider,
-            provider_model=agent_instance.model_name,
         )
         if not _HAS_NEXUS:
             run_id = f"run_{execution.execution_id}"
@@ -280,7 +289,6 @@ class NexusAgentBridge:
                     output=output,
                     provider_input=provider_prompt,
                     interventions=interventions,
-                    context=context,
                 ),
             }
 
@@ -308,7 +316,6 @@ class NexusAgentBridge:
                     action,
                     provider_prompt=provider_prompt,
                     interventions=interventions,
-                    context=context,
                 )
             result = self._executor.execute_action(run_id, action)
             self._executor.update_state(run_id)
@@ -324,7 +331,6 @@ class NexusAgentBridge:
                     output=result_data,
                     provider_input=provider_prompt,
                     interventions=interventions,
-                    context=context,
                 ),
             }
         except ModelProviderError as e:
@@ -343,7 +349,6 @@ class NexusAgentBridge:
         *,
         provider_prompt: str,
         interventions: list[str],
-        context: _SpecialistContext | None,
     ) -> dict[str, Any]:
         """One step that asks for a tool, in the one shape every caller reads.
 
@@ -365,7 +370,6 @@ class NexusAgentBridge:
                 output=output,
                 provider_input=provider_prompt,
                 interventions=interventions,
-                context=context,
             ),
         }
 
@@ -389,30 +393,35 @@ class NexusAgentBridge:
             f"Decision prompt:\n{prompt}"
         )
 
-    @staticmethod
     def _provider_provenance(
+        self,
         *,
         response: dict[str, Any],
         output: dict[str, Any],
         provider_input: str,
         interventions: list[str],
-        context: _SpecialistContext | None,
     ) -> dict[str, Any]:
-        """Capture only request/response evidence, never provider credentials."""
+        """Capture only request/response evidence, never provider credentials.
+
+        The identity falls back from what the response itself said, to what
+        this process is actually configured to run. An agent's own declared
+        ``model_provider``/``model_name`` is never consulted here: those are
+        caller-supplied strings, and provenance that trusted them would let an
+        unverified claim into the audit trail.
+        """
         evidence = response.get("provider_evidence")
         if not isinstance(evidence, str):
             content = output.get("content")
             evidence = content if isinstance(content, str) else ""
-        provider_name = response.get("provider_name") or output.get("provider")
-        provider_model = response.get("provider_model") or output.get("model")
+        configured_provider, configured_model = self.provider_identity
+        provider_name = (
+            response.get("provider_name") or output.get("provider") or configured_provider
+        )
+        provider_model = response.get("provider_model") or output.get("model") or configured_model
         return {
             "provider_input": provider_input,
-            "provider_name": str(
-                provider_name or (context.provider_name if context is not None else "")
-            ),
-            "provider_model": str(
-                provider_model or (context.provider_model if context is not None else "")
-            ),
+            "provider_name": str(provider_name),
+            "provider_model": str(provider_model),
             "provider_response_id": str(response.get("provider_response_id") or ""),
             "interventions": list(interventions),
             "provider_evidence": evidence,
@@ -449,7 +458,7 @@ class NexusAgentBridge:
         output = response.get("output")
         output_data = dict(output) if isinstance(output, dict) else {}
         simulated = bool(output_data.get("simulated")) or response.get("provider_name") == (
-            "workflow-only"
+            "simulated"
         )
         if simulated:
             claims = [

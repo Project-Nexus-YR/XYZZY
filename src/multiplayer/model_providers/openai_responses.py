@@ -73,6 +73,11 @@ class WorkflowOnlyModelProvider:
         "it is not an AI analysis and must not be used to make the decision."
     )
 
+    #: The verified identity of this provider: never a real model, always
+    #: labelled plainly so it can never be mistaken for one in an audit trail.
+    provider_name = "simulated"
+    provider_model = ""
+
     def complete(self, prompt: str, response_schema: dict[str, Any]) -> dict[str, Any]:
         del prompt, response_schema
         return {
@@ -84,8 +89,8 @@ class WorkflowOnlyModelProvider:
                 "simulated": True,
             },
             "token_usage": 0,
-            "provider_name": "workflow-only",
-            "provider_model": "",
+            "provider_name": self.provider_name,
+            "provider_model": self.provider_model,
             "provider_response_id": "",
             "provider_evidence": self._CONTENT,
         }
@@ -117,6 +122,14 @@ class OpenAIResponsesProvider:
         self.timeout_seconds = timeout_seconds
         self._async_transport = async_transport
         self._sync_transport = sync_transport
+
+    #: The verified identity of this provider, reused wherever a response
+    #: omits its own — never a caller-supplied string.
+    provider_name = "openai"
+
+    @property
+    def provider_model(self) -> str:
+        return self.model
 
     def _request_payload(self, prompt: str, response_schema: dict[str, Any]) -> dict[str, Any]:
         text: dict[str, Any] = {"verbosity": "medium"}
@@ -222,8 +235,8 @@ class OpenAIResponsesProvider:
                 "simulated": False,
             },
             "token_usage": token_usage if isinstance(token_usage, int) else 0,
-            "provider_name": "openai",
-            "provider_model": self.model,
+            "provider_name": self.provider_name,
+            "provider_model": self.provider_model,
             "provider_response_id": (
                 str(payload["id"]) if isinstance(payload.get("id"), str) else ""
             ),
