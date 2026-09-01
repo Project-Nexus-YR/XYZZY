@@ -223,6 +223,11 @@ is optional here and, when set, is sent as a bearer token to the host the base
 URL names, so unset the key (or use a placeholder) when pointing at a local
 runtime you do not want your OpenAI key sent to.
 
+**This is on purpose, not a leak:** a local base URL sitting behind a keyed
+proxy needs a bearer credential too, and `OPENAI_API_KEY` is reused as that
+credential precisely so a proxy setup like that works without a second
+variable.
+
 ```bash
 # Ollama
 export XYZZY_LOCAL_MODEL_BASE_URL="http://localhost:11434/v1"
@@ -262,6 +267,7 @@ deployment that terminates TLS in front of the server needs the first three.
 | `XYZZY_RATE_LIMIT_PER_MINUTE` | `120` | Requests per minute per bearer token, or per peer address when there is no token. `/api/v1/health` is exempt so a monitor cannot spend a client's budget. |
 | `XYZZY_MAX_BODY_BYTES` | `1048576` | Largest declared request body. A chunked request declares no length, so this caps the honest case only. |
 | `XYZZY_LOG_LEVEL` | `INFO` | Root log level. |
+| `XYZZY_REDIS_URL` | unset | Fans room events, session revocations, and presence out across several server processes sharing one database; see [Scaling out](#scaling-out). |
 
 The rate limiter counts in process memory. It bounds one server's exposure, not a
 fleet's; two replicas behind a load balancer each allow the full budget.
@@ -429,7 +435,7 @@ python -m pytest tests/regression/ -v
 
 ## Current Status
 
-The current repository gate is 954 passing tests plus Ruff format/check and strict `mypy src`,
+The current repository gate is 970 passing tests plus Ruff format/check and strict `mypy src`,
 run on every push and pull request by `.github/workflows/ci.yml`.
 The suite covers:
 - Unit tests for domain models

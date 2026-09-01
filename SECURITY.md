@@ -2,12 +2,12 @@
 
 ## Supported Versions
 
-XYZZY is pre-1.0. The `0.2.x` line is the only one that receives fixes.
+XYZZY is pre-1.0. The `0.3.x` line is the only one that receives fixes.
 
 | Version | Supported |
 | --- | --- |
-| 0.2.x | yes |
-| < 0.2 | no |
+| 0.3.x | yes |
+| < 0.3 | no |
 
 ## Reporting a Vulnerability
 
