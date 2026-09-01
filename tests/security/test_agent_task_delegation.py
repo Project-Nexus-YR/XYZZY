@@ -17,6 +17,7 @@ back, whoever asks and however the race falls out.
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 
@@ -34,7 +35,7 @@ from multiplayer.domain.agent_tasks import (
     TaskNotFoundError,
     UnsupportedOperationError,
 )
-from multiplayer.domain.models import DomainError, ExecutionStatus, RunSettlement
+from multiplayer.domain.models import DomainError, ExecutionStatus, RunSettlement, utcnow
 from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.security.authorization import AuthorizationError
 from multiplayer.security.capabilities import agent_principal
@@ -130,6 +131,36 @@ async def test_the_dispatcher_picks_a_submitted_task_up_and_drives_it_to_an_end(
     assert driven.is_terminal
     assert driven.execution_id is not None
     assert driven.terminal_at is not None
+
+
+@pytest.mark.asyncio
+async def test_the_startup_sweep_dispatches_a_task_stale_since_before_it(service):
+    """A crash between accepting an A2A task and scheduling its background
+    dispatch is the only way a task sits SUBMITTED past the sweep's staleness
+    threshold. `sweep_stale_submitted_agent_tasks` (called from `initialize`,
+    same as the run-lease sweep) is the constant-work recovery: it must find
+    such a task and dispatch it to a terminal state, without anything else
+    ever calling `start_agent_task` for it.
+    """
+    room_id = await _room(service)
+    delegate = await _agent(service, room_id, "Researcher")
+    task = await service.open_agent_task(room_id, delegate, ASK, requested_by=OWNER)
+    assert task.state is AgentTaskState.SUBMITTED
+
+    long_ago = (utcnow() - timedelta(seconds=service._STALE_SUBMITTED_TASK_SECONDS + 5)).isoformat()
+    await service.db.execute(
+        "UPDATE agent_tasks SET created_at = ? WHERE task_id = ?", (long_ago, task.task_id)
+    )
+    await service.db.commit()
+
+    # The drain dispatches inline, one task at a time, so by the time it
+    # returns the stranded task has already been driven - a stronger fact
+    # than "a background dispatch was scheduled".
+    swept = await service.sweep_stale_submitted_agent_tasks()
+    assert swept == 1
+
+    driven = await service.get_agent_task(task.task_id, viewer_id=OWNER)
+    assert driven.is_terminal
 
 
 @pytest.mark.asyncio
@@ -865,6 +896,37 @@ async def test_two_concurrent_starts_leave_no_orphaned_run(service):
     assert executions == [started.execution_id]
     assert len(await _rows(service, "SELECT run_id FROM agent_runs")) == 1
     assert len(await _rows(service, "SELECT session_id FROM sessions")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failure_preparing_the_run_leaves_no_working_orphan(service, monkeypatch):
+    """The WORKING transition used to commit on its own, ahead of the
+    session/execution/run-creation transaction: a failure between the two
+    left the task WORKING with no run behind it forever, because the orphan
+    settler only scans MENTION triggers. Now the whole handoff is one
+    transaction, so a failure anywhere in it must leave the task exactly
+    where it started and write no execution or session row at all.
+    """
+    room_id = await _room(service)
+    delegate = await _agent(service, room_id, "Architect")
+    task = await service.open_agent_task(room_id, delegate, ASK, requested_by=OWNER)
+    before = await service.get_agent_task(task.task_id, viewer_id=OWNER)
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("run preparation failed")
+
+    monkeypatch.setattr(service, "_prepare_agent_run", _boom)
+
+    with pytest.raises(RuntimeError):
+        await service.start_agent_task(task.task_id)
+
+    after = await service.get_agent_task(task.task_id, viewer_id=OWNER)
+    assert after == before
+    assert after.state is AgentTaskState.SUBMITTED
+    assert after.execution_id is None
+    assert await _rows(service, "SELECT execution_id FROM executions") == []
+    assert await _rows(service, "SELECT session_id FROM sessions") == []
+    assert await _rows(service, "SELECT run_id FROM agent_runs") == []
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ from multiplayer.api import routes
 from multiplayer.api.a2a import part_from_a2a, part_to_a2a
 from multiplayer.domain.agent_tasks import Part, PartKind
 from multiplayer.server import create_app
+from multiplayer.services.service import MultiplayerService
 
 TOKENS = {"owner-token": "user_1", "stranger-token": "user_2"}
 AUTH = {"Authorization": "Bearer owner-token"}
@@ -63,6 +64,17 @@ async def _room_with_agent(client: AsyncClient) -> tuple[str, str]:
         )
     ).json()
     return room["room_id"], agent["agent_id"]
+
+
+def _hold_the_task_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep message/send's real accept-and-background-dispatch, but never let
+    the dispatch itself run: these tests drive a task's lifecycle by hand to
+    exercise stream/resubscribe mechanics, and the SIMULATED provider is fast
+    enough to race that manual driving to a terminal state on its own.
+    """
+    monkeypatch.setattr(
+        MultiplayerService, "dispatch_agent_task_in_background", lambda self, task: None
+    )
 
 
 def _send_params(room_id: str, agent_id: str) -> dict[str, Any]:
@@ -154,13 +166,39 @@ async def test_message_send_opens_a_task(client):
 
 
 @pytest.mark.asyncio
+async def test_message_send_actually_dispatches_the_task(client):
+    """message/send used to persist the task and return, with nothing left to
+    ever run it: the dispatcher (`_dispatch_agent_task_run`) had zero
+    production callers, so an A2A task sat SUBMITTED forever. The accept
+    schedules the dispatch as a background task now — non-blocking, so the
+    immediate response is still SUBMITTED, but the task must leave that state
+    on its own shortly after, against the SIMULATED provider tests run
+    under (no model provider is configured for this fixture).
+    """
+    room_id, agent_id = await _room_with_agent(client)
+    opened = (await _call(client, "message/send", _send_params(room_id, agent_id))).json()["result"]
+    assert opened["status"]["state"] == "submitted"
+
+    for _ in range(200):
+        got = (await _call(client, "tasks/get", {"id": opened["id"]})).json()["result"]
+        if got["status"]["state"] in ("completed", "failed"):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError(f"task never reached a terminal state: {got['status']['state']}")
+
+    assert got["status"]["state"] in ("completed", "failed")
+
+
+@pytest.mark.asyncio
 async def test_tasks_get_on_an_unknown_id_is_a_task_not_found(client):
     body = (await _call(client, "tasks/get", {"id": "a2atask_nobody"})).json()
     assert body["error"]["code"] == -32001
 
 
 @pytest.mark.asyncio
-async def test_cancelling_a_task_that_already_ended_is_a_task_not_cancelable(client):
+async def test_cancelling_a_task_that_already_ended_is_a_task_not_cancelable(client, monkeypatch):
+    _hold_the_task_open(monkeypatch)
     room_id, agent_id = await _room_with_agent(client)
     opened = (await _call(client, "message/send", _send_params(room_id, agent_id))).json()["result"]
 
@@ -207,7 +245,8 @@ def test_every_internal_part_kind_survives_the_round_trip():
 
 
 @pytest.mark.asyncio
-async def test_message_stream_is_an_event_stream_that_ends_when_the_task_does(client):
+async def test_message_stream_is_an_event_stream_that_ends_when_the_task_does(client, monkeypatch):
+    _hold_the_task_open(monkeypatch)
     room_id, agent_id = await _room_with_agent(client)
     opened = (await _call(client, "message/send", _send_params(room_id, agent_id))).json()["result"]
 
@@ -244,7 +283,8 @@ async def test_message_stream_is_an_event_stream_that_ends_when_the_task_does(cl
 
 
 @pytest.mark.asyncio
-async def test_a_stream_carries_its_own_task_and_is_not_ended_by_another(client):
+async def test_a_stream_carries_its_own_task_and_is_not_ended_by_another(client, monkeypatch):
+    _hold_the_task_open(monkeypatch)
     room_id, agent_id = await _room_with_agent(client)
     watched = (await _call(client, "message/send", _send_params(room_id, agent_id))).json()[
         "result"
@@ -279,7 +319,8 @@ async def test_a_stream_carries_its_own_task_and_is_not_ended_by_another(client)
 
 
 @pytest.mark.asyncio
-async def test_a_move_the_task_may_still_leave_is_not_marked_final(client):
+async def test_a_move_the_task_may_still_leave_is_not_marked_final(client, monkeypatch):
+    _hold_the_task_open(monkeypatch)
     room_id, agent_id = await _room_with_agent(client)
     opened = (await _call(client, "message/send", _send_params(room_id, agent_id))).json()["result"]
 
@@ -311,7 +352,10 @@ async def test_a_move_the_task_may_still_leave_is_not_marked_final(client):
 
 
 @pytest.mark.asyncio
-async def test_a_resubscribe_to_a_task_already_over_says_so_rather_than_stopping(client):
+async def test_a_resubscribe_to_a_task_already_over_says_so_rather_than_stopping(
+    client, monkeypatch
+):
+    _hold_the_task_open(monkeypatch)
     room_id, agent_id = await _room_with_agent(client)
     opened = (await _call(client, "message/send", _send_params(room_id, agent_id))).json()["result"]
     await _call(client, "tasks/cancel", {"id": opened["id"]})

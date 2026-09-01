@@ -359,6 +359,11 @@ async def _accept_message(
         requested_by=user_id,
         accepted_output_modes=modes,
     )
+    # The accept already committed above; dispatching is scheduled rather than
+    # awaited so this call returns the SUBMITTED task immediately instead of
+    # blocking on the provider call the task/get and message/stream endpoints
+    # exist to let the caller poll or watch instead.
+    svc.dispatch_agent_task_in_background(task)
     return task, history_length
 
 

@@ -130,6 +130,14 @@ async def websocket_endpoint(
         from. The loop therefore re-authenticates on its own heartbeat: a
         revoked token closes the connection within about two beats, busy or
         quiet.
+
+        Membership rides the same heartbeat. The Redis revoke message is
+        lossy by contract (see fanout.py), so a socket on another process
+        must not depend on it ever arriving: after the credential check, this
+        recheck's own room membership for every room it is subscribed to
+        (one read per room via the authorization policy) and revokes locally
+        for any room membership no longer covers. That caps exposure to one
+        reauth period regardless of whether the pub/sub message ever landed.
         """
         loop = asyncio.get_running_loop()
         next_reauth = loop.time() + REAUTH_SECONDS
@@ -146,6 +154,17 @@ async def websocket_endpoint(
                     with suppress(Exception):
                         await websocket.close(code=1011, reason="authentication check failed")
                     return
+                for subscribed_room in await hub.get_user_rooms(user_id):
+                    try:
+                        await authorization.require(subscribed_room, user_id, RoomCapability.READ)
+                    except AuthorizationError:
+                        await hub.revoke_room_access(user_id, subscribed_room)
+                    except Exception:
+                        log.exception(
+                            "Membership recheck failed for user %s in room %s",
+                            user_id,
+                            subscribed_room,
+                        )
                 next_reauth = loop.time() + REAUTH_SECONDS
             try:
                 event = await asyncio.wait_for(sub.queue.get(), timeout=REAUTH_SECONDS)

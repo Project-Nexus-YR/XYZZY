@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Six correctness findings from the project's first external audit, each
+  verified against the tree before it was fixed. Reconnect now pages past
+  the repository's 500 row limit, so a room's full history reaches a
+  returning client (measured: 512 seeded, 512 returned, previously 500).
+  The WebSocket revalidation heartbeat rechecks room membership as well as
+  credentials, so a removed member's socket closes within one cycle even
+  when the cross process revocation message is lost. An agent task's move
+  to WORKING, its run creation, and its execution attachment commit as one
+  transaction, as do a tool request's terminal state and the event that
+  records it, so a crash can no longer strand half a fact. A2A message/send
+  now actually dispatches the accepted task in a supervised background
+  task, and a startup drain heals tasks stranded by a crash between accept
+  and dispatch, one at a time so a backlog cannot stampede a restart. The
+  rate limiter caps how many token buckets one address can mint (rotating
+  junk credentials now shares the address budget instead of buying fresh
+  ones) and the bucket store is a hard capped LRU, so its memory is bounded
+  always.
+
 - A spawn's per agent model_provider and model_name are no longer accepted
   and then ignored. Each provider now carries a verified identity read off
   what it already puts in a response, spawn refuses a caller supplied

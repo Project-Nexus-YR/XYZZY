@@ -440,6 +440,11 @@ class MultiplayerService:
         self._dispatch_claim = new_id("dispatch")
         # One in-process lease per room, so two drains never do the same pass twice.
         self._ontology_drains: set[str] = set()
+        # Holds a strong reference to every background dispatch this process has
+        # scheduled, so the event loop cannot garbage-collect a task nobody is
+        # awaiting out from under it mid-flight; the done callback below is what
+        # lets each one go once it finishes.
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def initialize(self) -> None:
         await self._apply_migrations(Path(__file__).parent.parent / "migrations")
@@ -451,6 +456,11 @@ class MultiplayerService:
         await self._seed_default_templates()
         await self._settle_orphaned_mention_runs()
         await self.sweep_expired_run_leases()
+        # Constant-work recovery, same as the run-lease sweep above: a crash
+        # between an A2A accept and the background dispatch it schedules is
+        # the only way a task sits SUBMITTED past the staleness threshold, so
+        # a restart heals it here rather than leaving it stranded forever.
+        await self.sweep_stale_submitted_agent_tasks()
 
     async def _backfill_event_chain(self) -> None:
         """Hash events written before the chain existed, room by room, in order.
@@ -824,6 +834,42 @@ class MultiplayerService:
             await self.hub.broadcast_room_event(event)
         except Exception:
             log.exception("Failed to broadcast event %s for room %s", event_type.value, room_id)
+        return event
+
+    async def _resolve_tool_request_terminal(
+        self,
+        request: ToolRequest,
+        status: str,
+        reason: str,
+        result_json: str,
+        event_type: EventType,
+        payload: dict[str, Any],
+    ) -> RoomEvent:
+        """Move a tool request into a terminal state and record the event that
+        explains it, as one fact: `resolve` used to self-commit ahead of a
+        second, separate commit for the event, so a crash between the two
+        left a terminal status (or EXECUTED) with no event to account for it.
+        """
+        async with self.db.transaction():
+            await self.repos.tool_requests.resolve_in_transaction(
+                request.request_id, status, reason, result_json
+            )
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=request.room_id,
+                    sequence=0,
+                    event_type=event_type,
+                    payload=payload,
+                    actor_id=request.agent_id,
+                    actor_type="agent",
+                )
+            )
+        try:
+            await self.hub.broadcast_room_event(event)
+        except Exception:
+            log.exception(
+                "Failed to broadcast event %s for room %s", event_type.value, request.room_id
+            )
         return event
 
     async def _broadcast_persisted_events(self, events: list[RoomEvent]) -> None:
@@ -2262,7 +2308,9 @@ class MultiplayerService:
                 request = await self.repos.tool_requests.get_by_approval(approval.approval_id)
                 if request is None or request.status != "PENDING_APPROVAL":
                     continue
-                await self.repos.tool_requests.resolve(request.request_id, "REJECTED", reason, "{}")
+                await self.repos.tool_requests.resolve_in_transaction(
+                    request.request_id, "REJECTED", reason, "{}"
+                )
                 events.append(
                     await self.repos.events.append_with_next_sequence_in_transaction(
                         RoomEvent(
@@ -3155,9 +3203,6 @@ class MultiplayerService:
         except RunAuthorityRevoked as revoked:
             # The write already rolled back with the raise; the settlement is written
             # here, outside the transaction that could not have kept it.
-            await self.repos.tool_requests.resolve(
-                request.request_id, "REJECTED", str(revoked), "{}"
-            )
             await self._append_room_event(
                 request.room_id,
                 EventType.AGENT_RUN_AUTHORITY_REVOKED,
@@ -3170,8 +3215,11 @@ class MultiplayerService:
                 request.agent_id,
                 "agent",
             )
-            await self._append_room_event(
-                request.room_id,
+            await self._resolve_tool_request_terminal(
+                request,
+                "REJECTED",
+                str(revoked),
+                "{}",
                 EventType.TOOL_CALL_REJECTED,
                 {
                     "request_id": request.request_id,
@@ -3179,8 +3227,6 @@ class MultiplayerService:
                     "required_capability": request.required_capability,
                     "reason": str(revoked),
                 },
-                request.agent_id,
-                "agent",
             )
             run = await self.repos.agent_runs.get_by_execution(request.execution_id)
             if run is not None:
@@ -3194,11 +3240,11 @@ class MultiplayerService:
         except AuthorizationError as denied:
             # A refusal, not a failure: the tool was not permitted to this agent at
             # the moment it ran, which is what tool.call_rejected records.
-            await self.repos.tool_requests.resolve(
-                request.request_id, "REJECTED", str(denied), "{}"
-            )
-            await self._append_room_event(
-                request.room_id,
+            await self._resolve_tool_request_terminal(
+                request,
+                "REJECTED",
+                str(denied),
+                "{}",
                 EventType.TOOL_CALL_REJECTED,
                 {
                     "request_id": request.request_id,
@@ -3206,18 +3252,16 @@ class MultiplayerService:
                     "required_capability": request.required_capability,
                     "reason": str(denied),
                 },
-                request.agent_id,
-                "agent",
             )
             return replace(request, status="REJECTED", reason=str(denied))
         except DomainError as exc:
-            await self.repos.tool_requests.resolve(request.request_id, "FAILED", str(exc), "{}")
-            await self._append_room_event(
-                request.room_id,
+            await self._resolve_tool_request_terminal(
+                request,
+                "FAILED",
+                str(exc),
+                "{}",
                 EventType.TOOL_CALL_FAILED,
                 {"request_id": request.request_id, "tool": request.tool, "error": str(exc)},
-                request.agent_id,
-                "agent",
             )
             return replace(request, status="FAILED", reason=str(exc))
         except Exception as exc:
@@ -3228,25 +3272,23 @@ class MultiplayerService:
                 "Tool %s failed unexpectedly for request %s", request.tool, request.request_id
             )
             error = f"{type(exc).__name__}: {exc}"
-            await self.repos.tool_requests.resolve(request.request_id, "FAILED", error, "{}")
-            await self._append_room_event(
-                request.room_id,
+            await self._resolve_tool_request_terminal(
+                request,
+                "FAILED",
+                error,
+                "{}",
                 EventType.TOOL_CALL_FAILED,
                 {"request_id": request.request_id, "tool": request.tool, "error": error},
-                request.agent_id,
-                "agent",
             )
             return replace(request, status="FAILED", reason=error)
         result_json = json.dumps(output, default=str)
-        await self.repos.tool_requests.resolve(
-            request.request_id, "EXECUTED", "executed", result_json
-        )
-        await self._append_room_event(
-            request.room_id,
+        await self._resolve_tool_request_terminal(
+            request,
+            "EXECUTED",
+            "executed",
+            result_json,
             EventType.TOOL_CALL_COMPLETED,
             {"request_id": request.request_id, "tool": request.tool},
-            request.agent_id,
-            "agent",
         )
         return replace(request, status="EXECUTED", reason="executed", result_json=result_json)
 
@@ -6327,11 +6369,11 @@ class MultiplayerService:
             else:
                 # The capability was withdrawn between the request and the grant; a
                 # human's approval cannot restore what the policy no longer permits.
-                await self.repos.tool_requests.resolve(
-                    pending.request_id, "REJECTED", decision.reason, "{}"
-                )
-                await self._append_room_event(
-                    pending.room_id,
+                await self._resolve_tool_request_terminal(
+                    pending,
+                    "REJECTED",
+                    decision.reason,
+                    "{}",
                     EventType.TOOL_CALL_REJECTED,
                     {
                         "request_id": pending.request_id,
@@ -6340,8 +6382,6 @@ class MultiplayerService:
                         "effective": sorted(effective),
                         "reason": decision.reason,
                     },
-                    pending.agent_id,
-                    "agent",
                 )
                 resolved = replace(pending, status="REJECTED", reason=decision.reason)
             # The turn stopped at this reviewer. Running the tool is not what the
@@ -6484,7 +6524,7 @@ class MultiplayerService:
             )
             pending = gated
             if pending is not None:
-                await self.repos.tool_requests.resolve(
+                await self.repos.tool_requests.resolve_in_transaction(
                     pending.request_id, "REJECTED", "approval rejected", "{}"
                 )
                 events.append(
@@ -8425,7 +8465,24 @@ class MultiplayerService:
         }
 
     async def get_room_events(self, room_id: str, after_sequence: int = 0) -> list[RoomEvent]:
-        return await self.repos.events.list_since(room_id, max(0, after_sequence))
+        """Every event past after_sequence, not just list_since's first 500-row page.
+
+        A reconnecting client asked for everything it missed; a single list_since
+        call silently truncates at its page cap, the same defect class already
+        fixed once for the audit export. Rooms are bounded by practice, so holding
+        the full list in memory here is acceptable.
+        """
+        after = max(0, after_sequence)
+        events: list[RoomEvent] = []
+        while True:
+            page = await self.repos.events.list_since(room_id, after)
+            if not page:
+                break
+            events.extend(page)
+            after = page[-1].sequence
+            if len(page) < 500:
+                break
+        return events
 
     async def export_room_audit(self, room_id: str) -> AsyncIterator[str]:
         """Every event this room ever recorded, one JSON line each, then a summary.
@@ -9110,6 +9167,53 @@ class MultiplayerService:
         # papered over.
         return created
 
+    # A task older than this and still SUBMITTED did not merely lose a race with
+    # the background dispatch that accepting it schedules — it lost the dispatch
+    # itself, most likely to a crash between the accept commit and the
+    # create_task call. The sweep below is what heals that on the next restart,
+    # or on the next pass of whatever process calls it periodically.
+    _STALE_SUBMITTED_TASK_SECONDS = 30
+
+    def dispatch_agent_task_in_background(self, task: AgentTask) -> None:
+        """Schedule a submitted task's turn off the request path, supervised.
+
+        A2A's message/send is non-blocking by contract (see `_accept_message`
+        in a2a.py): the caller is owed a SUBMITTED task back immediately, not
+        the wall time of a provider call. `_dispatch_agent_task_run` already
+        never raises — every exit resolves the task or logs — so this only
+        needs to keep the asyncio.Task alive until it finishes; without that
+        reference the loop is free to garbage-collect it mid-flight.
+        """
+        running = asyncio.create_task(self._dispatch_agent_task_run(task))
+        self._background_tasks.add(running)
+        running.add_done_callback(self._background_tasks.discard)
+
+    async def sweep_stale_submitted_agent_tasks(self) -> int:
+        """Drain every task stuck SUBMITTED past the point that can only mean
+        a lost handoff, so a crash between accept and dispatch heals on its own.
+
+        One task at a time, one batch per query: the drain is a marathon with
+        a bounded stride, never a thundering herd of concurrent provider
+        calls. `_dispatch_agent_task_run` never raises and resolves losing
+        races through its compare-and-swap, so a task the post-accept path
+        already grabbed is skipped here without ceremony.
+        """
+        drained = 0
+        attempted: set[str] = set()
+        while True:
+            threshold = utcnow() - timedelta(seconds=self._STALE_SUBMITTED_TASK_SECONDS)
+            stale = await self.repos.agent_tasks.list_stale_submitted(threshold)
+            fresh = [task for task in stale if task.task_id not in attempted]
+            if not fresh:
+                # Anything still listed was already attempted this drain: a
+                # task that will not leave SUBMITTED is a row to investigate,
+                # not a reason to spin on it.
+                return drained
+            for task in fresh:
+                attempted.add(task.task_id)
+                await self._dispatch_agent_task_run(task)
+                drained += 1
+
     async def _dispatch_agent_task_run(self, task: AgentTask) -> None:
         """Drive a submitted task to a terminal state, or say on the row why not.
 
@@ -9188,7 +9292,6 @@ class MultiplayerService:
         """
         task = await self._require_agent_task(task_id)
         agent = await self.get_agent(task.target_agent_id)
-        await self.repos.agent_tasks.transition(task_id, task.state, AgentTaskState.WORKING)
         run = await self._prepare_agent_run(agent, task.room_id, task.authorized_by)
         session = Session(
             session_id=new_id("sess"),
@@ -9207,13 +9310,22 @@ class MultiplayerService:
             triggered_by=AgentTrigger.DIRECT,
             input_data={"agent_task_id": task.task_id, "context_id": task.context_id},
         )
+        # The WORKING transition, the session/execution/run rows and the
+        # attach that binds them back onto the task are one fact — a task
+        # left WORKING with no run is an orphan the settler cannot see,
+        # because it only scans MENTION triggers. All or nothing here.
         async with self.db.transaction():
+            await self.repos.agent_tasks.transition_in_transaction(
+                task_id, task.state, AgentTaskState.WORKING
+            )
             await self.repos.sessions.create(session)
             execution = await self.repos.executions.create(execution)
             await self.repos.agent_runs.create_in_transaction(
                 replace(run, execution_id=execution.execution_id)
             )
-        await self.repos.agent_tasks.attach_execution(task_id, execution.execution_id)
+            await self.repos.agent_tasks.attach_execution_in_transaction(
+                task_id, execution.execution_id
+            )
         # The asker is a participant of this run, so the run carries a row saying so
         # and every spend reads it. ``authorized_by`` is already an arm of the bound;
         # on a delegated task the caller is somebody else, and without this row their

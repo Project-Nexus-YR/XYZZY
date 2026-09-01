@@ -990,12 +990,22 @@ class ToolRequestRepo:
         await self.db.commit()
 
     async def resolve(self, request_id: str, status: str, reason: str, result_json: str) -> None:
+        async with self.db.transaction():
+            await self.resolve_in_transaction(request_id, status, reason, result_json)
+
+    async def resolve_in_transaction(
+        self, request_id: str, status: str, reason: str, result_json: str
+    ) -> None:
+        """Move a request into a terminal state, for a caller that appends the
+        event recording it in the same transaction — the two are one fact.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("tool request resolve requires transaction ownership")
         await self.db.execute(
             "UPDATE tool_requests SET status = ?, reason = ?, result_json = ?, "
             "resolved_at = ? WHERE request_id = ?",
             (status, reason, result_json, serialize_datetime(utcnow()), request_id),
         )
-        await self.db.commit()
 
     async def record_reviewer(self, request_id: str, reviewer_id: str) -> None:
         """Write down the human releasing this one call, so its bound can read them.
@@ -3075,6 +3085,23 @@ class AgentTaskRepo:
         )
         return [self._from_row(r) for r in rows]
 
+    async def list_stale_submitted(self, before: datetime, limit: int = 25) -> list[AgentTask]:
+        """Oldest tasks still SUBMITTED whose accept committed before ``before``.
+
+        A fresh accept and a lost dispatch look identical for a moment; the
+        cutoff is what tells them apart, so a task the caller only just
+        opened is never swept out from under the background task it is
+        already waiting on. The limit bounds one sweep pass: a large backlog
+        drains a batch at a time across passes instead of stampeding a
+        restart with every stranded task at once.
+        """
+        rows = await self.db.fetch_all(
+            "SELECT * FROM agent_tasks WHERE state = ? AND created_at < ? "
+            "ORDER BY created_at, task_id LIMIT ?",
+            (AgentTaskState.SUBMITTED.value, serialize_datetime(before), limit),
+        )
+        return [self._from_row(r) for r in rows]
+
     async def list_open_for_agent(self, agent_id: str) -> list[AgentTask]:
         placeholders = ", ".join("?" for _ in TERMINAL_STATES)
         rows = await self.db.fetch_all(
@@ -3085,6 +3112,19 @@ class AgentTaskRepo:
         return [self._from_row(r) for r in rows]
 
     async def transition(
+        self,
+        task_id: str,
+        expected: AgentTaskState,
+        target: AgentTaskState,
+        *,
+        refusal_reason: str = "",
+    ) -> AgentTask:
+        async with self.db.transaction():
+            return await self.transition_in_transaction(
+                task_id, expected, target, refusal_reason=refusal_reason
+            )
+
+    async def transition_in_transaction(
         self,
         task_id: str,
         expected: AgentTaskState,
@@ -3105,6 +3145,8 @@ class AgentTaskRepo:
         transition happened to land last, which under exactly the contention
         the WHERE clause exists to catch is somebody else's.
         """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("agent task transition requires transaction ownership")
         require_transition(expected, target)
         now = utcnow()
         updates: dict[str, Any] = {"state": target.value, "updated_at": now.isoformat()}
@@ -3124,16 +3166,21 @@ class AgentTaskRepo:
                 f"agent task {task_id} is no longer {expected.value}: "
                 f"the transition to {target.value} was not applied"
             )
-        await self.db.commit()
         return self._from_row(dict(row))
 
     async def attach_execution(self, task_id: str, execution_id: str) -> None:
+        async with self.db.transaction():
+            await self.attach_execution_in_transaction(task_id, execution_id)
+
+    async def attach_execution_in_transaction(self, task_id: str, execution_id: str) -> None:
         """Record the run this task is being served by, while it can still be served.
 
         Guarded like a transition, and for the same reason: an unguarded UPDATE
         reports success against a task_id nobody ever wrote, and hangs a live
         execution off a task that finished while the caller was starting it.
         """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("agent task execution attach requires transaction ownership")
         placeholders = ", ".join("?" for _ in TERMINAL_STATES)
         cursor = await self.db.execute(
             "UPDATE agent_tasks SET execution_id = ?, updated_at = ? "
@@ -3150,7 +3197,6 @@ class AgentTaskRepo:
                 f"agent task {task_id} is unknown or already terminal: "
                 f"execution {execution_id} was not attached"
             )
-        await self.db.commit()
 
     async def append_message_with_next_sequence(
         self, task_id: str, role: TaskMessageRole, parts: tuple[Part, ...]

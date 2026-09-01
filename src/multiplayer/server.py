@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -56,6 +57,15 @@ RATE_LIMIT_WINDOW_SECONDS = 60.0
 DEFAULT_RATE_LIMIT = 120
 DEFAULT_MAX_BODY_BYTES = 1_048_576
 MAX_TRACKED_CLIENTS = 10_000
+# A bearer header buckets by its own hash pre-auth, deliberately: the limiter
+# runs in middleware, ahead of any code that could tell a real token from
+# junk. Without a ceiling that becomes a mint — a script rotating garbage
+# Authorization values buys itself one fresh 120-request budget per value,
+# and the per-IP path never engages because an address with a header never
+# takes it. Past this many distinct token buckets, further unknown tokens
+# from the same address share its address bucket instead: rotation stops
+# buying anything once the address's own budget is what is left to spend.
+TOKEN_BUCKETS_PER_ADDRESS_CAP = 20
 DEFAULT_ORIGINS = ("http://localhost:8000", "http://127.0.0.1:8000")
 # Probes exempt from the rate limiter: a monitor polling either must not be
 # able to spend the budget of whoever else shares its address.
@@ -106,17 +116,98 @@ def configured_origins() -> list[str]:
     return configured or list(DEFAULT_ORIGINS)
 
 
-def _client_key(request: Request) -> str:
-    """Who the rate limit counts against.
-
-    The bearer token is the principal, so count against it where there is one and
-    fall back to the peer address. The address is the proxy's when a proxy is in
-    front, which is why the token is preferred rather than the other way round.
-    """
-    authorization = request.headers.get("authorization", "")
-    if authorization:
-        return "t:" + hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:32]
+def _peer_address_key(request: Request) -> str:
     return "a:" + (request.client.host if request.client else "unknown")
+
+
+class _RateLimitBuckets:
+    """The rate limiter's whole mutable state: bounded always, minted for junk never.
+
+    ``windows`` is an insertion/access-ordered map — every touch moves its key
+    to the end, so the front is always the true least-recently-used entry —
+    capped at MAX_TRACKED_CLIENTS regardless of whether any window has rolled.
+    Left alone, a rolled-window-only sweep never fires against a live attack:
+    50 rotated Authorization values inside one minute are all still "live" by
+    that test, so the map would grow by one entry per garbage value forever.
+
+    ``_token_bucket_address`` and ``_address_token_counts`` are the other
+    half: which peer address minted each live token bucket, and how many it
+    has minted, so a cap can be enforced per address before a bucket is even
+    created rather than after the map has already grown.
+    """
+
+    def __init__(self, max_tracked: int, token_cap_per_address: int) -> None:
+        self._max_tracked = max_tracked
+        self._token_cap_per_address = token_cap_per_address
+        self.windows: OrderedDict[str, tuple[float, int]] = OrderedDict()
+        self._token_bucket_address: dict[str, str] = {}
+        self._address_token_counts: dict[str, int] = {}
+
+    def _evict(self, key: str) -> None:
+        self.windows.pop(key, None)
+        address = self._token_bucket_address.pop(key, None)
+        if address is not None:
+            remaining = self._address_token_counts.get(address, 1) - 1
+            if remaining <= 0:
+                self._address_token_counts.pop(address, None)
+            else:
+                self._address_token_counts[address] = remaining
+
+    def key_for(self, request: Request) -> str:
+        """Who this request's budget counts against.
+
+        The bearer token is the principal, so an already-tracked token keeps
+        counting against its own bucket. A token seen for the first time only
+        mints a fresh bucket while its address is under the cap; past it, the
+        address bucket is what further unknown tokens from that address
+        share, which is what stops rotation from buying fresh budget. The
+        address is the proxy's when a proxy is in front, which is why the
+        token is preferred at all rather than the other way round.
+        """
+        authorization = request.headers.get("authorization", "")
+        if not authorization:
+            return _peer_address_key(request)
+        token_key = "t:" + hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:32]
+        if token_key in self.windows:
+            return token_key
+        address = _peer_address_key(request)
+        if self._address_token_counts.get(address, 0) >= self._token_cap_per_address:
+            return address
+        self._token_bucket_address[token_key] = address
+        self._address_token_counts[address] = self._address_token_counts.get(address, 0) + 1
+        return token_key
+
+    def touch(self, key: str, now: float, window_seconds: float) -> tuple[float, int]:
+        """This key's (window_start, count) as of now, freshly moved to the LRU end."""
+        started, count = self.windows.get(key, (now, 0))
+        if now - started >= window_seconds:
+            started, count = now, 0
+        self.windows[key] = (started, count)
+        self.windows.move_to_end(key)
+        return started, count
+
+    def record(self, key: str, started: float, count: int) -> None:
+        self.windows[key] = (started, count)
+        self.windows.move_to_end(key)
+        self._enforce_cap()
+
+    def _enforce_cap(self) -> None:
+        if len(self.windows) <= self._max_tracked:
+            return
+        now = time.monotonic()
+        # A key is dead the moment its window rolls; those go first.
+        for stale in [
+            k for k, (at, _) in self.windows.items() if now - at >= RATE_LIMIT_WINDOW_SECONDS
+        ]:
+            self._evict(stale)
+        # Still over the cap after every rolled window is gone means the map
+        # is bounded by rotation alone — every entry still live. The map is
+        # hard-capped regardless: the least-recently-touched entry goes,
+        # window age or not, because bounded-always is the property that
+        # matters, not which entries happened to earn their spot honestly.
+        while len(self.windows) > self._max_tracked:
+            oldest_key = next(iter(self.windows))
+            self._evict(oldest_key)
 
 
 def create_app(
@@ -210,6 +301,15 @@ def create_app(
         sweeper.cancel()
         with suppress(asyncio.CancelledError):
             await sweeper
+        # Every A2A dispatch svc scheduled fire-and-forget (see
+        # dispatch_agent_task_in_background) still holds the database this
+        # shutdown is about to close; cancelling here is what keeps one from
+        # racing db.close() below and dying mid-write instead of cleanly.
+        for running in list(svc._background_tasks):
+            running.cancel()
+        for running in list(svc._background_tasks):
+            with suppress(asyncio.CancelledError):
+                await running
         set_demo_enabled(False)
         set_sessions(None)
         set_authenticator(None)
@@ -236,7 +336,7 @@ def create_app(
     # is enough to stop a script and is not a fair-share scheduler.
     rate_limit = _positive_int("XYZZY_RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT)
     max_body_bytes = _positive_int("XYZZY_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES)
-    windows: dict[str, tuple[float, int]] = {}
+    buckets = _RateLimitBuckets(MAX_TRACKED_CLIENTS, TOKEN_BUCKETS_PER_ADDRESS_CAP)
 
     @app.middleware("http")
     async def guard(
@@ -260,11 +360,9 @@ def create_app(
         elif request.url.path in RATE_LIMIT_EXEMPT_PATHS:
             response = await call_next(request)
         else:
-            key = _client_key(request)
+            key = buckets.key_for(request)
             now = time.monotonic()
-            started, count = windows.get(key, (now, 0))
-            if now - started >= RATE_LIMIT_WINDOW_SECONDS:
-                started, count = now, 0
+            started, count = buckets.touch(key, now, RATE_LIMIT_WINDOW_SECONDS)
             if count >= rate_limit:
                 metrics.record_rate_limited()
                 response = JSONResponse(
@@ -275,15 +373,7 @@ def create_app(
                     },
                 )
             else:
-                windows[key] = (started, count + 1)
-                if len(windows) > MAX_TRACKED_CLIENTS:
-                    # A key is dead the moment its window rolls. Dropping the
-                    # rolled ones is what keeps an unbounded client population
-                    # from being a leak.
-                    for stale in [
-                        k for k, (at, _) in windows.items() if now - at >= RATE_LIMIT_WINDOW_SECONDS
-                    ]:
-                        del windows[stale]
+                buckets.record(key, started, count + 1)
                 response = await call_next(request)
 
         metrics.record_request(

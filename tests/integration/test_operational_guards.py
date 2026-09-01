@@ -121,6 +121,68 @@ async def test_metrics_counts_the_429_branch_and_is_itself_rate_limit_exempt(mon
             assert "xyzzy_rate_limited_total 1" in text
 
 
+@pytest.mark.asyncio
+async def test_rotating_bearer_tokens_from_one_address_cannot_buy_infinite_budget(monkeypatch):
+    """`_client_key` used to bucket ANY Authorization header by its own hash,
+    pre-auth: a script rotating junk tokens bought one fresh 120-request
+    budget per value, and the per-IP path never engaged once a header was
+    present. Past the per-address cap, unknown tokens from the same address
+    now share its bucket instead, so rotation stops buying anything once
+    that shared budget is spent.
+    """
+    import multiplayer.server as server_module
+
+    monkeypatch.setattr(server_module, "TOKEN_BUCKETS_PER_ADDRESS_CAP", 3)
+    monkeypatch.setenv("XYZZY_RATE_LIMIT_PER_MINUTE", "2")
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    transport = ASGITransport(app=app)
+
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            statuses = [
+                (
+                    await client.get(
+                        "/api/v1/me/context", headers={"Authorization": f"Bearer junk-{i}"}
+                    )
+                ).status_code
+                for i in range(20)
+            ]
+            # Fifty (here twenty, to keep the test fast) distinct tokens from one
+            # address must not each buy a fresh 200 the way they used to.
+            assert statuses[-1] == 429
+
+
+def test_the_rate_limit_store_never_exceeds_its_cap(monkeypatch):
+    """Eviction used to run only over windows that had already rolled, so a
+    live attack — every entry still inside its minute — grew the map by one
+    entry per garbage value forever. The store is a hard-capped LRU now: at
+    the cap, the least-recently-touched entry goes regardless of window age.
+    """
+    from multiplayer.server import _RateLimitBuckets
+
+    class _FakeClient:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+    class _FakeRequest:
+        def __init__(self, host: str) -> None:
+            self.client = _FakeClient(host)
+            self.headers: dict[str, str] = {}
+
+    max_tracked = 5
+    buckets = _RateLimitBuckets(max_tracked=max_tracked, token_cap_per_address=10_000)
+    now = 1_000.0
+    for i in range(50):
+        # A fresh address every time, all still well inside their one-minute
+        # window when the next one arrives — nothing here would ever be
+        # evicted by a rolled-window-only sweep.
+        key = buckets.key_for(_FakeRequest(f"10.0.0.{i}"))
+        started, count = buckets.touch(key, now, 60.0)
+        buckets.record(key, started, count + 1)
+        now += 0.001
+        assert len(buckets.windows) <= max_tracked
+
+
 def test_cors_origins_default_to_loopback_and_refuse_a_wildcard(monkeypatch):
     monkeypatch.delenv("XYZZY_CORS_ORIGINS", raising=False)
     assert configured_origins() == list(DEFAULT_ORIGINS)

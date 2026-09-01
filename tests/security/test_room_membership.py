@@ -455,6 +455,40 @@ def test_removal_revokes_reads_and_closes_the_live_subscription() -> None:
         assert _roles(client, room_id)["alex"] == "viewer"
 
 
+def test_a_lost_revoke_is_healed_by_the_next_membership_recheck(monkeypatch) -> None:
+    """A cross-process revoke rides Redis pub/sub, which is lossy by contract
+    (see realtime/fanout.py): a socket on a process that never received the
+    publish must not depend on it. Removing the membership row directly,
+    bypassing ``remove_room_member``'s own ``hub.revoke_room_access`` call
+    entirely, reproduces exactly what a lost publish looks like from this
+    process's side — the hub never hears about it, so only the websocket's
+    own heartbeat recheck can catch it.
+    """
+    from multiplayer.api import routes as routes_mod
+    from multiplayer.realtime import websocket as websocket_module
+
+    monkeypatch.setattr(websocket_module, "REAUTH_SECONDS", 0.05)
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    with TestClient(app) as client:
+        room_id = _bootstrap(client, OWNER, "Auth migration")
+        _invite(client, room_id, "alex", "editor")
+
+        with client.websocket_connect(f"/ws?room_id={room_id}", headers=ALEX) as websocket:
+            assert websocket.receive_json()["type"] == "connected"
+
+            async def _remove_without_telling_the_hub() -> None:
+                svc = routes_mod._svc
+                assert svc is not None
+                await svc.repos.room_members.remove(room_id, "alex")
+
+            asyncio.run(_remove_without_telling_the_hub())
+
+            with pytest.raises(WebSocketDisconnect) as disconnect:
+                for _ in range(200):
+                    websocket.receive_json()
+            assert disconnect.value.code == 4403
+
+
 def test_removal_reaches_the_member_on_their_other_sockets() -> None:
     app = create_app(":memory:", auth_tokens=TOKENS)
     with TestClient(app) as client:

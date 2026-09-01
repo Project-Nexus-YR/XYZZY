@@ -153,6 +153,40 @@ async def test_reconnect_preserves_task_status(service):
 
 
 @pytest.mark.asyncio
+async def test_reconnect_pages_past_the_500_row_default_without_truncating(service):
+    """get_room_events (and the events_since half of get_room_state) used to
+    call EventRepo.list_since once and hand back its first 500-row page — the
+    same defect class already fixed once for the audit export (see
+    test_audit_export.py). A reconnecting client asking for everything past
+    ``after_sequence`` must get everything, not one page of it.
+    """
+    org = await service.create_organization("O", "o", "u1")
+    ws = await service.create_workspace(org.org_id, "W", "w", "u1")
+    room = await service.create_room(ws.workspace_id, "R", "u1")
+
+    total = 512
+    for index in range(total):
+        await service.send_message(room.room_id, MessageRole.HUMAN, "u1", f"msg{index}")
+
+    counter = await service.repos.events.get_sequence_counter(room.room_id)
+    assert counter == total + 1  # room_created plus every message
+
+    events = await service.get_room_events(room.room_id)
+    assert len(events) == counter
+    assert [e.sequence for e in events] == list(range(1, counter + 1))
+
+    # The reconnect path (get_room_state's events_since) must not truncate either.
+    state = await service.get_room_state(room.room_id, last_sequence=0)
+    assert len(state["events_since"]) == counter
+
+    # A mid-range after_sequence still returns every event past it, not one page.
+    partial = await service.get_room_events(room.room_id, after_sequence=1)
+    assert len(partial) == counter - 1
+    assert partial[0].sequence == 2
+    assert partial[-1].sequence == counter
+
+
+@pytest.mark.asyncio
 async def test_reconnect_sequence_zero_gets_all(service):
     """last_sequence=0 returns all events."""
     org = await service.create_organization("O", "o", "u1")

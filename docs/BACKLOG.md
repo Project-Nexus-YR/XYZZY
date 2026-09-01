@@ -1,5 +1,38 @@
 # Backlog
 
+## From the first external audit (2026-09-01, verified before filing)
+
+An outside reviewer audited the launch commit and filed findings beyond the
+correctness fixes shipped the same week. These are the verified remainder,
+deferred with reasons rather than fixed in place:
+
+- **Per-provider-call ledger.** Only the terminal provider response is
+  durably stored on an output; intermediate tool-requesting calls keep
+  their tool payloads but lose response ids and per-call provenance. The
+  fix is a ledger table keyed by run and call index. Real schema work, and
+  it should land together with the provider registry.
+- **NEXUS execution is process-affine and its synchronous reasoning call
+  runs on the event loop.** Resumability across workers needs run state
+  out of memory; the blocking call needs a thread. Substantial runtime
+  work, scheduled with the multi-node epic.
+- **Provider operations lack streaming, retries with backoff, Retry-After,
+  active cancellation, and token budgets.** One coherent provider-runtime
+  pass, not six patches.
+- **Chunked request bodies bypass the declared-size cap** (the cap reads
+  Content-Length). Bound it with a counting stream wrapper when the
+  provider-runtime pass touches the transport layer.
+- **Concurrent processes can race startup migrations.** Multi-process
+  deployments should start one process first today; a migration lock rides
+  with the scaling epic.
+- **A configured local endpoint receives OPENAI_API_KEY when both are
+  set.** Intended behavior for keyed proxies such as OpenRouter, but it
+  deserves a loud line in the configuration docs.
+- **Message idempotency omits attachment ids**, so a retry with different
+  attachments can replay as the original. Small; fold into the next
+  attachments round.
+- **The live 3 to 5 human baseline run** against ChatGPT Projects and the
+  open competitors, which the benchmark doc itself records as incomplete.
+
 ## Deferred epics (moved from the README roadmap, 2026-08-31)
 
 Deliberately not scheduled: each is weeks of work whose payoff scales with
