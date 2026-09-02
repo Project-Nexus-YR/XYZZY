@@ -18,17 +18,25 @@ CHECK = (
     " stroke-linecap='round' stroke-linejoin='round'/></svg>"
 )
 
+FONTS = (
+    "https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;1,500"
+    "&family=IBM+Plex+Mono:wght@400&family=IBM+Plex+Sans:wght@400;600&display=swap"
+)
+
 OG = """<!doctype html><html><head><meta charset="utf-8">
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;1,500&family=IBM+Plex+Mono:wght@400&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet">
+<link href="{fonts}" rel="stylesheet">
 <style>
   html,body{{margin:0;width:1200px;height:630px;background:#F6F2EB;color:#262018;
     font-family:"IBM Plex Sans",sans-serif;letter-spacing:-0.013em}}
   .card{{position:relative;width:1200px;height:630px;padding:72px 88px;box-sizing:border-box}}
-  .mark{{display:flex;align-items:center;gap:16px;font-family:"Cormorant Garamond",Georgia,serif;font-weight:600;font-size:34px;letter-spacing:.02em}}
-  h1{{font-family:"Cormorant Garamond",Georgia,serif;font-weight:500;font-size:88px;line-height:0.98;letter-spacing:-0.012em;margin:64px 0 24px;max-width:20ch}}
+  .mark{{display:flex;align-items:center;gap:16px;font-family:"Cormorant Garamond",Georgia,serif;
+    font-weight:600;font-size:34px;letter-spacing:.02em}}
+  h1{{font-family:"Cormorant Garamond",Georgia,serif;font-weight:500;font-size:88px;
+    line-height:0.98;letter-spacing:-0.012em;margin:64px 0 24px;max-width:20ch}}
   h1 em{{font-style:italic;color:#6D5100}}
   p{{font-size:26px;line-height:1.4;color:#5C5548;margin:0;max-width:44ch}}
-  .foot{{position:absolute;left:88px;bottom:52px;font-family:"IBM Plex Mono",monospace;font-size:20px;color:#6D5100}}
+  .foot{{position:absolute;left:88px;bottom:52px;font-family:"IBM Plex Mono",monospace;
+    font-size:20px;color:#6D5100}}
 </style></head><body><div class="card">
 <div class="mark">{check} XYZZY</div>
 <h1>Decide with AI, together, and <em>keep</em> the receipts.</h1>
@@ -47,7 +55,7 @@ def main() -> None:
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1200, "height": 630})
-        page.set_content(OG.format(check=CHECK.format(s=40)), wait_until="networkidle")
+        page.set_content(OG.format(fonts=FONTS, check=CHECK.format(s=40)), wait_until="networkidle")
         page.wait_for_timeout(800)
         page.screenshot(path="site/assets/og.png")
         print("site/assets/og.png")

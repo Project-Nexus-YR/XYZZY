@@ -76,7 +76,7 @@ def main() -> None:
 # specialist outputs side by side, and the published Decision Brief.
 VIEWS = [
     ("view-branch", "button.branch-nav"),  # the branch under AI WORK in the sidebar
-    ("view-brief", "#nav-artifacts"),      # Artifacts opens the published brief
+    ("view-brief", "#nav-artifacts"),  # Artifacts opens the published brief
 ]
 
 
