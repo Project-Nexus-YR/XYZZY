@@ -11,7 +11,7 @@ from contextlib import suppress
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from ..realtime.hub import RealtimeHub
+from ..realtime.hub import RealtimeHub, RealtimeSubscription
 from ..security import (
     AuthenticationError,
     AuthorizationError,
@@ -112,6 +112,11 @@ async def websocket_endpoint(
     await websocket.accept(subprotocol=accepted_protocol)
 
     sub = await hub.subscribe(room_id, user_id)
+    # Every subscription this socket holds, keyed by room. The primary and
+    # every extra room share `sub.queue`, so one send_loop below delivers
+    # events from all of them, and every exit path can release exactly the
+    # subscriptions this socket created without touching anyone else's.
+    subs_by_room: dict[str, RealtimeSubscription] = {room_id: sub}
 
     # Send connection confirmation
     await websocket.send_json(
@@ -209,7 +214,13 @@ async def websocket_endpoint(
                             }
                         )
                     else:
-                        await hub.subscribe(extra_room, user_id)
+                        # A repeated subscribe is answered, not re-registered: a
+                        # second hub subscription on the same queue would double
+                        # every event and orphan the first one from cleanup.
+                        if extra_room not in subs_by_room:
+                            subs_by_room[extra_room] = await hub.subscribe(
+                                extra_room, user_id, queue=sub.queue
+                            )
                         await websocket.send_json(
                             {
                                 "type": "subscribed",
@@ -219,9 +230,9 @@ async def websocket_endpoint(
             elif msg_type == "unsubscribe":
                 extra_room = msg.get("room_id", "").strip()
                 if extra_room:
-                    sub_ids = await hub.get_subscriptions_for_user_room(user_id, extra_room)
-                    for sid in sub_ids:
-                        await hub.unsubscribe(sid)
+                    own_sub = subs_by_room.pop(extra_room, None)
+                    if own_sub:
+                        await hub.unsubscribe(own_sub.subscription_id)
                     await websocket.send_json(
                         {
                             "type": "unsubscribed",
@@ -240,10 +251,16 @@ async def websocket_endpoint(
         pass
     except Exception:
         log.exception("WebSocket error for user %s in room %s", user_id, room_id)
+        # Tell the client the server gave up, rather than vanishing: a handler
+        # that returns without a close frame leaves the peer waiting on a
+        # socket nobody will write to again.
+        with suppress(Exception):
+            await websocket.close(code=1011, reason="internal error")
     finally:
         send_task.cancel()
         try:
             await send_task
         except asyncio.CancelledError:
             pass
-        await hub.unsubscribe(sub.subscription_id)
+        for held_sub in subs_by_room.values():
+            await hub.unsubscribe(held_sub.subscription_id)

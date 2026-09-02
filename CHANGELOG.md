@@ -37,6 +37,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured provider instead, so an unverified caller string can no longer
   enter the audit trail.
 
+- The client round of the first external audit. The publish flow now asks
+  for a synthesis title instead of hard coding one for every branch, prefilled
+  from the branch prompt and editable. A branch launch that failed halfway
+  used to leave the agents it had already spawned behind and strand pending
+  runs on navigation; the launch now removes what it spawned before
+  reporting the failure, says honestly when that removal itself failed, and
+  a visible control offers to resume runs found pending on load rather than
+  doing so silently. Decisions can be created where the evaluation guide
+  says they can, and the demo seeds a third human so the seeded room matches
+  the three to five person flow the product describes. An accessibility
+  pass covers branch actions reachable at 390 pixels wide, search hits
+  focusable and Enter activated, dialogs named and returning focus to their
+  opener with focus entering on open, the mobile drawer carrying modal
+  semantics, small controls grown to a 44 pixel target without letting
+  neighbouring targets overlap, and the Ask Meta input labelled.
+
+- A "subscribe" message for an extra room dropped the returned subscription
+  on the floor: nothing drained its queue, so events into that room never
+  reached the socket, and nothing released it on close, so the hub kept it
+  for the process lifetime. "unsubscribe" also released every subscription
+  the user held to that room across every one of their sockets, not just
+  the one that asked. A socket now keeps every subscription it creates,
+  primary and extras, delivers events from all of them through one send
+  loop, releases only its own subscription on "unsubscribe", and every exit
+  path (a clean close, a dropped connection, a revocation) releases all of
+  them.
+
+- Message idempotency ignored attachments: a retry with the same key and
+  different attachment_ids replayed the original message as if it were
+  identical. The hashed request now folds in the sorted attachment ids
+  whenever the send carries any, so a retry with different attachments
+  raises the existing "key already used for a different request" conflict
+  and a retry with the same attachments in any order still replays; a send
+  with no attachments hashes exactly as it did before.
+
+- The room state payload's runs left out branch_id, so the client's four
+  branch panels that filter runs by it never rendered. Each run in the
+  state payload now carries its branch_id.
+
 ### Added
 
 - The realtime hub scales past one process: with `XYZZY_REDIS_URL` set

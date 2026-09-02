@@ -64,12 +64,17 @@ async def test_workflow_only_run_persists_labelled_output_and_reconnect_state(se
     assert output.source_prompt == "Assess PostgreSQL migration risk"
 
     state = await service.get_room_state(room.room_id)
+    stored = await service.repos.executions.get(execution.execution_id)
+    assert stored is not None
     assert state["runs"] == [
         {
             "execution_id": execution.execution_id,
             "session_id": session.session_id,
             "agent_id": agent.agent_id,
             "run_id": f"run_{execution.execution_id}",
+            # The branch the run belongs to, so a client can group runs by
+            # branch from the state payload alone.
+            "branch_id": stored.branch_id,
             "status": "COMPLETED",
             # A reconnecting reader can see why this agent spoke.
             "triggered_by": "DIRECT",

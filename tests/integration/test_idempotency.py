@@ -13,6 +13,7 @@ from httpx import ASGITransport, AsyncClient
 import multiplayer.api.routes as routes_module
 from multiplayer.domain.events import EventType
 from multiplayer.server import create_app
+from multiplayer.services.service import MultiplayerService
 
 TOKENS = {"owner-token": "owner", "peer-token": "peer"}
 OWNER = {"Authorization": "Bearer owner-token"}
@@ -126,6 +127,97 @@ def test_keys_are_scoped_to_the_principal() -> None:
         assert mine.status_code == 200 and theirs.status_code == 200
         assert mine.json()["message_id"] != theirs.json()["message_id"]
         assert len(_messages(client, room_id)) == 2
+
+
+def _upload(client: TestClient, room_id: str, name: str) -> str:
+    response = client.post(
+        f"/api/v1/rooms/{room_id}/attachments",
+        headers=OWNER,
+        files={"file": (name, b"content", "text/plain")},
+    )
+    assert response.status_code == 200, response.text
+    return str(response.json()["attachment_id"])
+
+
+def test_key_reuse_with_different_attachments_is_rejected() -> None:
+    """attachment_ids used to be missing from the hashed request, so a retry
+    with the same key and different attachments replayed the first message
+    instead of being told it disagreed with an already-claimed key.
+    """
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    with TestClient(app) as client:
+        room_id = _enter(client, OWNER)
+        first_attachment = _upload(client, room_id, "a.txt")
+        second_attachment = _upload(client, room_id, "b.txt")
+        path = f"/api/v1/rooms/{room_id}/messages"
+        first = client.post(
+            path,
+            headers=_keyed(OWNER, "attach-1"),
+            json={"content": "See attached", "attachment_ids": [first_attachment]},
+        )
+        assert first.status_code == 200, first.text
+        conflict = client.post(
+            path,
+            headers=_keyed(OWNER, "attach-1"),
+            json={"content": "See attached", "attachment_ids": [second_attachment]},
+        )
+        assert conflict.status_code == 409, conflict.text
+        assert "different request" in conflict.text
+        assert len(_messages(client, room_id)) == 1
+
+
+def test_key_reuse_with_same_attachments_reordered_replays() -> None:
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    with TestClient(app) as client:
+        room_id = _enter(client, OWNER)
+        one = _upload(client, room_id, "a.txt")
+        two = _upload(client, room_id, "b.txt")
+        path = f"/api/v1/rooms/{room_id}/messages"
+        first = client.post(
+            path,
+            headers=_keyed(OWNER, "attach-2"),
+            json={"content": "See attached", "attachment_ids": [one, two]},
+        )
+        assert first.status_code == 200, first.text
+        replay = client.post(
+            path,
+            headers=_keyed(OWNER, "attach-2"),
+            json={"content": "See attached", "attachment_ids": [two, one]},
+        )
+        assert replay.status_code == 200, replay.text
+        assert replay.json() == first.json()
+        assert len(_messages(client, room_id)) == 1
+
+
+def test_attachment_free_send_hashes_exactly_as_before() -> None:
+    """attachment_ids is folded into the hashed request only when non-empty,
+    so an attachment-free send must still hash the same dict shape the code
+    used before attachments were part of the idempotency contract.
+    """
+    request = {
+        "role": "HUMAN",
+        "content": "Ship it",
+        "metadata": {},
+        "parent_message_id": None,
+        "invoke_mentioned_agents": False,
+    }
+    assert "attachment_ids" not in request
+    pre_existing_hash = MultiplayerService._request_hash("message.create", request)
+
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    with TestClient(app) as client:
+        room_id = _enter(client, OWNER)
+        path = f"/api/v1/rooms/{room_id}/messages"
+        sent = client.post(path, headers=_keyed(OWNER, "no-attach"), json={"content": "Ship it"})
+        assert sent.status_code == 200, sent.text
+
+        async def _stored_hash() -> str:
+            svc = routes_module._svc_or_404()
+            record = await svc.repos.idempotency.get(room_id, "owner", "no-attach")
+            assert record is not None
+            return record.request_hash
+
+        assert asyncio.run(_stored_hash()) == pre_existing_hash
 
 
 def test_blank_or_oversized_keys_are_rejected() -> None:

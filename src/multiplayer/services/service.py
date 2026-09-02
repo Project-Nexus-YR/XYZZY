@@ -5515,13 +5515,19 @@ class MultiplayerService:
         content = self._validate_non_empty(content, "message content")
         if idempotency_key is not None:
             idempotency_key = self._validate_idempotency_key(idempotency_key)
-        request = {
+        request: dict[str, Any] = {
             "role": role.value,
             "content": content,
             "metadata": metadata or {},
             "parent_message_id": parent_message_id,
             "invoke_mentioned_agents": invoke_mentioned_agents,
         }
+        # Folded in only when present, so every hash already stored for an
+        # attachment-free send still matches and an old client retrying one
+        # keeps working. A retry with the same key and different attachments
+        # is a different request, not a replay of the first.
+        if attachment_ids:
+            request["attachment_ids"] = sorted(attachment_ids)
         msg = Message(
             message_id=new_id("msg"),
             room_id=room_id,
@@ -8728,6 +8734,7 @@ class MultiplayerService:
                     "session_id": run.session_id,
                     "agent_id": run.agent_id,
                     "run_id": run.run_id,
+                    "branch_id": run.branch_id,
                     "status": run.status.value,
                     # Half of "why did this agent speak"; the other half is the event.
                     "triggered_by": run.triggered_by.value,

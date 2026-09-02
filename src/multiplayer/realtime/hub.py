@@ -58,7 +58,9 @@ class RealtimeHub:
         """
         self._fanout = fanout
 
-    async def subscribe(self, room_id: str, user_id: str) -> RealtimeSubscription:
+    async def subscribe(
+        self, room_id: str, user_id: str, *, queue: asyncio.Queue[dict[str, Any]] | None = None
+    ) -> RealtimeSubscription:
         # Minted the way every other id here is minted, and deliberately not from
         # a clock. The previous spelling was the loop time to six decimals plus
         # `id(self)`, and `self` is the one hub, so the whole identifier was a
@@ -67,10 +69,15 @@ class RealtimeHub:
         # the first in `_subscriptions`, which is the dictionary
         # `revoke_room_access` searches, so the overwritten socket became
         # unrevokable and kept receiving the room after its access was withdrawn.
+        #
+        # `queue` lets a caller give an extra room subscription the same queue
+        # as one it already holds, so one socket can drain every room it
+        # subscribed to through a single read loop instead of one per room.
         sub = RealtimeSubscription(
             subscription_id=new_id("sub"),
             room_id=room_id,
             user_id=user_id,
+            **({"queue": queue} if queue is not None else {}),
         )
         async with self._lock:
             self._subscriptions[sub.subscription_id] = sub
