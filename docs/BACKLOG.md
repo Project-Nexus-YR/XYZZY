@@ -24,12 +24,6 @@ deferred with reasons rather than fixed in place:
 - **Concurrent processes can race startup migrations.** Multi-process
   deployments should start one process first today; a migration lock rides
   with the scaling epic.
-- **A configured local endpoint receives OPENAI_API_KEY when both are
-  set.** Intended behavior for keyed proxies such as OpenRouter, but it
-  deserves a loud line in the configuration docs.
-- **Message idempotency omits attachment ids**, so a retry with different
-  attachments can replay as the original. Small; fold into the next
-  attachments round.
 - **The live 3 to 5 human baseline run** against ChatGPT Projects and the
   open competitors, which the benchmark doc itself records as incomplete.
 
