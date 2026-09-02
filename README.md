@@ -363,6 +363,11 @@ call proving the genuine provider path produces model-written output.
 Locally, the same test runs whenever the key is exported and skips loudly
 when it is not.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup and the checks a pull
+request must pass.
+
 ## License
 
 Apache 2.0, see [LICENSE](LICENSE).
