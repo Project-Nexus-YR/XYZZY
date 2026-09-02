@@ -11,7 +11,7 @@ Live page: [xyzzy.yasserameur-dev.workers.dev](https://xyzzy.yasserameur-dev.wor
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="site/assets/screenshot-hero-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="site/assets/screenshot-hero-light.png">
-  <img alt="XYZZY workspace: a channel conversation beside an open thread, with the room sidebar" src="site/assets/screenshot-hero-dark.png">
+  <img alt="XYZZY workspace: a channel conversation beside an open thread, with the room sidebar" src="site/assets/screenshot-hero-dark.png" width="960">
 </picture>
 
 ## Try it
@@ -90,7 +90,7 @@ Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 lice
 │  Queue delivery  │  Pause/Resume/Cancel · Interventions  │
 ├──────────────────┴──────────────────────────────────────┤
 │            Repository Layer (repositories.py)           │
-│   16 typed repos · Atomic event sequencing              │
+│   44 typed repos · Atomic event sequencing              │
 ├─────────────────────────────────────────────────────────┤
 │           Database Layer (connection.py)                │
 │         aiosqlite · WAL mode · Transaction support       │
@@ -105,34 +105,17 @@ Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 lice
 
 ```
 src/multiplayer/
-├── domain/
-│   ├── models.py          # 25+ domain models (frozen dataclasses)
-│   └── events.py          # 40+ event types, RoomEvent, OrgEvent
-├── db/
-│   ├── connection.py      # aiosqlite wrapper with transaction support
-│   └── repositories.py    # 16 typed repository classes
-├── migrations/
-│   └── 0NN_*.sql           # numbered migrations, applied in order at startup
-├── services/
-│   ├── service.py         # Core service layer with state machines
-│   └── presence.py        # In-memory presence tracking
-├── nexus_bridge/
-│   └── agent_bridge.py    # NEXUS runtime adapter (asyncio.Lock protected)
-├── realtime/
-│   ├── hub.py             # Pub/sub with lock-protected mutations
-│   └── websocket.py       # WebSocket endpoint handler
-├── api/
-│   └── routes.py          # 40+ REST endpoints
-└── server.py              # Uvicorn entry point with lifespan
+├── domain/        # models.py, events.py: frozen dataclasses, RoomEvent/OrgEvent
+├── db/            # connection.py, repositories.py: 44 typed repository classes
+├── migrations/    # numbered *.sql, applied in order at startup
+├── services/      # service.py, presence.py: state machines, presence tracking
+├── nexus_bridge/  # agent_bridge.py: NEXUS runtime adapter
+├── realtime/      # hub.py, websocket.py: pub/sub, WebSocket endpoint
+├── api/           # routes.py: REST endpoints
+└── server.py      # Uvicorn entry point with lifespan
 web/
-└── index.html             # Single-page workspace UI
-tests/
-├── unit/                  # Domain model tests
-├── integration/           # Repository, service, API tests
-├── concurrency/           # Concurrent event generation, hub, bridge
-├── security/              # State machines, approvals, scope isolation
-├── failure/               # Error handling, validation, stub tests
-└── regression/            # Reconnect correctness
+└── index.html     # Single-page workspace UI
+tests/             # unit, integration, concurrency, security, failure, regression
 ```
 
 ## How It Uses NEXUS
@@ -202,7 +185,7 @@ python -m multiplayer.manage multiplayer.db token list
 ```
 
 ```bash
-# Start the server (serves API + web UI). POSIX shells - macOS zsh, Linux bash:
+# Start the server (serves API + web UI). POSIX shells: macOS zsh, Linux bash.
 export XYZZY_AUTH_TOKENS='{"local-dev-token":"user_local"}'
 export OPENAI_API_KEY="..."                 # optional; simulated when unset
 export XYZZY_OPENAI_MODEL="gpt-5.4-mini" # optional; this is the default
@@ -342,7 +325,7 @@ python -m pytest tests/regression/ -v
 
 ## Current Status
 
-The current repository gate is 970 passing tests plus Ruff format/check and strict `mypy src`,
+The current repository gate is 979 tests (978 passing, 1 skipped without `OPENAI_API_KEY`) plus Ruff format/check and strict `mypy src`,
 run on every push and pull request by `.github/workflows/ci.yml`.
 The suite covers:
 - Unit tests for domain models
