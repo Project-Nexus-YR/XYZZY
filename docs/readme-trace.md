@@ -13,6 +13,8 @@ re-verified this session; the commands that produced them are below.
 | CI runs ruff/mypy/pytest on 3.11, pinned actions | `cat .github/workflows/ci.yml` | job runs `ruff check`, `ruff format --check`, `mypy src`, `pytest`, `python-version: "3.11"`, `uses:` lines pinned to commit SHAs |
 | Apache 2.0 license consistency | `head -2 LICENSE`; `grep license pyproject.toml` | LICENSE starts "Apache License, Version 2.0"; `pyproject.toml` license field is `Apache-2.0` |
 | Badges resolve | `curl -sI <badge and repo URLs>` | HTTP 200 for both Actions badge URLs and the repo page |
+| Try-it command (line 20) serves the demo | `docker pull ghcr.io/project-nexus-yr/xyzzy` then `docker run -d -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/project-nexus-yr/xyzzy`; `curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/` | `Status: Downloaded newer image for ghcr.io/project-nexus-yr/xyzzy:latest`; HTTP 200 after 3 s; container log `Uvicorn running on http://0.0.0.0:8000` and `"GET / HTTP/1.1" 200 OK`; page title `<title>XYZZY</title>` |
+| GitHub About box matches line 3 | `gh repo edit --description "A team makes a hard technical decision with AI, and keeps the receipts."`; `gh repo view --json description,homepageUrl,repositoryTopics` | description `A team makes a hard technical decision with AI, and keeps the receipts.`; homepage `https://xyzzy.yasserameur-dev.workers.dev/`; 10 topics: ai, ai-agents, audit-log, collaboration, decision-making, fastapi, multi-agent, self-hosted, sqlite, websockets |
 
 Carried-forward note: this repo had no prior `docs/readme-trace.md`, so there
 is no earlier-round trace to diff against; every row above was produced or
