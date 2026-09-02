@@ -33,9 +33,9 @@ def test_demo_mode_seeds_a_realistic_scene_with_no_api_key() -> None:
         room_id = context["rooms"][0]["room_id"]
 
         messages = client.get(f"/api/v1/rooms/{room_id}/messages", headers=DEMO).json()
-        assert len(messages) >= 7
+        assert len(messages) >= 8
         senders = {m["sender_id"] for m in messages}
-        assert {"user_demo", "user_demo_second"} <= senders
+        assert {"user_demo", "user_demo_second", "user_demo_third"} <= senders
         # The scene must not read as a fixture written in one instant: message
         # timestamps are spread back across a plausible stretch of conversation.
         minutes = {m["created_at"][:16] for m in messages}

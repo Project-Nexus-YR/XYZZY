@@ -712,6 +712,16 @@ class MultiplayerService:
                 )
             )
         await self.invite_room_member(room_id, DEMO_SECOND_USER_ID, "editor", DEMO_USER_ID)
+        demo_third_user_id = "user_demo_third"
+        if await self.repos.users.get(demo_third_user_id) is None:
+            await self.repos.users.create(
+                User(
+                    user_id=demo_third_user_id,
+                    display_name="Karim",
+                    email=f"{demo_third_user_id}@demo.local",
+                )
+            )
+        await self.invite_room_member(room_id, demo_third_user_id, "editor", DEMO_USER_ID)
 
         async def say(sender: str, content: str, parent_message_id: str | None = None) -> str:
             message = await self.send_message(
@@ -751,6 +761,11 @@ class MultiplayerService:
             DEMO_SECOND_USER_ID,
             "Our bank's API settles T+2 at best, and that's before reconciliation.",
             parent_message_id=m3,
+        )
+        await say(
+            demo_third_user_id,
+            "Watching from the finance side. Ping me once the branch has numbers, "
+            "I'll sanity-check them against last quarter's chargeback report.",
         )
         await self.add_reaction(m1, DEMO_SECOND_USER_ID, "\U0001f44d")
 

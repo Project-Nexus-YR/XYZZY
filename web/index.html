@@ -239,6 +239,9 @@ a,.output-link{text-underline-offset:2px}
 .popover-menu button{
   text-align:left;padding:var(--s-2) var(--s-3);border-radius:var(--r-2);
   font-size:var(--t-ui);letter-spacing:var(--k-ui);color:var(--text);
+  /* These sit edge to edge with zero gap, so a hit-area extension would always
+     cover part of the next item - the real box grows instead. */
+  min-height:40px;display:flex;align-items:center;
 }
 .popover-menu button:hover{background:var(--line)}
 .popover-menu button.danger{color:var(--danger)}
@@ -247,6 +250,17 @@ a,.output-link{text-underline-offset:2px}
   position:absolute;top:4px;right:4px;width:6px;height:6px;border-radius:50%;background:var(--accent);
 }
 .icon-button{position:relative}
+/* A ::after hit-area extension is only safe when it stays strictly under half
+   the smallest gap its group ever sits in - a bigger inset makes neighbouring
+   controls' extended zones overlap, so a tap near the boundary silently hits
+   the wrong one. Each group below is capped to the tightest gap it actually
+   ships in; a group whose real gap can be zero (a contiguous list, no room to
+   spare) drops the extension and is widened for real instead. */
+.icon-button::after{content:"";position:absolute;inset:-1px}
+.btn-sm::after,.ontology-actions button::after{
+  content:"";position:absolute;inset:-3px;
+}
+.btn-sm,.ontology-actions button{position:relative}
 .browse-room-row{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-2) var(--s-3);border-bottom:1px solid var(--line)}
 .browse-room-row .detail{font-size:var(--t-small);color:var(--text-3)}
 .browse-room-row .btn-sm{margin-left:auto;flex-shrink:0}
@@ -414,12 +428,15 @@ a,.output-link{text-underline-offset:2px}
   padding:0 var(--s-2) 0 var(--s-5);border-bottom:1px solid var(--line);
 }
 .room-header > div{min-width:0}
-.room-header h2{display:flex;align-items:center;gap:var(--s-2);
+/* text-overflow does nothing on the flex container itself - it has to sit on
+   the child that actually holds the overflowing text, and that child needs
+   its own min-width:0 to be allowed to shrink below its content at all. */
+.room-header h2{display:flex;align-items:center;gap:var(--s-2);min-width:0;
   font-size:var(--t-title);font-weight:var(--w-strong);letter-spacing:var(--k-title);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
+#room-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .room-header .meta{font-size:var(--t-small);color:var(--text-3);letter-spacing:var(--k-small);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.header-actions{margin-left:auto;display:flex;align-items:center;gap:var(--s-1)}
+.header-actions{margin-left:auto;display:flex;align-items:center;gap:var(--s-1);flex-shrink:0}
 .unread-pill{
   font-size:var(--t-meta);font-weight:var(--w-medium);
   background:var(--accent);color:var(--accent-ink);padding:1px var(--s-1);border-radius:var(--r-1);
@@ -744,11 +761,15 @@ a,.output-link{text-underline-offset:2px}
 }
 .output-provenance{font-size:var(--t-meta);color:var(--text-3);line-height:1.5}
 .review-state{font-size:var(--t-meta);color:var(--text-3);text-transform:uppercase;letter-spacing:.05em}
-.review-actions{display:flex;gap:var(--s-2);margin-top:var(--s-2)}
+.review-actions{display:flex;gap:var(--s-3);margin-top:var(--s-2)}
+/* Include/Exclude sit close together (8px was tight enough that a hit-area
+   extension would cover half the gap) - the gap above grew to 12px and the
+   real box grows here instead of adding an extension that could still reach
+   across it. */
 .review-actions button{
-  border:1px solid var(--line-2);border-radius:var(--r-2);padding:var(--s-1) var(--s-2);
+  border:1px solid var(--line-2);border-radius:var(--r-2);padding:var(--s-2) var(--s-3);
   font-size:var(--t-small);color:var(--text-2);letter-spacing:var(--k-small);
-  transition:background var(--t-fast);
+  min-height:36px;transition:background var(--t-fast);
 }
 .review-actions button:hover{background:var(--line)}
 /* Text-color-only active state read as barely-different from the inactive
@@ -764,11 +785,12 @@ a,.output-link{text-underline-offset:2px}
 .synthesis-row{display:flex;align-items:flex-end;gap:var(--s-3);flex-wrap:wrap}
 .synthesis-title{font-size:var(--t-small);font-weight:var(--w-medium);letter-spacing:var(--k-small)}
 .synthesis-meta{font-size:var(--t-small);color:var(--text-3);margin-top:var(--s-half);line-height:1.45;max-width:34ch;letter-spacing:var(--k-small)}
-.synthesis-actions{display:flex;gap:var(--s-2);align-items:center;margin-left:auto}
-.synthesis-actions select{
+.synthesis-actions{display:flex;flex-wrap:wrap;gap:var(--s-2);align-items:center;margin-left:auto}
+.synthesis-actions select,.synthesis-actions input{
   background:var(--bg);border:1px solid var(--edge);border-radius:var(--r-2);
   padding:var(--s-1) var(--s-2);font-size:var(--t-small);
 }
+.synthesis-actions input{width:min(220px,40vw)}
 
 /* meta */
 .meta-head{padding:var(--s-4) max(var(--s-5),3vw)}
@@ -878,6 +900,7 @@ a,.output-link{text-underline-offset:2px}
 .records{border-top:1px solid var(--line);padding:var(--s-3) var(--s-4)}
 .records > summary{cursor:pointer;font-size:var(--t-meta);color:var(--text-3);text-transform:uppercase;letter-spacing:.06em}
 .records h3{
+  display:flex;align-items:center;justify-content:space-between;
   font-size:var(--t-meta);text-transform:uppercase;letter-spacing:.1em;
   color:var(--text-3);margin:var(--s-3) 0 0;font-weight:var(--w-normal);
 }
@@ -941,6 +964,12 @@ a,.output-link{text-underline-offset:2px}
   .setup-intro{max-width:none}
   .setup-intro h1{font-size:var(--t-head);letter-spacing:var(--k-head)}
   .strategy-toggle,.template-grid{grid-template-columns:1fr}
+  /* Every synthesis control stacked and full-width rather than fighting a
+     margin-left:auto for a row too narrow to hold all three at once. */
+  .synthesis-row{flex-direction:column;align-items:stretch}
+  .synthesis-actions{margin-left:0;width:100%}
+  .synthesis-actions input{width:100%}
+  .synthesis-actions select,.synthesis-actions button{flex:1}
 }
 
 /* Motion is an affordance, not decoration: switch it off when asked. */
@@ -1047,7 +1076,7 @@ a,.output-link{text-underline-offset:2px}
 
 <div class="center">
   <div class="room-header" id="room-header">
-    <button class="icon-button mobile-nav hidden" onclick="toggleSidebar()" aria-label="Open navigation"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7"/></svg></button>
+    <button class="icon-button mobile-nav hidden" id="sidebar-toggle" onclick="toggleSidebar()" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7"/></svg></button>
     <button class="icon-button hidden" id="header-back" onclick="openCenterView('conversation')" aria-label="Back to channel" title="Back to channel"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.6 3.4 4.4 8l5.2 4.6"/></svg></button>
     <div>
       <h2><span class="room-hash" id="room-hash-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.1 2.6 4.9 13.4M11.1 2.6 9.9 13.4M2.8 6h10.4M2.4 10h10.4"/></svg></span><span id="room-name">channel</span></h2>
@@ -1104,6 +1133,7 @@ a,.output-link{text-underline-offset:2px}
           <div><div class="panel-title" id="branch-panel-title">No AI branch selected</div><div class="panel-copy" id="branch-panel-copy">Start AI work from the composer. Runs and outputs stay together here.</div></div>
           <button class="btn-sm" onclick="toggleAITray(true)">New branch</button>
         </div>
+        <div id="resume-runs-banner" class="panel-section hidden" style="padding-top:0"></div>
         <div id="branch-runs" class="panel-section" style="padding-top:0"></div>
         <div class="outputs-head">
           <h3>Inspectable outputs</h3>
@@ -1119,6 +1149,7 @@ a,.output-link{text-underline-offset:2px}
             <div class="synthesis-meta">Selections are shared with the channel. Every published claim links to its source.</div>
           </div>
           <div class="synthesis-actions">
+            <input id="synthesis-title" aria-label="Synthesis title" placeholder="Title" required oninput="updateSelectionSummary()">
             <select id="synthesis-type" aria-label="Synthesis type" onchange="updateSelectionSummary()">
               <option value="GENERAL_SYNTHESIS">General Synthesis</option>
               <option value="DECISION_BRIEF" selected>Decision Brief</option>
@@ -1163,7 +1194,7 @@ a,.output-link{text-underline-offset:2px}
           </div>
         </div>
         <div class="meta-query">
-          <input id="meta-question" placeholder="Ask in your own words" onkeydown="if(event.key==='Enter')askMeta()">
+          <input id="meta-question" aria-label="Ask Meta a question" placeholder="Ask in your own words" onkeydown="if(event.key==='Enter')askMeta()">
           <button onclick="askMeta()">Ask</button>
         </div>
         <div class="meta-scope" id="meta-scope">Scope: current room · latest Decision Brief · maximum 10 claims</div>
@@ -1232,7 +1263,7 @@ a,.output-link{text-underline-offset:2px}
   <h3>Tasks</h3><div class="panel-section" id="tasks-panel"></div>
   <h3>Approvals</h3><div class="panel-section" id="approvals-panel"></div>
   <h3>Artifacts</h3><div class="panel-section" id="artifacts-panel"></div>
-  <h3>Decisions</h3><div class="panel-section" id="decisions-panel"></div>
+  <h3>Decisions<button class="icon-button" onclick="openCreateDecisionDialog()" aria-label="New decision" title="New decision"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button></h3><div class="panel-section" id="decisions-panel"></div>
 </details>
 </section>
 
@@ -1466,6 +1497,9 @@ function updateRoomHeader() {
 function closeSidebarDrawer() {
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('sidebar-backdrop').classList.remove('open');
+  document.getElementById('sidebar').removeAttribute('role');
+  document.getElementById('sidebar').removeAttribute('aria-modal');
+  document.getElementById('sidebar-toggle')?.setAttribute('aria-expanded', 'false');
 }
 function toggleSidebar(force) {
   const sidebar = document.getElementById('sidebar');
@@ -1473,6 +1507,12 @@ function toggleSidebar(force) {
   const open = force === undefined ? !sidebar.classList.contains('open') : force;
   sidebar.classList.toggle('open', open);
   backdrop.classList.toggle('open', open);
+  // Only a mobile drawer is modal — on desktop the sidebar is permanent chrome,
+  // never opened through this toggle, so these attributes only ever appear
+  // alongside the drawer state that makes them true.
+  if (open) { sidebar.setAttribute('role', 'dialog'); sidebar.setAttribute('aria-modal', 'true'); }
+  else { sidebar.removeAttribute('role'); sidebar.removeAttribute('aria-modal'); }
+  document.getElementById('sidebar-toggle')?.setAttribute('aria-expanded', String(open));
 }
 function toggleAITray(force) {
   const tray = document.getElementById('ai-tray');
@@ -1582,10 +1622,29 @@ function toggleChannelMenu(event) {
 }
 function closeChannelMenu() { document.getElementById('channel-menu').classList.add('hidden'); }
 
+// Whatever had focus before the modal opened, so closing it can put focus back
+// rather than dropping a keyboard user at the top of the page.
+let modalOpenerElement = null;
 function openModal(html) {
-  document.getElementById('modal-card').innerHTML = html;
+  modalOpenerElement = document.activeElement;
+  const card = document.getElementById('modal-card');
+  card.innerHTML = html;
+  // Every modal body here opens with an <h3> title; naming the dialog by it
+  // gives the dialog role an accessible name instead of an empty one.
+  const heading = card.querySelector('h3');
+  if (heading) {
+    if (!heading.id) heading.id = 'modal-title';
+    card.setAttribute('aria-labelledby', heading.id);
+  } else {
+    card.removeAttribute('aria-labelledby');
+  }
   document.getElementById('modal-backdrop').classList.remove('hidden');
-  requestAnimationFrame(() => document.getElementById('modal-card').querySelector('input,textarea')?.focus());
+  // Focus goes to the first field the moment it exists in the DOM, not on the
+  // next animation frame - a caller (openFieldDialog, the create-channel and
+  // redirect-agent dialogs) still wires up its own onsubmit/onclick handlers
+  // right after this call returns, and a deferred rAF focus has, on some
+  // paths, lost that race to a later synchronous focus/blur in the same tick.
+  card.querySelector('input,textarea')?.focus();
 }
 // A modal closed any way (Cancel, Escape, backdrop click) resolves the field
 // dialog's promise with null — one path, not three that each have to remember.
@@ -1593,6 +1652,8 @@ let pendingDialogResolve = null;
 function closeModal() {
   document.getElementById('modal-backdrop').classList.add('hidden');
   document.getElementById('modal-card').innerHTML = '';
+  if (modalOpenerElement && modalOpenerElement.isConnected) modalOpenerElement.focus();
+  modalOpenerElement = null;
   if (pendingDialogResolve) {
     const resolve = pendingDialogResolve;
     pendingDialogResolve = null;
@@ -2396,6 +2457,7 @@ async function loadStateImpl() {
   });
   renderBranches(durableBranches, state.runs || []);
   renderOutputs(roomOutputs, state.runs || []);
+  renderResumeRunsBanner(state.runs || []);
   // renderBranches() just appended branch-activity cards below the last chat message,
   // after appendMessage()'s own auto-scroll already ran — so the newest item in the
   // transcript was landing half behind the composer until a manual scroll. Re-settle
@@ -2871,7 +2933,7 @@ async function runSearch(event) {
       return;
     }
     results.innerHTML = hits.map(hit => `
-      <div class="search-hit" data-object-kind="${escHtml(hit.object_kind)}" data-object-id="${escHtml(hit.object_id)}" data-container-id="${escHtml(hit.container_id || '')}" data-room-id="${escHtml(hit.room_id)}" onclick="openSearchHit(this.dataset)">
+      <div class="search-hit" tabindex="0" role="button" data-object-kind="${escHtml(hit.object_kind)}" data-object-id="${escHtml(hit.object_id)}" data-container-id="${escHtml(hit.container_id || '')}" data-room-id="${escHtml(hit.room_id)}" onclick="openSearchHit(this.dataset)" onkeydown="if(event.key==='Enter'){event.preventDefault();openSearchHit(this.dataset);}">
         <div class="hit-meta">#${escHtml(hit.room_name || hit.room_id)} · ${escHtml(hit.object_kind)} · ${escHtml(memberName(hit.author_id))} · ${new Date(hit.created_at).toLocaleString()}</div>
         <div>${highlightExcerpt(hit.excerpt)}</div>
       </div>`).join('');
@@ -3085,6 +3147,25 @@ function decisionCardHtml(d) {
       <div class="detail">${escHtml(d.content || '').slice(0,100)}</div>
       ${actions}
     </div>`;
+}
+
+async function openCreateDecisionDialog() {
+  const values = await openFieldDialog({
+    title: 'New decision',
+    fields: [
+      {id: 'title', label: 'Title', value: '', required: true},
+      {id: 'content', label: 'Description (optional)', value: '', type: 'textarea'},
+    ],
+    submitLabel: 'Create',
+  });
+  if (!values) return;
+  try {
+    await api('POST', `/rooms/${roomId}/decisions`, {title: values.title, content: values.content || ''});
+    toast('Decision created.');
+    await loadState();
+  } catch (err) {
+    toast(`Decision was not created: ${errorMessage(err)}`, 'error');
+  }
 }
 
 async function setDecisionStatus(decisionId, status) {
@@ -3564,6 +3645,38 @@ function renderBranchActivity(branches, runs) {
   });
 }
 
+// A run's own record carries no branch_id — only a branch's execution_ids list
+// says which runs are its. This is the one place that maps back the other way.
+function branchIdForExecution(executionId) {
+  const branch = roomBranches.find(b => (b.execution_ids || []).includes(executionId));
+  return branch ? branch.branch_id : '';
+}
+
+// A run left PENDING by a navigation away mid-flight never auto-executes on
+// reload — that would be a silent write nobody asked for. It only shows up here,
+// where a click is the only thing that starts it.
+function renderResumeRunsBanner(runs) {
+  const banner = document.getElementById('resume-runs-banner');
+  const pending = runs.filter(run => run.status === 'PENDING');
+  if (!pending.length) { banner.classList.add('hidden'); banner.innerHTML = ''; return; }
+  banner.classList.remove('hidden');
+  banner.innerHTML = `<div class="card"><div class="detail">${pending.length} run${pending.length === 1 ? '' : 's'} left pending by an earlier launch.</div>
+    <div class="btns"><button class="btn-sm" onclick="resumePendingRuns()">Resume ${pending.length} run${pending.length === 1 ? '' : 's'}</button></div></div>`;
+}
+
+async function resumePendingRuns() {
+  const pending = roomRuns.filter(run => run.status === 'PENDING');
+  const results = await Promise.allSettled(pending.map(run => {
+    const branchId = branchIdForExecution(run.execution_id);
+    return branchId
+      ? api('POST', `/branches/${branchId}/runs/${run.execution_id}/execute`)
+      : Promise.reject(new Error('no branch for run'));
+  }));
+  const failed = results.filter(r => r.status === 'rejected').length;
+  await loadState();
+  toast(failed ? `${pending.length - failed} resumed; ${failed} failed.` : `${pending.length} run${pending.length === 1 ? '' : 's'} resumed.`, failed ? 'error' : 'success');
+}
+
 async function selectBranch(branchId) {
   currentBranchId = branchId;
   openCenterView('branch');
@@ -3583,6 +3696,8 @@ function applyPermissions() {
   if (synthesizeButton && !canEdit) { synthesizeButton.disabled = true; synthesizeButton.title = readOnly; }
   const synthesisType = document.getElementById('synthesis-type');
   if (synthesisType) { synthesisType.disabled = !canEdit; }
+  const synthesisTitle = document.getElementById('synthesis-title');
+  if (synthesisTitle) { synthesisTitle.disabled = !canEdit; }
   document.querySelectorAll('.review-actions button').forEach(button => {
     button.disabled = !canEdit;
     button.title = canEdit ? '' : readOnly;
@@ -3672,10 +3787,21 @@ async function launchParallelAnalyses() {
   ));
   const agents = spawned.filter(result => result.status === 'fulfilled').map(result => result.value);
   if (agents.length !== templates.length) {
+    // A partial spawn is not a usable roster: unwind the agents this flow just
+    // created before surfacing the error, so a retry does not pile up orphans.
+    const unwound = await Promise.allSettled(agents.map(agent =>
+      api('DELETE', `/rooms/${roomId}/agents/${agent.agent_id}`)
+    ));
+    const stillPresent = unwound.filter(result => result.status === 'rejected').length;
     button.removeAttribute('aria-busy');
     button.textContent = 'Run selected in parallel';
     updateTemplateSelection();
-    setLaunchNote(`${agents.length} specialists spawned; branch start was stopped because another spawn failed.`, 'error');
+    setLaunchNote(
+      stillPresent
+        ? `Spawn failed, and ${stillPresent} agent${stillPresent === 1 ? '' : 's'} from this launch could not be removed and may still be in the room.`
+        : 'Spawn failed; the room was left as it was.',
+      'error'
+    );
     return;
   }
   let branchLaunch;
@@ -3763,6 +3889,17 @@ async function setOutputSelection(outputId, selection) {
   }
 }
 
+// Derives a sensible starting title from a branch prompt's first clause, so the
+// title field never starts blank without ever lying about what was asked.
+function firstClause(prompt) {
+  const trimmed = (prompt || '').trim();
+  const clause = trimmed.split(/[.!?\n]/)[0].trim();
+  return clause || trimmed;
+}
+
+// The title input tracks the branch's derived title until the person edits it;
+// once edited, their wording wins even if the branch selection changes under it.
+let synthesisTitleAuto = '';
 function updateSelectionSummary() {
   const available = new Set(roomOutputs.map(o => o.output_id));
   const included = [...outputSelections].filter(([id, state]) => available.has(id) && state === 'included').length;
@@ -3772,32 +3909,43 @@ function updateSelectionSummary() {
     ? `${included} included · ${excluded} excluded · ${roomOutputs.length - reviewed} unreviewed`
     : 'No outputs selected';
   const minimumIncluded = currentBranchMode === 'TURN_LOCKED_SINGLE' ? 1 : 2;
+  const titleInput = document.getElementById('synthesis-title');
+  const branch = roomBranches.find(b => b.branch_id === currentBranchId);
+  const derived = firstClause(branch ? (branch.initiating_prompt || branch.prompt || '') : '');
+  if (!titleInput.value.trim() || titleInput.value === synthesisTitleAuto) {
+    titleInput.value = derived;
+    synthesisTitleAuto = derived;
+  }
+  const title = titleInput.value.trim();
   const valid = roomOutputs.length >= minimumIncluded
     && reviewed === roomOutputs.length
-    && included >= minimumIncluded;
+    && included >= minimumIncluded
+    && Boolean(title);
   const synthesize = document.getElementById('synthesize-button');
   const chosen = SYNTHESIS_TYPES[document.getElementById('synthesis-type').value];
   synthesize.disabled = !valid;
   synthesize.textContent = included
     ? `Publish ${chosen.name} from ${included}`
     : `Publish ${chosen.name}`;
-  synthesize.title = valid ? '' : `Review every output and include at least ${minimumIncluded}`;
+  synthesize.title = valid ? '' : `Review every output, include at least ${minimumIncluded}, and give the synthesis a title`;
 }
 
 const SYNTHESIS_TYPES = {
-  GENERAL_SYNTHESIS: { name: 'General Synthesis', title: 'Authentication migration synthesis' },
-  DECISION_BRIEF: { name: 'Decision Brief', title: 'Authentication migration decision' },
-  PROGRESS_REPORT: { name: 'Progress Report', title: 'Authentication migration progress' }
+  GENERAL_SYNTHESIS: { name: 'General Synthesis' },
+  DECISION_BRIEF: { name: 'Decision Brief' },
+  PROGRESS_REPORT: { name: 'Progress Report' }
 };
 
 async function publishSynthesis() {
   const button = document.getElementById('synthesize-button');
   const type = document.getElementById('synthesis-type').value;
   const chosen = SYNTHESIS_TYPES[type];
+  const title = document.getElementById('synthesis-title').value.trim();
+  if (!title) return;
   button.disabled = true;
   try {
     await api('POST', `/branches/${currentBranchId}/syntheses`, {
-      title: chosen.title, synthesis_type: type
+      title, synthesis_type: type
     }, { idempotencyKey: idempotencyKey() });
     await loadState();
     openContext('artifacts');
