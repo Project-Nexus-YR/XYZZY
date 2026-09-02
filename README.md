@@ -11,7 +11,7 @@ Live page: [xyzzy.yasserameur-dev.workers.dev](https://xyzzy.yasserameur-dev.wor
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="site/assets/screenshot-hero-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="site/assets/screenshot-hero-light.png">
-  <img alt="XYZZY workspace: a channel conversation beside an open thread, with the room sidebar" src="site/assets/screenshot-hero-dark.png" width="960">
+  <img alt="The XYZZY demo workspace: the General channel conversation between three teammates and, beneath it, a completed two-agent branch showing 2 included, 0 excluded" src="site/assets/screenshot-hero-dark.png" width="960">
 </picture>
 
 ## Try it
