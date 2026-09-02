@@ -283,113 +283,20 @@ fleet.
 
 ### Signing in through an identity provider
 
-SSO is additive. With none of these set the server behaves exactly as before:
-bootstrap tokens and `manage token mint`, so a deployment without a provider is
-untouched.
-
-| Variable | What it decides |
-| --- | --- |
-| `XYZZY_OIDC_ISSUER` | The provider's issuer URL. Its configuration is discovered from `{issuer}/.well-known/openid-configuration`. |
-| `XYZZY_OIDC_CLIENT_ID` | This deployment's client id. |
-| `XYZZY_OIDC_CLIENT_SECRET` | Optional; omit for a public client relying on PKCE alone. |
-| `XYZZY_OIDC_REDIRECT_URI` | Where the provider sends the browser back. |
-| `XYZZY_OIDC_SCOPES` | Space separated; `openid profile email` by default. |
-| `XYZZY_OIDC_POST_LOGOUT_REDIRECTS` | Comma-separated allowlist. A redirect target taken from a request would be an open redirect. |
-| `XYZZY_SESSION_IDLE_SECONDS` | Idle clock, 1800 by default (Keycloak's). |
-| `XYZZY_SESSION_ABSOLUTE_SECONDS` | Absolute ceiling, 36000 by default (Keycloak's). |
-| `XYZZY_SESSION_ACCESS_SECONDS` | How long one access credential lives before it must be refreshed, 300 by default (Keycloak's). |
-| `XYZZY_OIDC_ALLOW_UNVERIFIABLE_SESSIONS` | Accept a login from a provider that issues no refresh token. Off by default, because such a session can never be re-checked; when on, it is capped at 15 minutes. |
-
-`GET /api/v1/auth/login` starts the flow, `GET /api/v1/auth/callback` finishes it
-and returns an access token and a refresh token, `POST /api/v1/auth/refresh`
-rotates them, `POST /api/v1/auth/logout` ends this session,
-`POST /api/v1/auth/logout-everywhere` ends all of them, and
-`POST /api/v1/auth/backchannel-logout` accepts the provider's logout token.
-Every one of them sits under the `/api/v1` prefix, so `XYZZY_OIDC_REDIRECT_URI`
-must too.
-
-Three things worth knowing before you deploy it. A refresh token is spendable
-once, and presenting a spent one revokes the entire session rather than that
-token: a replay means a copy exists somewhere it should not, and revoking only
-the copy leaves whoever holds the original inside. And an SSO login is keyed on
-the provider's issuer and subject, never on the email address, so it does **not**
-attach to an operator-created account that happens to share an email. Linking
-those is a deliberate act; inferring it from a string is how accounts get taken
-over. And there is no reuse grace window: a refresh
-whose answer is lost cannot be retried, and the person signs in again. A window
-was tried and removed, because it let a thief presenting the stolen predecessor
-take a working session and leave the victim's own next refresh to be judged the
-replay. Keycloak's default is no reuse either.
-
-Every refresh also spends the provider's own refresh token, so a person
-disabled, locked out, or password-reset upstream loses this session at the next
-rotation rather than at the absolute clock.
-
-The browser itself never sees either token. `GET /api/v1/auth/callback` sets a
-cookie only when the request prefers `text/html` (a browser arriving by
-redirect); that cookie carries the access token alone, HttpOnly, `__Host-`
-prefixed on an HTTPS deployment, and expires with the session's idle clock.
-Every other caller (curl, an agent, `refresh`/`logout`) still gets the JSON
-body with both tokens, unchanged. A cookie authenticates an HTTP request only
-when it also carries header `X-XYZZY-Client: web`, on every method including
-GET, which is what keeps a mutating GET like `/auth/end-session` out of CSRF
-reach: a cross-origin request cannot attach a custom header without a CORS
-preflight `XYZZY_CORS_ORIGINS` refuses, and a top-level navigation cannot
-attach one at all. A cookie-authed WebSocket cannot carry that header either,
-so it is gated on `Origin` matching `configured_origins()` exactly instead.
-
-**Trying it locally:** `scripts/dev_idp.py` is a throwaway identity provider:
-stdlib/FastAPI, one hardcoded user, a fresh RS256 key generated on every start.
-It refuses to run unless its own issuer is a loopback host, because it trusts
-every caller completely.
-
-```bash
-python scripts/dev_idp.py --port 9100
-# in another shell
-export XYZZY_OIDC_ISSUER="http://127.0.0.1:9100"
-export XYZZY_OIDC_CLIENT_ID="dev-client"
-export XYZZY_OIDC_REDIRECT_URI="http://127.0.0.1:8000/api/v1/auth/callback"
-python -m multiplayer.server
-```
-
-Open http://localhost:8000 and sign in through the provider; `XYZZY_DEV_IDP_SUB`,
-`XYZZY_DEV_IDP_NAME`, and `XYZZY_DEV_IDP_EMAIL` change the one user's claims.
+SSO is additive: with none of `XYZZY_OIDC_*` set, the server behaves exactly as
+before (bootstrap tokens and `manage token mint`). Set the issuer, client id,
+and redirect URI to add OIDC login; `scripts/dev_idp.py` is a throwaway local
+provider for trying it without a real one. Full variable table, endpoint list,
+refresh-token and cookie security notes: [docs/SSO.md](docs/SSO.md).
 
 ### Talking to other agents
 
-XYZZY speaks Google's [A2A](https://a2a-protocol.org/) v0.3.0, so an agent built
-against somebody else's runtime can be asked for work here, and one of ours can
-ask it back.
-
-`GET /.well-known/agent-card.json` is the discovery document and needs no
-credential. It advertises the door and **no agents at all**: a room's membership
-is the access-control decision, so a public list of agents and their skills
-would publish the shape of a private workspace to anyone who fetched a URL. The
-authenticated `agent/getAuthenticatedExtendedCard` shows each caller only the
-agents that caller could actually address, which means no two callers share one
-document.
-
-`POST /a2a/v1` is the JSON-RPC 2.0 endpoint: `message/send`, `message/stream`,
-`tasks/get`, `tasks/cancel`, `tasks/resubscribe`,
-`agent/getAuthenticatedExtendedCard`, and the two `tasks/pushNotificationConfig`
-methods. The card advertises `pushNotifications: false` and those two refuse by
-name, because a webhook fan-out would be a second delivery path with weaker guarantees
-than the durable ordered log clients already have. Streaming is
-Server-Sent-Events over that same log, not a parallel one.
-
-A2A addresses one agent per URL and this server fronts many rooms, so
-`message.metadata` carries `roomId` and `targetAgentId`. A caller who may not act
-in a room gets the same refusal whether the agent is real, filed elsewhere, or
-imaginary; a task you may not read answers exactly as a task that does not exist.
-
-Two rules about delegation are worth knowing before you wire agents to each
-other. What a delegate may spend is its asker's own authority intersected with
-its own, re-read from durable rows at the moment of spending: narrow the asker
-mid-task and the delegate narrows with it, and an asker that has left the room
-lends nothing. And the chain a delegation belongs to is read from the delegating
-agent's own open run rather than taken from the request, so an agent cannot
-start a fresh chain by declining to name its parent: a cycle is refused by name,
-and a chain deeper than four delegations is too.
+XYZZY speaks Google's [A2A](https://a2a-protocol.org/) v0.3.0 at `POST
+/a2a/v1`, so an agent built against somebody else's runtime can be asked for
+work here, and one of ours can ask it back. `GET
+/.well-known/agent-card.json` is the discovery document; it advertises no
+agents, since room membership is the access-control decision. Method list,
+delegation-authority rules, and cycle limits: [docs/A2A.md](docs/A2A.md).
 
 ### Docker
 
