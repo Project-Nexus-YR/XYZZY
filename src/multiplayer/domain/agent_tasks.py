@@ -119,10 +119,6 @@ class PushNotificationNotSupportedError(A2AError):
     code = "PushNotificationNotSupportedError"
 
 
-class ExtensionSupportRequiredError(A2AError):
-    code = "ExtensionSupportRequiredError"
-
-
 class TaskNotCancelableError(A2AError):
     code = "TaskNotCancelableError"
 

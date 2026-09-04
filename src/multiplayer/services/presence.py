@@ -125,10 +125,11 @@ class PresenceService:
                 if pres is not None:
                     redis_result.append(pres)
             return redis_result
+        now = utcnow()
         result: list[Presence] = []
         async with self._lock:
             for pres in self._presence.values():
-                if pres.room_id == room_id:
+                if pres.room_id == room_id and now - pres.last_seen <= self._stale_threshold:
                     result.append(pres)
         return result
 

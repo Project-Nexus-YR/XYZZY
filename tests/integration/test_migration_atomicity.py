@@ -11,15 +11,33 @@ from pathlib import Path
 
 import pytest
 
+import multiplayer
 from multiplayer.db.connection import Database
 from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.services.service import MultiplayerService
+
+MIGRATIONS_DIR = Path(multiplayer.__file__).parent / "migrations"
+GOLDEN_SCHEMA_PATH = Path(__file__).parent / "data" / "golden_schema.sql"
 
 
 async def _service() -> tuple[Database, MultiplayerService]:
     db = Database(":memory:")
     await db.connect()
     return db, MultiplayerService(db, RealtimeHub(), known_users=frozenset())
+
+
+async def _dump_schema(db: Database) -> str:
+    """Every object sqlite_master records, in the shape the golden fixture
+    holds. A rebuild migration that drops a trigger or index and forgets to
+    restate it changes this dump even though it changes nothing a row count
+    would notice."""
+    rows = await db.fetch_all(
+        "SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name"
+    )
+    parts = []
+    for row in rows:
+        parts.append(f"-- {row['type']} {row['name']}\n{row['sql'].strip()}\n")
+    return "\n".join(parts) + "\n"
 
 
 async def test_a_failing_migration_leaves_no_trace_and_succeeds_on_retry(tmp_path):
@@ -91,8 +109,29 @@ async def test_the_real_migration_chain_applies_from_scratch():
     db, svc = await _service()
     try:
         await svc.initialize()
-        expected = len(list(Path("src/multiplayer/migrations").glob("*.sql")))
+        expected = len(list(MIGRATIONS_DIR.glob("*.sql")))
         row = await db.fetch_one("SELECT COUNT(*) AS n FROM schema_migrations")
         assert row is not None and row["n"] == expected
+    finally:
+        await db.close()
+
+
+async def test_the_real_migration_chain_matches_the_golden_schema():
+    """A row count only says how many migrations ran, not what they left
+    behind. A table rebuild migration that drops a trigger or an index and
+    never restates it still passes that count, so this compares the whole
+    schema a fresh boot produces against a fixture committed alongside it."""
+    db, svc = await _service()
+    try:
+        await svc.initialize()
+        actual = await _dump_schema(db)
+        golden = GOLDEN_SCHEMA_PATH.read_text(encoding="utf-8")
+        assert actual == golden, (
+            "the freshly migrated schema no longer matches "
+            f"{GOLDEN_SCHEMA_PATH}: a trigger or index was dropped, added, "
+            "or changed without updating the fixture"
+        )
+        broken_references = await db.fetch_all("PRAGMA foreign_key_check")
+        assert broken_references == []
     finally:
         await db.close()

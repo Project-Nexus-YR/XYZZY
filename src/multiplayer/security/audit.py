@@ -62,17 +62,33 @@ class ChainBreak:
     reason: str
 
 
-async def verify_event_chain(db: Database) -> tuple[int, list[ChainBreak]]:
+async def verify_event_chain(
+    db: Database, room_id: str | None = None
+) -> tuple[int, list[ChainBreak]]:
     """Recompute every room's chain and report the first stored divergence.
 
     One break per room: everything after a divergence is untrustworthy anyway,
-    so later mismatches in the same room are consequences, not findings.
+    so later mismatches in the same room are consequences, not findings. When
+    ``room_id`` is given, only that room's chain is hashed and only that
+    room's tail is checked; every other room is left alone.
     """
     breaks: list[ChainBreak] = []
     verified = 0
-    room_rows = await db.fetch_all("SELECT DISTINCT room_id FROM room_events ORDER BY room_id")
-    for room_row in room_rows:
-        room_id = str(room_row["room_id"])
+    if room_id is not None:
+        counter_rows = await db.fetch_all(
+            "SELECT room_id, seq FROM room_sequences WHERE room_id = ?", (room_id,)
+        )
+        event_room_rows = await db.fetch_all(
+            "SELECT DISTINCT room_id FROM room_events WHERE room_id = ?", (room_id,)
+        )
+    else:
+        counter_rows = await db.fetch_all(
+            "SELECT room_id, seq FROM room_sequences ORDER BY room_id"
+        )
+        event_room_rows = await db.fetch_all("SELECT DISTINCT room_id FROM room_events")
+    counters_by_room = {str(row["room_id"]): int(row["seq"]) for row in counter_rows}
+    room_ids = sorted(set(counters_by_room) | {str(row["room_id"]) for row in event_room_rows})
+    for room_id in room_ids:
         rows = await db.fetch_all(
             "SELECT event_id, sequence, event_type, payload, actor_id, actor_type, "
             "timestamp, schema_version, prev_hash, event_hash "
@@ -119,14 +135,24 @@ async def verify_event_chain(db: Database) -> tuple[int, list[ChainBreak]]:
             verified += 1
         if broken:
             continue
-        counter = await db.fetch_one("SELECT seq FROM room_sequences WHERE room_id = ?", (room_id,))
-        if counter is not None and int(counter["seq"]) != last_sequence:
+        counter_seq = counters_by_room.get(room_id)
+        if counter_seq is None:
+            if last_sequence > 0:
+                breaks.append(
+                    ChainBreak(
+                        room_id,
+                        last_sequence,
+                        rows[-1]["event_id"] if rows else "",
+                        "the room's sequence counter is missing",
+                    )
+                )
+        elif counter_seq != last_sequence:
             breaks.append(
                 ChainBreak(
                     room_id,
                     last_sequence,
                     rows[-1]["event_id"] if rows else "",
-                    f"log ends at {last_sequence} but the room counter reached {counter['seq']}",
+                    f"log ends at {last_sequence} but the room counter reached {counter_seq}",
                 )
             )
     return verified, breaks

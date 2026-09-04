@@ -9,6 +9,7 @@ digest is stored, so a lost token is revoked, never recovered.
     python -m multiplayer.manage app.db token revoke <token-or-hash>
     python -m multiplayer.manage app.db token list
     python -m multiplayer.manage app.db audit verify
+    python -m multiplayer.manage app.db db backup backup.db
 """
 
 from __future__ import annotations
@@ -74,6 +75,18 @@ async def list_tokens(db: Database) -> list[dict[str, Any]]:
     )
 
 
+async def backup_database(db: Database, dest: str) -> None:
+    """Write a consistent snapshot of the live database to ``dest``.
+
+    A plain file copy of a WAL mode database can miss every write still
+    sitting in the ``-wal`` file, so a ``cp`` of the live path silently
+    truncates the log this product exists to keep. ``VACUUM INTO`` asks
+    SQLite itself for a consistent snapshot, which is safe to run against a
+    database another connection is writing to.
+    """
+    await db.execute("VACUUM INTO ?", (dest,))
+
+
 async def _run(args: argparse.Namespace) -> int:
     db = await open_database(args.db_path)
     try:
@@ -94,6 +107,9 @@ async def _run(args: argparse.Namespace) -> int:
                 state = "revoked" if row["revoked_at"] else "live"
                 label = row["label"] or "-"
                 print(f"{row['token_hash']}  {row['user_id']}  {label}  {state}")
+        elif args.command == "db" and args.db_command == "backup":
+            await backup_database(db, args.dest)
+            print(f"backed up to {args.dest}")
         elif args.command == "audit" and args.audit_command == "verify":
             verified, breaks = await verify_event_chain(db)
             for chain_break in breaks:
@@ -132,6 +148,10 @@ def main() -> int:
 
     audit = commands.add_parser("audit").add_subparsers(dest="audit_command", required=True)
     audit.add_parser("verify")
+
+    db_commands = commands.add_parser("db").add_subparsers(dest="db_command", required=True)
+    db_backup = db_commands.add_parser("backup")
+    db_backup.add_argument("dest", help="path to write the backup to")
 
     return asyncio.run(_run(parser.parse_args()))
 

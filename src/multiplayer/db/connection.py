@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import aiosqlite
 
@@ -44,13 +43,16 @@ class Database:
             # Single-statement writes are independently durable. Multi-statement
             # units use transaction(), which provides task-scoped ownership.
             self._db = await aiosqlite.connect(self._path, isolation_level=None)
+            self._db.row_factory = aiosqlite.Row
+            # sqlite3 opens lazily: a corrupt, truncated, or non-SQLite file
+            # passes connect() and only fails on the first real statement, so
+            # that failure has to stay inside this handler to name the path.
+            await self._db.execute("PRAGMA journal_mode=WAL")
+            await self._db.execute("PRAGMA busy_timeout=30000")
+            await self._db.execute("PRAGMA foreign_keys=ON")
         except Exception:
             log.exception("Failed to connect to database at %s", self._path)
             raise
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA busy_timeout=30000")
-        await self._db.execute("PRAGMA foreign_keys=ON")
         if not self._is_memory():
             self._readers = asyncio.Queue()
 
@@ -211,15 +213,7 @@ def serialize_datetime(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
 
 
-def serialize_dict(d: dict[str, Any]) -> str:
-    return json.dumps(d, sort_keys=True, default=str)
-
-
 def deserialize_datetime(s: str | None) -> datetime | None:
     if s is None:
         return None
     return datetime.fromisoformat(s)
-
-
-def deserialize_dict(s: str) -> dict[str, Any]:
-    return cast(dict[str, Any], json.loads(s))
