@@ -122,6 +122,7 @@ from ..security.audit import GENESIS_HASH, event_chain_hash
 from ..security.authorization import RoomCapability, roles_with_capability
 from ..security.capabilities import Posture
 from .connection import Database, deserialize_datetime, serialize_datetime
+from .redactions import EventRedactionRepo
 
 log = logging.getLogger(__name__)
 
@@ -4533,47 +4534,11 @@ class EventRepo:
         )
 
 
-class EventRedactionRepo:
-    """What a redacted event's marker stands in for: the original hash, and why."""
-
-    def __init__(self, db: Database) -> None:
-        self.db = db
-
-    async def create_in_transaction(
-        self,
-        redaction_id: str,
-        event_id: str,
-        room_id: str,
-        original_event_hash: str,
-        redacted_at: datetime,
-        reason: str,
-        actor_id: str,
-    ) -> None:
-        if not self.db.owns_current_transaction:
-            raise RuntimeError("redaction record requires transaction ownership")
-        await self.db.execute(
-            "INSERT INTO event_redactions(redaction_id, event_id, room_id, "
-            "original_event_hash, redacted_at, reason, actor_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                redaction_id,
-                event_id,
-                room_id,
-                original_event_hash,
-                serialize_datetime(redacted_at),
-                reason,
-                actor_id,
-            ),
-        )
-
-    async def get_by_event_id(self, event_id: str) -> dict[str, Any] | None:
-        return await self.db.fetch_one(
-            "SELECT * FROM event_redactions WHERE event_id = ?", (event_id,)
-        )
-
-    async def list_by_room(self, room_id: str) -> list[dict[str, Any]]:
-        return await self.db.fetch_all(
-            "SELECT * FROM event_redactions WHERE room_id = ? ORDER BY redacted_at", (room_id,)
-        )
+# EventRedactionRepo moved to db/redactions.py (round 2, crypto track): a
+# redaction record now also carries the redacted row's header snapshot and a
+# hash over it, so verify_event_chain can catch a rewrite of the row's
+# event_type/actor_id/actor_type/timestamp/schema_version, not only its
+# payload. See that module's docstring.
 
 
 class ArtifactRepo:

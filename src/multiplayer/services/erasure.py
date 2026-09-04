@@ -30,6 +30,7 @@ from ..domain.models import (
     utcnow,
 )
 from ..domain.synthesis import RESERVED_ARTIFACT_NAMES
+from ..security.audit import header_snapshot_hash
 from ._shared import _SharedMixin
 
 log = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ log = logging.getLogger(__name__)
 # verbatim, the same shape as a message's "content". The durable copy this key
 # also backs, ``execution_interventions.instruction``, was left as a
 # deliberate exception in round 4; round 6 closed it (see
-# ``_ABANDONED_INTERVENTION_REASON`` below) once migration 050 narrowed the
+# ``_ABANDONED_INTERVENTION_REASON`` below) once migration 049 narrowed the
 # column's immutability trigger.
 _PERSONAL_PAYLOAD_KEYS = ("content", "body", "title", "filename", "instruction")
 
@@ -112,7 +113,7 @@ _ABANDONED_INTERVENTION_REASON = "the user who steered this run was erased"
 #                          part of settling the run it belongs to, which is
 #                          also "redacted" the same way a released handle is:
 #                          gone, not marked), or an execution intervention's
-#                          ``instruction`` (round 6: migration 050 narrowed
+#                          ``instruction`` (round 6: migration 049 narrowed
 #                          the immutability trigger 018/020 gave the column,
 #                          so it is now scrubbed in place the same as a
 #                          message, alongside the ``human_redirected_agent``
@@ -127,7 +128,7 @@ _ABANDONED_INTERVENTION_REASON = "the user who steered this run was erased"
 #                          append-only tables), or an explicitly immutable
 #                          audit trail (an ontology review, migration 006 --
 #                          an execution intervention's instruction was filed
-#                          here through round 5, but migration 050 narrowed
+#                          here through round 5, but migration 049 narrowed
 #                          its trigger and round 6 moved it to "redacted"
 #                          above). Round 4 filed the org/workspace name/slug
 #                          pair here as a real,
@@ -354,6 +355,16 @@ _COLUMN_CLASSIFICATION: dict[tuple[str, str], _ColumnClassification] = {
     ("event_redactions", "redacted_at"): "not_user_authored",
     ("event_redactions", "reason"): "not_user_authored",
     ("event_redactions", "actor_id"): "not_user_authored",
+    # Round 2 (crypto track): a snapshot of the redacted row's own header, not
+    # anything a person typed. header_hash covers the same six fields plus
+    # sequence, so it is exactly as derived as event_redactions.original_event_hash
+    # just above.
+    ("event_redactions", "header_event_type"): "not_user_authored",
+    ("event_redactions", "header_actor_id"): "not_user_authored",
+    ("event_redactions", "header_actor_type"): "not_user_authored",
+    ("event_redactions", "header_timestamp"): "not_user_authored",
+    ("event_redactions", "header_prev_hash"): "not_user_authored",
+    ("event_redactions", "header_hash"): "not_user_authored",
     ("execution_callers", "execution_id"): "not_user_authored",
     ("execution_callers", "caller_id"): "not_user_authored",
     ("execution_callers", "first_acted_at"): "not_user_authored",
@@ -656,7 +667,18 @@ _COLUMN_CLASSIFICATION: dict[tuple[str, str], _ColumnClassification] = {
 
 
 def _is_redaction_marker(payload: dict[str, Any]) -> bool:
-    return payload.get("redacted") is True and isinstance(payload.get("redaction_id"), str)
+    """Exactly the two-key marker shape, same rule as audit.py's ``_redaction_marker``.
+
+    A payload with the two marker keys plus a third is not a marker this
+    method treats as already-erased: it is left to the normal path, the same
+    way audit.py leaves it to the normal hash check rather than trusting it.
+    """
+    return (
+        set(payload) == {"redacted", "redaction_id"}
+        and payload.get("redacted") is True
+        and isinstance(payload.get("redaction_id"), str)
+        and bool(payload["redaction_id"])
+    )
 
 
 def _carries_personal_content(event_type: str, payload: dict[str, Any]) -> bool:
@@ -692,7 +714,9 @@ def _carries_personal_content(event_type: str, payload: dict[str, Any]) -> bool:
 class _ErasureMixin(_SharedMixin):
     """Mixin providing user erasure: tombstoning, redaction, and attachment removal."""
 
-    async def erase_user(self, user_id: str) -> dict[str, Any]:
+    async def erase_user(
+        self, user_id: str, operator_id: str = ERASURE_OPERATOR_ID
+    ) -> dict[str, Any]:
         """Tombstone the user and redact every personal event they authored.
 
         Idempotent: an event already carrying a marker payload is left alone, a
@@ -700,10 +724,23 @@ class _ErasureMixin(_SharedMixin):
         revoked stays untouched by the same guarded UPDATE. A second call against
         an already erased user therefore reports zero new redactions rather than
         failing or duplicating anything.
+
+        ``operator_id`` names who ran this, recorded on every redaction row and
+        on the announcing event instead of the constant "system" every prior
+        round wrote unconditionally. Left at its default, behaviour is
+        unchanged (a caller that does not attribute the erasure gets exactly
+        what round 1 through 6 already wrote). Given anything else, that id
+        must name a real user, the same way ``user_id`` itself already must:
+        an operator that does not exist could never be looked up later to
+        answer "who did this".
         """
         user = await self.repos.users.get(user_id)
         if user is None:
             raise DomainError(f"user not found: {user_id}")
+        if operator_id != ERASURE_OPERATOR_ID:
+            operator = await self.repos.users.get(operator_id)
+            if operator is None:
+                raise DomainError(f"operator not found: {operator_id}")
 
         # "user" is how most of the log spells a human actor; a message they sent
         # is stamped with its role lowercased instead, which is "human". Both name
@@ -720,7 +757,7 @@ class _ErasureMixin(_SharedMixin):
         # when several of this user's own events name the same one.
         agent_task_ids_swept: set[str] = set()
         for room_id, rows in by_room.items():
-            redaction_ids: list[str] = []
+            redaction_announcements: list[dict[str, str]] = []
             async with self.db.transaction():
                 for row in rows:
                     payload = json.loads(str(row["payload"]))
@@ -731,14 +768,33 @@ class _ErasureMixin(_SharedMixin):
                         continue
                     event_id = str(row["event_id"])
                     redaction_id = new_id("redact")
+                    prev_hash = str(row["prev_hash"]) if row["prev_hash"] is not None else ""
+                    header_hash = header_snapshot_hash(
+                        event_type,
+                        str(row["actor_id"]),
+                        str(row["actor_type"]),
+                        str(row["timestamp"]),
+                        int(row["schema_version"]),
+                        int(row["sequence"]),
+                        prev_hash,
+                    )
+                    original_event_hash = str(row["event_hash"])
                     await self.repos.event_redactions.create_in_transaction(
                         redaction_id,
                         event_id,
                         room_id,
-                        str(row["event_hash"]),
+                        original_event_hash,
                         utcnow(),
                         _REDACTION_REASON,
-                        ERASURE_OPERATOR_ID,
+                        operator_id,
+                        header_event_type=event_type,
+                        header_actor_id=str(row["actor_id"]),
+                        header_actor_type=str(row["actor_type"]),
+                        header_timestamp=str(row["timestamp"]),
+                        header_schema_version=int(row["schema_version"]),
+                        header_sequence=int(row["sequence"]),
+                        header_prev_hash=prev_hash,
+                        header_hash=header_hash,
                     )
                     marker = json.dumps({"redacted": True, "redaction_id": redaction_id})
                     await self.repos.events.redact_payload_in_transaction(event_id, marker)
@@ -802,19 +858,30 @@ class _ErasureMixin(_SharedMixin):
                         event_id,
                         marker,
                     )
-                    redaction_ids.append(redaction_id)
-                if redaction_ids:
+                    redaction_announcements.append(
+                        {
+                            "redaction_id": redaction_id,
+                            "header_hash": header_hash,
+                            "original_event_hash": original_event_hash,
+                        }
+                    )
+                if redaction_announcements:
+                    # The chained event names, per redaction, the exact header_hash
+                    # and original_event_hash its own event_redactions row carries:
+                    # the announcement is itself chained (event_hash covers this
+                    # payload), so verify_event_chain can check the record against
+                    # what was announced, not only that some id was named.
                     await self.repos.events.append_with_next_sequence_in_transaction(
                         RoomEvent(
                             room_id=room_id,
                             sequence=0,
                             event_type=EventType.EVENT_REDACTED,
                             payload={
-                                "redaction_ids": redaction_ids,
-                                "count": len(redaction_ids),
+                                "redactions": redaction_announcements,
+                                "count": len(redaction_announcements),
                             },
-                            actor_id=ERASURE_OPERATOR_ID,
-                            actor_type="system",
+                            actor_id=operator_id,
+                            actor_type="system" if operator_id == ERASURE_OPERATOR_ID else "user",
                         )
                     )
                 # Round 6: every intervention this user steered in this room
@@ -832,9 +899,9 @@ class _ErasureMixin(_SharedMixin):
                     await self.repos.interventions.redact_instruction_in_transaction(
                         intervention_id, _NO_CHAIN_MARKER
                     )
-            if redaction_ids:
+            if redaction_announcements:
                 rooms_touched.append(room_id)
-                total_redactions += len(redaction_ids)
+                total_redactions += len(redaction_announcements)
 
         # Every attachment this user uploaded, whether or not the message that
         # claimed it survived redaction above, and whether or not it was ever

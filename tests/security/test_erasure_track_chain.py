@@ -7,11 +7,25 @@ needs its own rule: trust the recorded ``original_event_hash`` in place of a
 recomputation, and require every such trust to be backed by a matching
 ``event_redactions`` row and later announced by an ``event.redacted`` event.
 Each of the three ways that can be faked is its own ChainBreak.
+
+Round 2 (crypto track) added append-only triggers on ``room_events`` and
+``event_redactions`` (migration 050): a plain UPDATE or DELETE against either
+table is now refused by SQLite itself, defence in depth against an
+in-process bug or a stray session on this same connection. A tamper
+simulation below that needs to get such a write past SQLite the way an
+attacker who holds the file directly would, by dropping the trigger first,
+now does exactly that, immediately before the write, through the same
+connection; every assertion about what the *verifier* then finds is
+unchanged. The triggers' own refusal, with nothing dropped, is asserted
+separately at the bottom of this file.
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
+
+import pytest
 
 from multiplayer.db.connection import Database
 from multiplayer.domain.models import MessageRole
@@ -65,6 +79,9 @@ async def test_a_marker_with_no_redaction_row_breaks_the_chain():
         assert row is not None
         # Simulate a hand edit that drops straight to a marker payload with no
         # event_redactions row behind it at all: pick a fresh, unregistered id.
+        # A file-level attacker drops the append-only trigger first; simulated
+        # here the same way, through the same connection, immediately before.
+        await db.execute("DROP TRIGGER IF EXISTS event_redactions_reject_delete")
         await db.execute("DELETE FROM event_redactions WHERE event_id = ?", (row["event_id"],))
         _, breaks = await verify_event_chain(db, room_id=room_id)
         assert len(breaks) == 1
@@ -77,6 +94,7 @@ async def test_deleting_the_announcement_breaks_the_chain():
     db, svc, room_id, _ = await _room_with_message()
     try:
         await _redact_via_erasure(svc, "alice")
+        await db.execute("DROP TRIGGER IF EXISTS room_events_reject_delete")
         await db.execute(
             "DELETE FROM room_events WHERE room_id = ? AND event_type = 'event.redacted'",
             (room_id,),
@@ -91,6 +109,7 @@ async def test_altering_original_event_hash_breaks_the_chain():
     db, svc, room_id, _ = await _room_with_message()
     try:
         await _redact_via_erasure(svc, "alice")
+        await db.execute("DROP TRIGGER IF EXISTS event_redactions_reject_update")
         await db.execute(
             "UPDATE event_redactions SET original_event_hash = 'tampered' WHERE room_id = ?",
             (room_id,),
@@ -98,6 +117,44 @@ async def test_altering_original_event_hash_breaks_the_chain():
         _, breaks = await verify_event_chain(db, room_id=room_id)
         assert len(breaks) == 1
         assert "original_event_hash does not match" in breaks[0].reason
+    finally:
+        await db.close()
+
+
+async def test_room_events_refuses_a_plain_update_or_delete():
+    """Without dropping the trigger first, SQLite itself refuses both a
+    header-column rewrite and a row delete on room_events."""
+    db, svc, room_id, _ = await _room_with_message()
+    try:
+        await _redact_via_erasure(svc, "alice")
+        row = await db.fetch_one(
+            "SELECT event_id FROM room_events WHERE room_id = ? AND event_type = 'message.created'",
+            (room_id,),
+        )
+        assert row is not None
+        with pytest.raises(sqlite3.IntegrityError):
+            await db.execute(
+                "UPDATE room_events SET actor_id = 'mallory' WHERE event_id = ?",
+                (row["event_id"],),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            await db.execute("DELETE FROM room_events WHERE event_id = ?", (row["event_id"],))
+    finally:
+        await db.close()
+
+
+async def test_event_redactions_refuses_a_plain_update_or_delete():
+    """Without dropping the trigger first, SQLite itself refuses both an
+    UPDATE and a DELETE on event_redactions."""
+    db, svc, room_id, _ = await _room_with_message()
+    try:
+        await _redact_via_erasure(svc, "alice")
+        with pytest.raises(sqlite3.IntegrityError):
+            await db.execute(
+                "UPDATE event_redactions SET reason = 'changed' WHERE room_id = ?", (room_id,)
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            await db.execute("DELETE FROM event_redactions WHERE room_id = ?", (room_id,))
     finally:
         await db.close()
 

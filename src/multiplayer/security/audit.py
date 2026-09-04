@@ -23,34 +23,89 @@ GENESIS_HASH = ""
 def _redaction_marker(payload_json: str) -> str | None:
     """The redaction id a marker payload names, or None for an ordinary payload.
 
-    A marker is exactly ``{"redacted": true, "redaction_id": "..."}``: any other
-    shape, including one that merely happens to carry a ``redacted`` key, is left
-    to the normal hash check rather than treated as an erasure.
+    A marker is exactly ``{"redacted": true, "redaction_id": "..."}``, two keys
+    and no more: any other shape, including one that merely happens to carry a
+    ``redacted`` key, or the same two keys plus a third, is left to the normal
+    hash check rather than treated as an erasure.
     """
     try:
         parsed: Any = json.loads(payload_json)
     except (json.JSONDecodeError, TypeError):
         return None
-    if not isinstance(parsed, dict) or parsed.get("redacted") is not True:
+    if not isinstance(parsed, dict) or set(parsed) != {"redacted", "redaction_id"}:
+        return None
+    if parsed.get("redacted") is not True:
         return None
     redaction_id = parsed.get("redaction_id")
     return redaction_id if isinstance(redaction_id, str) and redaction_id else None
 
 
-def _announced_redaction_ids(event_type: str, payload_json: str) -> set[str]:
-    """The redaction ids one event.redacted event names, empty for any other event."""
+@dataclass(frozen=True, slots=True)
+class _RedactionAnnouncement:
+    redaction_id: str
+    header_hash: str
+    original_event_hash: str
+
+
+def _announced_redactions(event_type: str, payload_json: str) -> list[_RedactionAnnouncement]:
+    """The redactions one event.redacted event names, empty for any other event.
+
+    Each entry carries the header_hash and original_event_hash the announcer
+    claims for that redaction id, so the caller can check the claim against
+    the event_redactions row it should match, not just that some id was named.
+    """
     if event_type != "event.redacted":
-        return set()
+        return []
     try:
         parsed: Any = json.loads(payload_json)
     except (json.JSONDecodeError, TypeError):
-        return set()
+        return []
     if not isinstance(parsed, dict):
-        return set()
-    ids = parsed.get("redaction_ids")
-    if not isinstance(ids, list):
-        return set()
-    return {item for item in ids if isinstance(item, str)}
+        return []
+    entries = parsed.get("redactions")
+    if not isinstance(entries, list):
+        return []
+    result: list[_RedactionAnnouncement] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        redaction_id = entry.get("redaction_id")
+        header_hash = entry.get("header_hash")
+        original_event_hash = entry.get("original_event_hash")
+        if (
+            isinstance(redaction_id, str)
+            and redaction_id
+            and isinstance(header_hash, str)
+            and isinstance(original_event_hash, str)
+        ):
+            result.append(_RedactionAnnouncement(redaction_id, header_hash, original_event_hash))
+    return result
+
+
+def header_snapshot_hash(
+    event_type: str,
+    actor_id: str,
+    actor_type: str,
+    timestamp: str,
+    schema_version: int,
+    sequence: int,
+    prev_hash: str,
+) -> str:
+    """Hash the seven header fields a redaction record snapshots at creation time.
+
+    A marker row's payload can no longer be recomputed into anything (that is
+    the point of redacting it), so nothing else in this module re-derives
+    event_hash for a marker row. This gives verify_event_chain something else
+    to recompute instead: the row's live header, checked against the snapshot
+    ``db/redactions.py`` took the moment it replaced the payload. A rewrite of
+    event_type, actor_id, actor_type, timestamp or schema_version on a marker
+    row now changes this hash, so it stops matching the stored snapshot.
+    """
+    material = json.dumps(
+        [event_type, actor_id, actor_type, timestamp, schema_version, sequence, prev_hash],
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def event_chain_hash(
@@ -135,7 +190,10 @@ async def verify_event_chain(
         # A redaction row is announced by a later event.redacted event in the same
         # room; until that event is met, its redaction id waits here, keyed to the
         # row that named it so an unresolved redaction can be reported at that row.
-        pending_redactions: dict[str, tuple[int, str]] = {}
+        # The header_hash/original_event_hash carried alongside let the
+        # announcement itself be checked against the record it claims to name,
+        # not just that some matching id showed up eventually.
+        pending_redactions: dict[str, tuple[int, str, str, str]] = {}
         for row in rows:
             sequence = int(row["sequence"])
             event_id = str(row["event_id"])
@@ -155,7 +213,9 @@ async def verify_event_chain(
             marker_redaction_id = _redaction_marker(payload_json)
             if marker_redaction_id is not None:
                 redaction_row = await db.fetch_one(
-                    "SELECT original_event_hash FROM event_redactions "
+                    "SELECT original_event_hash, header_event_type, header_actor_id, "
+                    "header_actor_type, header_timestamp, header_schema_version, "
+                    "header_sequence, header_prev_hash, header_hash FROM event_redactions "
                     "WHERE redaction_id = ? AND event_id = ?",
                     (marker_redaction_id, event_id),
                 )
@@ -185,8 +245,39 @@ async def verify_event_chain(
                     )
                     broken = True
                     break
+                # The row's own hash never moving is not enough on its own: nothing
+                # above recomputes a hash over event_type/actor_id/actor_type/
+                # timestamp/schema_version for a marker row, so those could be
+                # rewritten and event_hash would still equal original_event_hash.
+                # Recompute the header snapshot from the row's LIVE columns and
+                # compare it to what was recorded the moment this row was redacted.
+                live_header_hash = header_snapshot_hash(
+                    str(row["event_type"]),
+                    str(row["actor_id"]),
+                    str(row["actor_type"]),
+                    str(row["timestamp"]),
+                    int(row["schema_version"]),
+                    sequence,
+                    stored_prev if stored_prev is not None else GENESIS_HASH,
+                )
+                if live_header_hash != str(redaction_row["header_hash"]):
+                    breaks.append(
+                        ChainBreak(
+                            room_id,
+                            sequence,
+                            event_id,
+                            "the row's header no longer matches the snapshot taken at redaction",
+                        )
+                    )
+                    broken = True
+                    break
                 expected = original_hash
-                pending_redactions[marker_redaction_id] = (sequence, event_id)
+                pending_redactions[marker_redaction_id] = (
+                    sequence,
+                    event_id,
+                    str(redaction_row["header_hash"]),
+                    original_hash,
+                )
             else:
                 expected = event_chain_hash(
                     prev_hash,
@@ -205,15 +296,37 @@ async def verify_event_chain(
                     breaks.append(ChainBreak(room_id, sequence, event_id, reason))
                     broken = True
                     break
-            for announced in _announced_redaction_ids(str(row["event_type"]), payload_json):
-                pending_redactions.pop(announced, None)
+            announcement_break: str | None = None
+            for announced in _announced_redactions(str(row["event_type"]), payload_json):
+                pending = pending_redactions.get(announced.redaction_id)
+                if pending is None:
+                    # Names a redaction id this room never marked, or already
+                    # resolved: not a defect this loop tracks (the redaction row
+                    # itself is checked directly, above, whenever its marker row
+                    # is reached).
+                    continue
+                _, _, expected_header_hash, expected_original_hash = pending
+                if (
+                    announced.header_hash != expected_header_hash
+                    or announced.original_event_hash != expected_original_hash
+                ):
+                    announcement_break = (
+                        "event.redacted names a redaction with a header hash or "
+                        "original event hash that does not match its record"
+                    )
+                    break
+                pending_redactions.pop(announced.redaction_id, None)
+            if announcement_break is not None:
+                breaks.append(ChainBreak(room_id, sequence, event_id, announcement_break))
+                broken = True
+                break
             prev_hash = expected
             last_sequence = sequence
             verified += 1
         if broken:
             continue
         if pending_redactions:
-            first_sequence, first_event_id = min(pending_redactions.values())
+            first_sequence, first_event_id, _, _ = min(pending_redactions.values())
             breaks.append(
                 ChainBreak(
                     room_id,

@@ -578,7 +578,7 @@ CREATE TABLE event_redactions (
     redacted_at TEXT NOT NULL,
     reason TEXT NOT NULL,
     actor_id TEXT NOT NULL
-)
+, header_event_type TEXT NOT NULL DEFAULT '', header_actor_id TEXT NOT NULL DEFAULT '', header_actor_type TEXT NOT NULL DEFAULT '', header_timestamp TEXT NOT NULL DEFAULT '', header_schema_version INTEGER NOT NULL DEFAULT 0, header_sequence INTEGER NOT NULL DEFAULT 0, header_prev_hash TEXT NOT NULL DEFAULT '', header_hash TEXT NOT NULL DEFAULT '')
 
 -- table execution_callers
 CREATE TABLE execution_callers (
@@ -1470,6 +1470,20 @@ BEGIN
     SELECT RAISE(ABORT, 'branch context boundary is immutable');
 END
 
+-- trigger event_redactions_reject_delete
+CREATE TRIGGER event_redactions_reject_delete
+BEFORE DELETE ON event_redactions
+BEGIN
+    SELECT RAISE(ABORT, 'a redaction record is append-only');
+END
+
+-- trigger event_redactions_reject_update
+CREATE TRIGGER event_redactions_reject_update
+BEFORE UPDATE ON event_redactions
+BEGIN
+    SELECT RAISE(ABORT, 'a redaction record is append-only');
+END
+
 -- trigger execution_callers_are_never_deleted
 CREATE TRIGGER execution_callers_are_never_deleted
 BEFORE DELETE ON execution_callers
@@ -1585,6 +1599,14 @@ BEGIN
     SELECT RAISE(ABORT, 'a reaction is removed by removed_at, never by DELETE');
 END
 
+-- trigger messages_reject_content_update
+CREATE TRIGGER messages_reject_content_update
+BEFORE UPDATE OF content ON messages
+WHEN NEW.content NOT GLOB '{"redacted": true, "redaction_id": "*"}'
+BEGIN
+    SELECT RAISE(ABORT, 'message content is immutable except through redaction');
+END
+
 -- trigger messages_reject_thread_update
 CREATE TRIGGER messages_reject_thread_update
 BEFORE UPDATE OF parent_message_id, root_message_id, thread_depth ON messages
@@ -1667,6 +1689,29 @@ BEGIN
     SELECT RAISE(ABORT, 'selection output must belong to branch');
 END
 
+-- trigger room_events_reject_delete
+CREATE TRIGGER room_events_reject_delete
+BEFORE DELETE ON room_events
+BEGIN
+    SELECT RAISE(ABORT, 'the event log is append-only');
+END
+
+-- trigger room_events_reject_hash_rewrite
+CREATE TRIGGER room_events_reject_hash_rewrite
+BEFORE UPDATE OF prev_hash, event_hash ON room_events
+WHEN OLD.event_hash IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'a chained hash may not be rewritten once set');
+END
+
+-- trigger room_events_reject_identity_update
+CREATE TRIGGER room_events_reject_identity_update
+BEFORE UPDATE OF event_id, room_id, sequence, event_type, actor_id, actor_type,
+    timestamp, schema_version ON room_events
+BEGIN
+    SELECT RAISE(ABORT, 'an event''s identity and header are immutable');
+END
+
 -- trigger room_participant_handles_reject_update
 CREATE TRIGGER room_participant_handles_reject_update
 BEFORE UPDATE OF handle, participant_id, participant_type ON room_participant_handles
@@ -1694,6 +1739,21 @@ CREATE TRIGGER room_postures_are_written_once
 BEFORE UPDATE ON room_postures
 BEGIN
     SELECT RAISE(ABORT, 'a posture declaration is an audit record and is never rewritten');
+END
+
+-- trigger room_sequences_reject_delete
+CREATE TRIGGER room_sequences_reject_delete
+BEFORE DELETE ON room_sequences
+BEGIN
+    SELECT RAISE(ABORT, 'a room sequence counter is never removed');
+END
+
+-- trigger room_sequences_reject_rewind
+CREATE TRIGGER room_sequences_reject_rewind
+BEFORE UPDATE ON room_sequences
+WHEN NEW.seq <= OLD.seq
+BEGIN
+    SELECT RAISE(ABORT, 'a room sequence counter only moves forward');
 END
 
 -- trigger search_documents_after_delete

@@ -5,9 +5,21 @@ prevention; buzz chains its log. These tests pin ours: editing a row, removing
 a middle row, or truncating the tail is detected by recomputing the chain,
 and rows written before the chain existed are hashed once at startup without
 papering over a tampered stored hash.
+
+Round 2 (crypto track) added append-only triggers on room_events and
+room_sequences (migration 050): SQLite itself now refuses a plain DELETE
+against either. A tamper simulation below that needs such a delete to reach
+verify_event_chain, the way an attacker holding the file directly would,
+drops the trigger first, immediately before, through the same connection;
+every assertion about what the verifier then finds is unchanged. The
+triggers' own refusal, with nothing dropped, is asserted separately at the
+bottom of this file.
 """
 
+import sqlite3
 from dataclasses import replace
+
+import pytest
 
 from multiplayer.db.connection import Database
 from multiplayer.db.repositories import EventRepo
@@ -88,6 +100,7 @@ async def test_a_removed_middle_row_breaks_the_chain():
     db, _ = await _room_db()
     try:
         await _append(db, 3)
+        await db.execute("DROP TRIGGER IF EXISTS room_events_reject_delete")
         await db.execute("DELETE FROM room_events WHERE room_id = 'room_1' AND sequence = 2")
         _, breaks = await verify_event_chain(db)
         assert len(breaks) == 1
@@ -100,10 +113,25 @@ async def test_a_truncated_tail_is_caught_by_the_room_counter():
     db, _ = await _room_db()
     try:
         await _append(db, 3)
+        await db.execute("DROP TRIGGER IF EXISTS room_events_reject_delete")
         await db.execute("DELETE FROM room_events WHERE room_id = 'room_1' AND sequence = 3")
         _, breaks = await verify_event_chain(db)
         assert len(breaks) == 1
         assert "counter reached 3" in breaks[0].reason
+    finally:
+        await db.close()
+
+
+async def test_room_sequences_refuses_a_plain_update_or_delete():
+    """Without dropping the trigger first, SQLite itself refuses both a
+    rewind (or same-value no-op) UPDATE and a DELETE on room_sequences."""
+    db, _ = await _room_db()
+    try:
+        await _append(db, 3)
+        with pytest.raises(sqlite3.IntegrityError):
+            await db.execute("UPDATE room_sequences SET seq = 1 WHERE room_id = 'room_1'")
+        with pytest.raises(sqlite3.IntegrityError):
+            await db.execute("DELETE FROM room_sequences WHERE room_id = 'room_1'")
     finally:
         await db.close()
 

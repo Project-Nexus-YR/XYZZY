@@ -52,6 +52,11 @@ async def test_a_second_boot_does_not_repair_a_hash_cleared_after_the_first(
     # Simulate an attacker with database write access erasing a stored hash,
     # after the fact, to make an edited event pass as one the chain never
     # covered, then a restart against the same, now tampered, database.
+    # Round 2 (crypto track) added an append-only trigger on room_events
+    # (migration 050) that refuses this exact rewrite from anyone still
+    # holding this connection; a file-level attacker drops it first, the
+    # same as here.
+    await db.execute("DROP TRIGGER IF EXISTS room_events_reject_hash_rewrite")
     await db.execute("UPDATE room_events SET event_hash = NULL WHERE event_id = ?", (event_id,))
     await db.commit()
 

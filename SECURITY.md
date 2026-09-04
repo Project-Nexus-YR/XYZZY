@@ -49,7 +49,14 @@ written with a hash over the previous event's hash plus its own fields
 tamper-evident: altering or deleting a row breaks every hash after it.
 `verify_event_chain()` in the same file recomputes a room's chain and reports
 sequence gaps or hash mismatches. Run it with
-`python -m multiplayer.manage <db-path> audit verify`.
+`python -m multiplayer.manage <db-path> audit verify`. This proves the log is
+internally consistent with itself, and no more: the check reads the same
+database it verifies, so it cannot tell an honest history from a wholesale
+rewrite made by whoever holds the file, and it cannot tell an honest erasure
+from a forged one recorded by the same means an honest one uses. Neither gap
+can be closed without something outside the file (a signature from a key the
+attacker does not hold, or a head hash pinned somewhere else), which this
+project does not yet have. See Known Gaps.
 
 **Hashed credential rows with revocation.** Bearer tokens minted by the
 operator CLI are stored as a hash, never plaintext; the token itself is
@@ -117,17 +124,29 @@ request wants a specific person's data gone) are both kept, this way:
 - **What they authored is redacted, not rewritten in place.** For every
   event they authored whose payload carries something a person typed
   (message text, a title, an attachment name), the stored `payload` is
-  replaced with a marker (`{"redacted": true, "redaction_id": ...}`), and
-  a new `event_redactions` row records the event's original `event_hash`,
-  when this happened, and under whose authority. The row's `event_hash`
-  and `prev_hash` are never touched, so they still equal what
+  replaced with a marker (exactly `{"redacted": true, "redaction_id":
+  ...}`, two keys and no more), and a new `event_redactions` row records
+  the event's original `event_hash`, a snapshot of its header
+  (`event_type`, `actor_id`, `actor_type`, `timestamp`, `schema_version`,
+  `sequence`, `prev_hash`) and a hash over that snapshot, when this
+  happened, and under whose authority. The row's `event_hash` and
+  `prev_hash` are never touched, so they still equal what
   `event_redactions.original_event_hash` records. `verify_event_chain`
   (`src/multiplayer/security/audit.py`) treats a marker payload as a
-  special case: it trusts the recorded original hash in place of
-  recomputing one from the marker, requires a matching `event_redactions`
-  row to exist, and requires a later `event.redacted` event in the same
-  room to name the redaction: a hand-edited marker with no backing
-  row, a tampered `original_event_hash`, or a deleted announcement each
+  special case, checked three ways: the row's own `event_hash` must still
+  equal the recorded `original_event_hash`; the row's *live* header must
+  still hash to the recorded snapshot hash, which is what catches a
+  rewrite of `event_type`, `actor_id`, `actor_type`, `timestamp` or
+  `schema_version` on an already-redacted row, none of which the row's own
+  `event_hash` ever covered once its payload became a marker; and a later
+  `event.redacted` event in the same room must name the redaction, quoting
+  back the same snapshot hash and `original_event_hash`, so the record
+  binds the row and the chained announcement binds the record. A marker
+  payload carrying any key beyond the two named above is not treated as a
+  marker at all, and falls through to the ordinary hash check, which
+  fails it. A hand-edited marker with no backing row, a tampered
+  `original_event_hash`, a rewritten header, a deleted announcement, or an
+  announcement whose claimed hashes no longer match the record each
   surface as a `ChainBreak` at the row responsible, rather than silently
   verifying clean.
 - **Every copy the room made of a redacted message is swept in the same
@@ -198,7 +217,7 @@ request wants a specific person's data gone) are both kept, this way:
   only on it is settled, not orphaned.** `execution_interventions.instruction`
   held a human reviewer's typed redirect behind an immutability trigger
   (migrations 018/020) meant to keep a run's authority record trustworthy,
-  not to keep the words themselves forever. Migration 050 narrows that
+  not to keep the words themselves forever. Migration 049 narrows that
   trigger the same way 047 and 048 narrowed theirs, naming only
   `intervened_by` as immutable from here on; `instruction` may now be
   overwritten. Every intervention this user authored, in every room the
@@ -229,8 +248,25 @@ request wants a specific person's data gone) are both kept, this way:
 - **The redaction is itself an event.** After every redaction in a room
   lands, one `event.redacted` event is appended, attributed to the
   operator identity that ran the erasure, naming every redaction id it
-  covers. The erasure is therefore a fact in the chain, not an edit
-  outside it.
+  covers, the header hash and original event hash each one claims. The
+  erasure is therefore a fact in the chain, not an edit outside it.
+  `manage.py user erase` takes an `--operator <user_id>` naming a real
+  user and records it here and on each `event_redactions` row in place of
+  the constant `"system"` every prior round wrote unconditionally; an
+  unknown operator id is refused the same way an unknown erased user id
+  already is. This records who ran an honest erasure. It does not, and
+  cannot, tell an honest erasure from a forged one: a database writer can
+  fabricate a redaction row and its announcing event, naming any operator
+  id at all, byte-identical to what that operator would have produced
+  themselves, since nothing outside the file distinguishes the two. That
+  gap is the same one the chain has everywhere else (see Known Gaps), not
+  something this attribution closes.
+- **`messages.content` refuses a plain edit at the SQL level, defence in
+  depth alongside the chain.** Migration 050 adds a trigger allowing an
+  UPDATE of `content` only when the new value is exactly the redaction
+  marker shape; any other UPDATE is refused by SQLite itself, whether or
+  not the chain would eventually have caught the resulting divergence
+  between the log and the projection a reader actually sees.
 - **Attachment bytes are actually removed**, not just unbound from a
   message: the blob, filename, and digest on every attachment the user
   uploaded are cleared (`AttachmentRepo.erase_in_transaction`).
