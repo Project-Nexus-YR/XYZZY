@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.resources
 import json
 import logging
 import os
@@ -81,21 +82,39 @@ _ATTACHMENT_UPLOAD_PATH = re.compile(r"^/api/v1/rooms/[^/]+/attachments$")
 DEMO_BEARER_TOKEN = "demo"
 
 # Defense in depth behind the escaping the app shell and the share page both
-# rely on for member-authored content. 'unsafe-inline' on script-src and
-# style-src is a known gap, forced by the client's inline handlers and inline
-# styles rather than chosen: it still blocks a loaded remote script, which is
-# most of what this header is for. Fonts are vendored under web/fonts/ and
-# served same origin, so font-src and style-src name no outside host.
+# rely on for member-authored content. The client carries no inline script,
+# no inline style and no on* attribute (round 2 moved every one of them to
+# app.js and app.css), so script-src and style-src need only 'self': a loaded
+# remote script or an injected style attribute is refused, not merely logged.
+# Fonts are vendored under web/fonts/ and served same origin, so font-src
+# names no outside host. connect-src carries ws: and wss: for the realtime
+# socket, which is not same-scheme as the https/http page that opens it.
 _CSP = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline'; "
-    "style-src 'self' 'unsafe-inline'; "
+    "script-src 'self'; "
+    "style-src 'self'; "
     "font-src 'self'; "
     "img-src 'self' data:; "
+    "connect-src 'self' ws: wss:; "
     "frame-ancestors 'none'; "
     "object-src 'none'; "
-    "base-uri 'self'"
+    "base-uri 'self'; "
+    "form-action 'self'"
 )
+
+
+def resolve_static_dir() -> Path:
+    """Where the bundled web client lives, editable install or not.
+
+    The client is package data under ``multiplayer/web`` (see pyproject's
+    ``[tool.setuptools.package-data]``), so ``importlib.resources`` finds it
+    the same way whether this package is an editable checkout (the files sit
+    on disk under ``src/multiplayer/web``) or a normal, non-editable install
+    (the files were copied into site-packages alongside the code). Neither
+    case is ever a zipped wheel here, so the returned traversable is always a
+    real path on disk, safe to hand to ``StaticFiles`` and ``FileResponse``.
+    """
+    return Path(str(importlib.resources.files("multiplayer") / "web"))
 
 
 def _demo_mode_requested() -> bool:
@@ -493,7 +512,7 @@ def create_app(
         )
 
     # Serve the web UI
-    static_dir = Path(__file__).parent.parent.parent / "web"
+    static_dir = resolve_static_dir()
     if static_dir.exists():
 
         @app.get("/")

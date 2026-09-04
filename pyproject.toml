@@ -54,7 +54,7 @@ xyzzy = "multiplayer.server:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-multiplayer = ["migrations/*.sql"]
+multiplayer = ["migrations/*.sql", "web/*", "web/js/*", "web/fonts/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

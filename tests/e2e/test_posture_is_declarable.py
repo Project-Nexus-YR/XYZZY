@@ -16,11 +16,11 @@ everything" from "this action always pauses".
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi.testclient import TestClient
 
 from multiplayer.server import create_app
+
+from ._client_source import client_source_text
 
 ADMIN = {"Authorization": "Bearer admin-token"}
 EDITOR = {"Authorization": "Bearer editor-token"}
@@ -127,19 +127,20 @@ def test_the_client_shows_the_posture_and_lets_an_admin_change_it() -> None:
     declaration rows on that read — rather than any value the page kept, so a posture
     a colleague declared is what the next reload shows.
     """
-    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
+    ui = client_source_text()
 
     assert 'id="posture-panel"' in ui
-    assert "renderPosture(state.room.posture)" in ui
+    assert "renderPosture(snapshot.room.posture)" in ui
     assert 'data-posture="${escHtml(current)}"' in ui
     assert "escHtml(POSTURE_COPY[current])" in ui
     # Both values are nameable in the control, and it is the admin's alone.
-    assert 'onchange="declarePosture(this.value)"' in ui
+    assert 'data-change-action="declarePosture"' in ui
+    assert "declarePosture: (el) => declarePosture(el.value)" in ui
     assert "currentRoomRole === 'admin'" in ui
     for posture in ("GUARDED", "STRICT"):
         assert f'<option value="{posture}"' in ui, posture
     # The one route, and a reload afterwards rather than a value the page remembers.
-    assert "await api('PATCH', `/rooms/${roomId}/posture`, {posture})" in ui
+    assert "await api('PATCH', `/rooms/${state.roomId}/posture`, {posture})" in ui
     assert "case 'room.posture_declared':" in ui
 
 
@@ -150,6 +151,6 @@ def test_the_client_says_which_rule_parked_a_call() -> None:
     channel pauses everything" and "this action always pauses" read differently to
     the person the call is waiting on.
     """
-    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
+    ui = client_source_text()
 
     assert "<div class=\"reason\">${escHtml(a.reason || 'awaiting a human')}</div>" in ui

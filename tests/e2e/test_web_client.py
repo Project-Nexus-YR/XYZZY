@@ -1,4 +1,4 @@
-"""Executing browser coverage for web/index.html.
+"""Executing browser coverage for the web client (src/multiplayer/web).
 
 Every other e2e file reads this client as text and asserts a substring is
 present, so a JavaScript syntax error, a dead handler, or a defeated escape
@@ -109,6 +109,22 @@ def _enter_demo_workspace(page: Page, base_url: str) -> None:
     # wait for it rather than for a fixed delay.
     page.wait_for_function(
         "() => document.getElementById('agents-panel').innerHTML.trim().length > 0",
+        timeout=10000,
+    )
+    _wait_for_socket_connected(page)
+
+
+def _wait_for_socket_connected(page: Page) -> None:
+    """The first interaction in a flow used to be able to race a socket event
+    that triggers its own loadState() (a membership notice, a presence update)
+    landing between element resolution and the click — see
+    test_web2_track_dom_reconciliation.py for the mechanism this papers over
+    at the application layer. Waiting for the socket's own "connected" class
+    on #ws-status (set by setWsStatus in util.js) before the first click in a
+    flow keeps a flow from starting mid-handshake, when that reconnect
+    machinery is most likely to still be replaying buffered events."""
+    page.wait_for_function(
+        "() => document.getElementById('ws-status').classList.contains('connected')",
         timeout=10000,
     )
 

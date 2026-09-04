@@ -1,6 +1,5 @@
 """Acceptance proof for bounded, governed, evidence-backed Meta answers."""
 
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -30,6 +29,8 @@ from multiplayer.domain.models import (
 from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.server import create_app
 from multiplayer.services.service import MultiplayerService
+
+from ._client_source import client_source_text
 
 OWNER = {"Authorization": "Bearer owner-token"}
 VIEWER = {"Authorization": "Bearer viewer-token"}
@@ -1028,18 +1029,18 @@ def test_one_meta_answer_gives_one_account_of_each_assertion_currency() -> None:
 
 
 def test_browser_meta_contract_exposes_scope_freshness_and_drilldown() -> None:
-    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
+    ui = client_source_text()
     assert 'data-center-view="meta"' in ui
     assert 'id="meta-question"' in ui
     assert 'id="meta-scope"' in ui
     assert 'id="meta-answer"' in ui
     assert 'id="meta-evidence"' in ui
-    assert 'onclick="askMeta(' in ui
+    assert 'data-action="askMeta"' in ui
     assert 'id="meta-kinds"' in ui
     # Every kind offered as a choice, so no supported question needs a phrasing.
     for kind in MetaQuestionKind:
-        assert f"askMetaKind('{kind.value}')" in ui
-    assert "rooms/${roomId}/meta" in ui
+        assert f'data-action="askMetaKind" data-action-arg="{kind.value}"' in ui
+    assert "rooms/${state.roomId}/meta" in ui
     assert "authorized_head" in ui
     assert "retrieval_counts" in ui
     assert "exact_source_evidence" in ui

@@ -1,7 +1,6 @@
 """Acceptance proof for the bounded, evidence-backed decision ontology."""
 
 import sqlite3
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -13,6 +12,8 @@ from multiplayer.domain.models import OntologyReviewAction, OutputDisposition
 from multiplayer.realtime.hub import RealtimeHub
 from multiplayer.server import create_app
 from multiplayer.services.service import MultiplayerService
+
+from ._client_source import client_source_text
 
 OWNER = {"Authorization": "Bearer owner-token"}
 EDITOR = {"Authorization": "Bearer editor-token"}
@@ -58,12 +59,12 @@ def _events(client: TestClient, room_id: str) -> list[dict[str, Any]]:
 
 def test_browser_ontology_contract_uses_public_reconnect_state_and_review_routes() -> None:
     """The visible panel is wired only to room state and capability-checked APIs."""
-    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
+    ui = client_source_text()
     assert 'id="ontology-panel"' in ui
     assert 'id="ontology-tree"' in ui
     assert 'id="ontology-history"' in ui
-    assert "roomOntology = state.ontology" in ui
-    assert "renderOntology(roomOntology)" in ui
+    assert "state.roomOntology = snapshot.ontology" in ui
+    assert "renderOntology(state.roomOntology)" in ui
     assert 'data-ontology-kind="Decision"' in ui
     assert 'data-ontology-kind="Claim"' in ui
     assert 'data-ontology-kind="AgentOutput"' in ui
@@ -270,12 +271,12 @@ def test_decision_publication_materializes_selected_evidence_and_review_history(
 
         # The browser contract consumes the authorized reconnect snapshot and
         # exposes the same public review routes; it does not use a hidden store.
-        ui = client.get("/").text
+        ui = client_source_text()
         assert 'id="ontology-panel"' in ui
         assert 'id="ontology-tree"' in ui
         assert 'id="ontology-history"' in ui
-        assert "roomOntology = state.ontology" in ui
-        assert "renderOntology(roomOntology)" in ui
+        assert "state.roomOntology = snapshot.ontology" in ui
+        assert "renderOntology(state.roomOntology)" in ui
         assert 'data-ontology-kind="Decision"' in ui
         assert 'data-ontology-kind="Claim"' in ui
         assert 'data-ontology-kind="AgentOutput"' in ui

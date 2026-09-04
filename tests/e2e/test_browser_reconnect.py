@@ -2,7 +2,6 @@
 
 import asyncio
 import hashlib
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -11,6 +10,8 @@ from httpx import ASGITransport, AsyncClient
 
 import multiplayer.api.routes as routes_module
 from multiplayer.server import create_app
+
+from ._client_source import client_source_text
 
 OWNER = {"Authorization": "Bearer owner-token"}
 COLLABORATOR = {"Authorization": "Bearer collaborator-token"}
@@ -178,7 +179,7 @@ def test_reload_stale_storage_and_second_browser_restore_without_duplicate_write
 
 
 def test_web_setup_discovers_before_writes_and_persists_no_credential() -> None:
-    html = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
+    html = client_source_text()
 
     discovery = html.index("const context = await api('GET', '/me/context')")
     bootstrap_write = html.index("const bootstrap = await api('POST', '/me/bootstrap'")
@@ -194,7 +195,7 @@ def test_web_setup_discovers_before_writes_and_persists_no_credential() -> None:
     assert "`bearer.${encodedToken}`" in html
     assert 'id="setup-token" type="password"' in html
     assert 'autocomplete="current-password"' not in html
-    assert "state.events_since.forEach(event => logEvent(event))" in html
+    assert "snapshot.events_since.forEach(event => logEvent(event))" in html
 
 
 @pytest.mark.asyncio

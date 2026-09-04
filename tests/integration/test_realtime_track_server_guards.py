@@ -60,6 +60,16 @@ async def test_every_response_carries_the_security_headers():
                 assert "frame-ancestors 'none'" in csp
                 assert "object-src 'none'" in csp
                 assert "default-src 'self'" in csp
+                # The client carries no inline script, style, or on* attribute
+                # any more, so the policy no longer needs to allow them.
+                assert "unsafe-inline" not in csp
+                assert "script-src 'self'" in csp
+                assert "style-src 'self'" in csp
+                assert "font-src 'self'" in csp
+                assert "img-src 'self' data:" in csp
+                assert "connect-src 'self' ws: wss:" in csp
+                assert "base-uri 'self'" in csp
+                assert "form-action 'self'" in csp
 
 
 @pytest.mark.asyncio

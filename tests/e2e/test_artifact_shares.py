@@ -169,8 +169,10 @@ def test_hostile_artifact_content_is_neutralized_on_the_public_page() -> None:
         assert "<code>&lt;code-wrapped&gt;</code>" in body
 
         # Content can never mint a hyperlink: the fixed footer link is the only
-        # href on the page, and no javascript: URL appears unescaped.
-        assert body.count("href=") == 1
+        # anchor on the page, and no javascript: URL appears unescaped. The
+        # served stylesheet link is a static asset reference, not an anchor,
+        # so it is excluded from this count.
+        assert body.count("<a href=") == 1
         assert 'href="https://github.com/Project-Nexus-YR/XYZZY"' in body
         assert 'href="javascript:' not in body
 

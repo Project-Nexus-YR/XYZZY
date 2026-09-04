@@ -1,0 +1,1027 @@
+/* ============================================================
+   XYZZY — Console
+   Machine facts are set in mono, human words in sans. Nothing is
+   decorated that a hairline can separate instead.
+
+   The scale is the design. Seven sizes, three weights, six spacing
+   atoms, three hairlines — every value in this file comes from one
+   of those sets, and tracking is bound to size rather than guessed
+   per rule. Light and dark are the same system with the ramp
+   inverted, not two stylesheets.
+   ============================================================ */
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/IBMPlexMono-400.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:500;font-display:swap;src:url('/static/fonts/IBMPlexMono-500.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/IBMPlexSans-400.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:500;font-display:swap;src:url('/static/fonts/IBMPlexSans-500.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:600;font-display:swap;src:url('/static/fonts/IBMPlexSans-600.woff2') format('woff2')}
+
+*{margin:0;padding:0;box-sizing:border-box}
+
+:root{
+  /* ---- type scale: size and its tracking travel together ---- */
+  --t-meta:11px;    --k-meta:.01em;
+  --t-small:12px;   --k-small:-.005em;
+  --t-ui:13px;      --k-ui:-.01em;
+  --t-body:14px;    --k-body:-.013em;
+  --t-title:16px;   --k-title:-.016em;
+  --t-head:20px;    --k-head:-.02em;
+  --t-display:30px; --k-display:-.024em;
+
+  --w-normal:400;
+  --w-medium:500;
+  --w-strong:600;
+
+  /* ---- spacing: six atoms, nothing between them ---- */
+  --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:24px; --s-6:32px;
+  --s-half:2px;
+
+  --r-1:2px; --r-2:4px; --r-3:6px;
+
+  --t-fast:100ms ease;
+  --t-move:160ms cubic-bezier(.25,.46,.45,.94);
+
+  --mono:'IBM Plex Mono','SFMono-Regular',Consolas,monospace;
+  --sans:'IBM Plex Sans','Segoe UI',system-ui,sans-serif;
+  --content:720px;
+
+  /* ---- light: paper, ink, one signal ---- */
+  --bg:#f7f6f4;
+  --surface:#efedea;
+  --raised:#ffffff;
+  --sunken:#e9e6e2;
+  --line:rgba(23,20,16,.09);
+  --line-2:rgba(23,20,16,.14);
+  --line-3:rgba(23,20,16,.26);
+  /* controls are bounded, not merely divided: this one clears 3:1 */
+  --edge:rgba(23,20,16,.5);
+  --text:#17181a;
+  --text-2:#56534f;
+  --text-3:#65615c;
+  --accent:#1B4529;
+  --accent-2:#143621;
+  --accent-ink:#FDFAF3;
+  --accent-dim:rgba(27,69,41,.1);
+  --ok:#2a6f46;
+  --danger:#b03a41;
+  --shadow-1:0 1px 2px rgba(23,20,16,.08);
+  --shadow-2:0 8px 20px rgba(23,20,16,.12);
+  color-scheme:light;
+}
+
+/* ---- dark: the same ramp, inverted deliberately ---- */
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0b0c0d;
+    --surface:#0f1011;
+    --raised:#17181a;
+    --sunken:#08090a;
+    --line:rgba(255,255,255,.055);
+    --line-2:rgba(255,255,255,.09);
+    --line-3:rgba(255,255,255,.16);
+    --edge:rgba(255,255,255,.34);
+    --text:#f2f3f4;
+    --text-2:#a9a6a2;
+    --text-3:#87837e;
+    --accent:#A1C1A9;
+    --accent-2:#C4D9C8;
+    --accent-ink:#0b0c0d;
+    --accent-dim:rgba(161,193,169,.13);
+    --ok:#5aa26f;
+    --danger:#e0646b;
+    --shadow-1:0 2px 4px rgba(0,0,0,.4);
+    --shadow-2:0 8px 20px rgba(0,0,0,.45);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0b0c0d;
+  --surface:#0f1011;
+  --raised:#17181a;
+  --sunken:#08090a;
+  --line:rgba(255,255,255,.055);
+  --line-2:rgba(255,255,255,.09);
+  --line-3:rgba(255,255,255,.16);
+  --edge:rgba(255,255,255,.34);
+  --text:#f2f3f4;
+  --text-2:#a9a6a2;
+  --text-3:#87837e;
+  --accent:#A1C1A9;
+  --accent-2:#C4D9C8;
+  --accent-ink:#0b0c0d;
+  --accent-dim:rgba(161,193,169,.13);
+  --ok:#5aa26f;
+  --danger:#e0646b;
+  --shadow-1:0 2px 4px rgba(0,0,0,.4);
+  --shadow-2:0 8px 20px rgba(0,0,0,.45);
+  color-scheme:dark;
+}
+
+html,body{height:100%}
+/* the root carries the ground colour, so a theme switch cannot leave the
+   canvas painted with the outgoing palette */
+html{background-color:var(--bg)}
+body{
+  font-family:var(--sans);
+  font-size:var(--t-body);line-height:1.5;letter-spacing:var(--k-body);
+  background-color:var(--bg);color:var(--text);
+  overflow:hidden;display:flex;flex-direction:column;
+  -webkit-font-smoothing:antialiased;
+}
+button,input,textarea,select{font:inherit;color:inherit;letter-spacing:inherit}
+button{cursor:pointer;background:transparent;border:0}
+button:disabled{cursor:not-allowed;opacity:.4}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-1)}
+::selection{background:var(--accent-dim);color:var(--text)}
+::-webkit-scrollbar{width:11px;height:11px}
+::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:var(--r-3);border:3px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:var(--line-3);background-clip:content-box}
+::-webkit-scrollbar-track{background:transparent}
+.hidden{display:none!important}
+.sidebar-backdrop{display:none}
+
+/* every machine fact — ids, counts, durations, stamps — is set here */
+.mono,.badge,.status,.nav-label,.nav-meta,.member-row .handle,.events-log,
+.identity-role,.unread-pill,.msg .time,.agent-provenance,.thread-counts,
+.unread-rule,.branch-detail,.branch-progress,.status-text,.lock-detail,
+.composer-hint,.question-meta,#template-selection-count,.template-role,
+.template-state,.outputs-head h3,.outputs-count,.output-role,.output-provenance,
+.review-state,.meta-scope,.ontology-mode,.ontology-meta,.ontology-badge,
+.history-item,.hit-meta,.records > summary,.records h3,.msg::before,
+.identity-avatar,.workspace-badge,.product-mark,.step-no,.setup-card label,
+.msg.system .bubble,.meta-chain pre,.card .detail,.approval-card .detail,.item .detail{
+  font-family:var(--mono);
+  font-variant-numeric:tabular-nums;
+}
+a,.output-link{text-underline-offset:2px}
+
+/* ---------- atoms ---------- */
+.btn-primary{
+  background:var(--accent);color:var(--accent-ink);
+  font-size:var(--t-ui);font-weight:var(--w-medium);letter-spacing:var(--k-ui);
+  padding:var(--s-1) var(--s-3);border-radius:var(--r-2);white-space:nowrap;
+  transition:background var(--t-fast);
+}
+.btn-primary:hover:not(:disabled){background:var(--accent-2)}
+.btn-sm{
+  border:1px solid var(--line-2);color:var(--text);
+  font-size:var(--t-small);letter-spacing:var(--k-small);
+  padding:var(--s-1) var(--s-2);border-radius:var(--r-2);white-space:nowrap;
+  transition:background var(--t-fast),border-color var(--t-fast);
+}
+.btn-sm:hover:not(:disabled){background:var(--line);border-color:var(--line-3)}
+.icon-button{
+  width:28px;height:28px;border-radius:var(--r-2);color:var(--text-3);
+  display:grid;place-items:center;flex-shrink:0;
+  transition:background var(--t-fast),color var(--t-fast);
+}
+.icon-button:hover{background:var(--line);color:var(--text)}
+.badge{
+  font-size:var(--t-meta);font-weight:var(--w-medium);letter-spacing:.06em;
+  text-transform:uppercase;padding:1px var(--s-1);border-radius:var(--r-1);
+  border:1px solid var(--line-2);color:var(--text-3);white-space:nowrap;
+}
+.badge.completed,.badge.confirmed{color:var(--ok);border-color:currentColor}
+.badge.corrected,.badge.claim{color:var(--accent);border-color:currentColor}
+.badge.decision{color:var(--text-2);border-color:var(--line-3)}
+.product-mark,.workspace-badge{
+  width:22px;height:22px;border-radius:var(--r-2);flex-shrink:0;
+  border:1px solid var(--line-3);color:var(--accent);
+  display:grid;place-items:center;font-size:var(--t-meta);font-weight:var(--w-medium);
+}
+.spinner{
+  width:11px;height:11px;border:1.5px solid var(--line-2);border-top-color:var(--accent);
+  border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+.status{
+  display:inline-flex;align-items:center;gap:var(--s-1);
+  font-size:var(--t-meta);letter-spacing:.05em;color:var(--text-3);text-transform:uppercase;
+}
+.status::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--accent)}
+.status.connected::before{background:var(--ok)}
+.presence-dot{width:5px;height:5px;border-radius:50%;background:var(--text-3);flex-shrink:0}
+.presence-dot.online{background:var(--ok)}
+.presence-dot.working{background:var(--accent)}
+
+/* One small dialog pattern, reused for create-channel, leave/remove confirms and
+   the redirect-agent prompt — no browser prompt()/confirm() anywhere in this file. */
+.modal-backdrop{
+  position:fixed;inset:0;z-index:200;background:var(--scrim,rgba(0,0,0,.4));
+  display:flex;align-items:center;justify-content:center;padding:var(--s-4);
+}
+.modal-backdrop.hidden{display:none}
+.modal-card{
+  background:var(--raised);border:1px solid var(--line);border-radius:var(--r-3);
+  box-shadow:var(--shadow-2);max-width:392px;width:100%;padding:var(--s-5);
+}
+.modal-card h3{font-size:var(--t-title);font-weight:var(--w-strong);letter-spacing:var(--k-title)}
+.modal-card p{font-size:var(--t-ui);color:var(--text-2);margin-top:var(--s-2);line-height:1.5;letter-spacing:var(--k-ui)}
+.modal-card label{display:block;font-size:var(--t-meta);letter-spacing:.07em;text-transform:uppercase;color:var(--text-3);margin:var(--s-4) 0 var(--s-2)}
+.modal-card input,.modal-card textarea{
+  width:100%;background:var(--bg);border:1px solid var(--edge);caret-color:var(--accent);border-radius:var(--r-2);
+  padding:var(--s-2) var(--s-3);font-size:var(--t-body);font-family:inherit;
+}
+.modal-card textarea{min-height:88px;resize:vertical}
+.modal-card .field-error{font-size:var(--t-small);color:var(--danger);margin-top:var(--s-2);line-height:1.45}
+.modal-actions{display:flex;justify-content:flex-end;gap:var(--s-2);margin-top:var(--s-5)}
+
+/* A small anchored menu — the channel header's overflow and no other pattern
+   in this file, so it is written once and reused wherever one shows up next. */
+.popover-menu{
+  position:fixed;z-index:150;min-width:180px;background:var(--raised);
+  border:1px solid var(--line);border-radius:var(--r-3);box-shadow:var(--shadow-2);
+  padding:var(--s-1);display:grid;
+}
+.popover-menu.hidden{display:none}
+.popover-menu button{
+  text-align:start;padding:var(--s-2) var(--s-3);border-radius:var(--r-2);
+  font-size:var(--t-ui);letter-spacing:var(--k-ui);color:var(--text);
+  /* These sit edge to edge with zero gap, so a hit-area extension would always
+     cover part of the next item - the real box grows instead. */
+  min-height:40px;display:flex;align-items:center;
+}
+.popover-menu button:hover{background:var(--line)}
+.popover-menu button.danger{color:var(--danger)}
+
+.notif-dot{
+  position:absolute;top:4px;inset-inline-end:4px;width:6px;height:6px;border-radius:50%;background:var(--accent);
+}
+.icon-button{position:relative}
+/* A ::after hit-area extension is only safe when it stays strictly under half
+   the smallest gap its group ever sits in - a bigger inset makes neighbouring
+   controls' extended zones overlap, so a tap near the boundary silently hits
+   the wrong one. Each group below is capped to the tightest gap it actually
+   ships in; a group whose real gap can be zero (a contiguous list, no room to
+   spare) drops the extension and is widened for real instead. */
+.icon-button::after{content:"";position:absolute;inset:-1px}
+.btn-sm::after,.ontology-actions button::after{
+  content:"";position:absolute;inset:-3px;
+}
+.btn-sm,.ontology-actions button{position:relative}
+.browse-room-row{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-2) var(--s-3);border-bottom:1px solid var(--line)}
+.browse-room-row .detail{font-size:var(--t-small);color:var(--text-3)}
+.browse-room-row .btn-sm{margin-inline-start:auto;flex-shrink:0}
+.notif-row{display:flex;flex-direction:column;gap:2px;padding:var(--s-2) var(--s-3);border-bottom:1px solid var(--line);cursor:pointer}
+.notif-row:hover{background:var(--line)}
+.notif-row .title{font-size:var(--t-ui);font-weight:var(--w-medium)}
+.notif-row .body{font-size:var(--t-small);color:var(--text-2)}
+.notif-row .time{font-size:var(--t-meta);color:var(--text-3)}
+
+/* ---------- sign in ---------- */
+/* A grid with a stretch column and a fixed one let the intro sit narrow and
+   right-aligned inside a wide left track, leaving a lopsided gap on the left
+   that the fixed-width card's own padding didn't match on the right. Centering
+   the pair as one flex group keeps the outer margins symmetric regardless of
+   how the two children's own widths differ. */
+#setup-screen{
+  position:fixed;inset:0;z-index:100;background:var(--bg);
+  display:flex;justify-content:center;align-items:center;
+  gap:6vw;padding:6vw;overflow:auto;
+}
+.setup-intro{max-width:46ch}
+.setup-mark{display:flex;align-items:center;gap:var(--s-2);font-size:var(--t-ui);font-weight:var(--w-strong);margin-bottom:var(--s-6);letter-spacing:var(--k-ui)}
+.setup-intro h1{font-size:var(--t-display);line-height:1.16;letter-spacing:var(--k-display);font-weight:var(--w-strong)}
+.setup-intro p{font-size:var(--t-title);line-height:1.55;color:var(--text-2);margin-top:var(--s-3);letter-spacing:var(--k-title);text-wrap:pretty}
+.setup-steps{display:grid;gap:var(--s-3);margin-top:var(--s-6);color:var(--text-2);font-size:var(--t-ui);letter-spacing:var(--k-ui)}
+.setup-steps span{display:flex;align-items:center;gap:var(--s-3)}
+.step-no{
+  width:20px;height:20px;border:1px solid var(--line-2);border-radius:var(--r-1);
+  display:grid;place-items:center;font-size:var(--t-meta);
+  color:var(--text-3);flex-shrink:0;
+}
+.setup-card{
+  background:var(--raised);border:1px solid var(--line);border-radius:var(--r-3);
+  padding:var(--s-5);box-shadow:var(--shadow-2);max-width:392px;
+}
+/* Space is reserved only while the variant is still undecided: once revealed,
+   the card sits at its natural height instead of carrying a dead band sized
+   for the taller variant it did not get. */
+.setup-card:has(#setup-card-variant.hidden){min-height:328px}
+/* One primary per screen: with SSO leading, the token submit inside the
+   disclosure reads as the secondary action it is. */
+.setup-card.sso-mode #setup-button{
+  background:transparent;color:var(--text);border:1px solid var(--line-3);
+}
+.setup-card.sso-mode #setup-button:hover:not(:disabled){background:var(--line);}
+.setup-card h2{font-size:var(--t-title);font-weight:var(--w-strong);letter-spacing:var(--k-title)}
+.setup-card > p{font-size:var(--t-ui);color:var(--text-2);margin-top:var(--s-2);line-height:1.5;letter-spacing:var(--k-ui)}
+.setup-card label{
+  display:block;font-size:var(--t-meta);letter-spacing:.07em;
+  text-transform:uppercase;color:var(--text-3);margin:var(--s-4) 0 var(--s-2);
+}
+.setup-card input{
+  width:100%;background:var(--bg);border:1px solid var(--edge);caret-color:var(--accent);border-radius:var(--r-2);
+  padding:var(--s-2) var(--s-3);font-size:var(--t-body);transition:border-color var(--t-fast);
+}
+.setup-card input:focus-visible{border-color:var(--edge)}
+.setup-card input::placeholder{color:var(--text-3)}
+.setup-card .field-help{font-size:var(--t-small);color:var(--text-3);margin-top:var(--s-2);line-height:1.45;letter-spacing:var(--k-small)}
+.setup-card input.error{border-color:var(--danger)}
+.setup-card .field-error{font-size:var(--t-small);color:var(--danger);margin-top:var(--s-2);line-height:1.45;letter-spacing:var(--k-small)}
+#setup-button,#setup-sso-button{
+  width:100%;margin-top:var(--s-5);background:var(--accent);color:var(--accent-ink);
+  font-weight:var(--w-medium);padding:var(--s-2) var(--s-3);border-radius:var(--r-2);
+  font-size:var(--t-ui);letter-spacing:var(--k-ui);transition:background var(--t-fast);
+}
+#setup-button:hover:not(:disabled){background:var(--accent-2)}
+#setup-sso-button:hover{background:var(--accent-2)}
+#setup-token-summary{
+  font-size:var(--t-small);color:var(--text-3);letter-spacing:var(--k-small);
+  cursor:pointer;margin-top:var(--s-5);list-style:none;
+}
+#setup-token-summary::-webkit-details-marker{display:none}
+.setup-card.sso-mode #setup-token-details{margin-top:var(--s-2)}
+.setup-card.sso-mode #setup-token-details[open] #setup-token-summary{margin-bottom:var(--s-4)}
+
+/* ---------- shell ---------- */
+.header{display:none!important}
+.main{
+  display:grid;grid-template-columns:248px minmax(0,1fr) auto;
+  flex:1;min-height:0;overflow:hidden;
+}
+
+/* ---------- rail ---------- */
+.sidebar{
+  background:var(--surface);border-inline-end:1px solid var(--line);
+  display:flex;flex-direction:column;min-height:0;
+}
+.workspace-head{
+  display:flex;align-items:center;gap:var(--s-2);height:48px;flex-shrink:0;
+  padding-block:0;padding-inline-start:var(--s-4);padding-inline-end:var(--s-2);border-bottom:1px solid var(--line);
+}
+.workspace-name{font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui)}
+.workspace-sub{font-size:var(--t-meta);color:var(--text-3);margin-top:1px;letter-spacing:.04em}
+.workspace-head .icon-button{margin-inline-start:auto}
+.sidebar-scroll{flex:1;overflow-y:auto;padding:var(--s-2);min-height:0}
+.nav-label{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:var(--s-4) var(--s-2) var(--s-1);font-size:var(--t-meta);
+  letter-spacing:.1em;text-transform:uppercase;color:var(--text-3);
+}
+.sidebar-scroll > .nav-label:first-child{padding-top:var(--s-1)}
+.nav-item{
+  width:100%;display:flex;align-items:center;gap:var(--s-2);text-align:start;
+  padding:var(--s-1) var(--s-2);border-radius:var(--r-2);
+  font-size:var(--t-ui);letter-spacing:var(--k-ui);color:var(--text-2);
+  min-height:28px;transition:background var(--t-fast),color var(--t-fast);
+}
+.nav-item:hover{background:var(--line);color:var(--text)}
+/* selection says two things: the row is lit, and its text is ink */
+.nav-item.active{background:var(--line-2);color:var(--text)}
+.nav-icon{
+  width:15px;height:15px;flex-shrink:0;display:grid;place-items:center;
+  color:var(--text-3);font-size:var(--t-ui);
+}
+.nav-item:hover .nav-icon,.nav-item.active .nav-icon{color:currentColor}
+.nav-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.nav-meta{font-size:var(--t-meta);color:var(--text-3)}
+/* A branch row packs a title and a summary line into .nav-name, which is
+   otherwise a single nowrap line — the two ran together with the title's
+   ellipsis touching the summary text. Let this one row wrap onto its own
+   second line instead, with the title still truncating on its own. */
+.branch-nav .nav-name{white-space:normal;overflow:visible;text-overflow:clip;display:flex;flex-direction:column;align-items:flex-start;min-width:0}
+.branch-nav .nav-name > span:first-child{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.member-row{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-1) var(--s-2);font-size:var(--t-ui);color:var(--text-2);letter-spacing:var(--k-ui)}
+.member-row .handle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--t-meta);color:var(--text-3)}
+.member-row .badge{margin-inline-start:auto}
+.sidebar-scroll details > summary{list-style:none;cursor:pointer}
+.sidebar-scroll details > summary::-webkit-details-marker{display:none}
+.sidebar-scroll details > summary:hover{color:var(--text-2)}
+.events-log{
+  font-size:var(--t-meta);color:var(--text-3);line-height:1.5;
+  padding:var(--s-half) var(--s-2) var(--s-1);display:grid;gap:var(--s-1);
+  max-height:180px;overflow-y:auto;
+}
+.sidebar-footer{
+  display:flex;align-items:center;gap:var(--s-2);padding:var(--s-2) var(--s-3);flex-shrink:0;
+  border-top:1px solid var(--line);
+}
+/* Footer icon buttons need a real hit area, not just a visible glyph — padding
+   grows the target to 36px without growing the icon itself. */
+.sidebar-footer .icon-button{width:36px;height:36px}
+.identity-avatar{
+  width:26px;height:26px;border-radius:var(--r-2);flex-shrink:0;
+  border:1px solid var(--line-3);color:var(--text-2);
+  display:grid;place-items:center;font-size:var(--t-meta);
+}
+.identity-name{font-size:var(--t-ui);font-weight:var(--w-medium);letter-spacing:var(--k-ui)}
+.identity-role{font-size:var(--t-meta);color:var(--text-3);letter-spacing:.06em;text-transform:uppercase;margin-top:1px}
+.sidebar-footer .icon-button{margin-inline-start:auto}
+/* one glyph per theme; the other is not rendered */
+:root[data-theme="dark"] .theme-sun,.theme-moon{display:none}
+:root[data-theme="dark"] .theme-moon{display:block}
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]) .theme-sun{display:none}
+  :root:not([data-theme="light"]) .theme-moon{display:block}
+}
+:root[data-theme="light"] .theme-sun{display:block}
+:root[data-theme="light"] .theme-moon{display:none}
+
+/* ---------- conversation ---------- */
+.room-hash{color:var(--text-3);display:grid;place-items:center;flex-shrink:0}
+.center{min-width:0;display:flex;flex-direction:column;background:var(--bg);min-height:0;position:relative}
+.room-header{
+  display:flex;align-items:center;gap:var(--s-3);min-height:48px;flex-shrink:0;
+  padding-block:0;padding-inline-start:var(--s-5);padding-inline-end:var(--s-2);border-bottom:1px solid var(--line);
+}
+.room-header > div{min-width:0}
+/* text-overflow does nothing on the flex container itself - it has to sit on
+   the child that actually holds the overflowing text, and that child needs
+   its own min-width:0 to be allowed to shrink below its content at all. */
+.room-header h2{display:flex;align-items:center;gap:var(--s-2);min-width:0;
+  font-size:var(--t-title);font-weight:var(--w-strong);letter-spacing:var(--k-title);
+}
+#room-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.room-header .meta{font-size:var(--t-small);color:var(--text-3);letter-spacing:var(--k-small);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.header-actions{margin-inline-start:auto;display:flex;align-items:center;gap:var(--s-1);flex-shrink:0}
+.unread-pill{
+  font-size:var(--t-meta);font-weight:var(--w-medium);
+  background:var(--accent);color:var(--accent-ink);padding:1px var(--s-1);border-radius:var(--r-1);
+}
+.messages{
+  flex:1;overflow-y:auto;min-height:0;
+  padding:var(--s-5) max(var(--s-5),3vw) var(--s-1);display:flex;flex-direction:column;
+  /* A short room reads like a bare page pinned to the top; pushing the run of
+     messages to the bottom edge (newest just above the composer) is how every
+     chat product handles it. Once content overflows, flex-end just means the
+     top of it scrolls off first — normal scroll behavior is unaffected. */
+  justify-content:flex-end;
+}
+
+.msg{
+  max-width:var(--content);width:100%;position:relative;
+  display:grid;grid-template-columns:22px auto minmax(0,1fr);column-gap:var(--s-3);
+  padding-block:var(--s-1);padding-inline-start:0;padding-inline-end:var(--s-2);
+}
+.msg::before{
+  content:attr(data-initial);grid-row:1/6;grid-column:1;
+  width:22px;height:22px;border-radius:var(--r-1);
+  border:1px solid var(--line-2);color:var(--text-2);
+  display:grid;place-items:center;font-size:var(--t-meta);text-transform:uppercase;
+}
+.msg.human::before{border-color:var(--line-3);color:var(--text)}
+.msg.agent::before{border-style:dashed;color:var(--text-2)}
+/* consecutive messages from one author collapse into a block */
+.msg.grouped{padding-top:0}
+.msg.grouped::before{content:"";border:0}
+.msg.grouped .sender{display:none}
+.msg.grouped .time{
+  grid-row:2;grid-column:1;justify-self:end;align-self:baseline;
+  opacity:0;transition:opacity var(--t-fast);
+}
+.msg.grouped:hover .time{opacity:1}
+.msg.grouped .bubble{margin-top:0}
+.msg.unread{background:transparent}
+/* rank comes from weight; the body stays the larger text because it is the content */
+.msg .sender{
+  grid-row:1;grid-column:2;align-self:baseline;
+  font-size:var(--t-ui);font-weight:var(--w-strong);color:var(--text);letter-spacing:var(--k-ui);
+}
+.msg .time{
+  grid-row:1;grid-column:3;justify-self:start;align-self:baseline;
+  font-size:var(--t-meta);color:var(--text-3);
+}
+.msg .bubble{
+  grid-row:2;grid-column:2/4;font-size:var(--t-body);line-height:1.6;
+  color:var(--text);font-weight:var(--w-normal);letter-spacing:var(--k-body);
+  margin-top:1px;white-space:pre-wrap;overflow-wrap:anywhere;max-width:68ch;
+}
+.msg .mention{color:var(--accent);font-weight:var(--w-medium)}
+.msg.system{color:var(--text-3);padding:var(--s-1) 0}
+.msg.system::before{content:"";border:0}
+.msg.system .bubble{font-size:var(--t-small);color:var(--text-3);letter-spacing:.01em}
+.agent-provenance{
+  grid-row:3;grid-column:2/4;font-size:var(--t-meta);color:var(--text-3);
+  margin-top:var(--s-1);display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2);
+}
+.output-link{color:var(--accent);text-decoration:none;border-bottom:1px solid currentColor}
+.output-link:hover{color:var(--accent-2)}
+.msg-actions{
+  grid-row:4;grid-column:2/4;display:flex;gap:var(--s-half);margin-top:0;
+  max-height:0;overflow:hidden;opacity:0;
+  transition:opacity var(--t-fast),max-height var(--t-fast),margin-top var(--t-fast);
+}
+/* Hidden means zero height, not just invisible — a hover strip nobody is
+   hovering must not hold a bubble away from its own group. The thread pane
+   reuses this same class for its per-reply "Reply to this", so it follows
+   the identical reveal rule rather than staying permanently rendered. */
+.msg:hover .msg-actions,.msg:focus-within .msg-actions,.msg.actions-open .msg-actions,
+.thread-item:hover .msg-actions,.thread-item:focus-within .msg-actions,.thread-item.actions-open .msg-actions{
+  opacity:1;max-height:32px;margin-top:var(--s-1);
+}
+/* No hover on touch: a tap on the message body toggles .actions-open instead,
+   so a screen of chat is not a permanent stack of "Reply" rows. */
+.msg-actions .action{
+  font-size:var(--t-small);color:var(--text-3);letter-spacing:var(--k-small);
+  padding:var(--s-half) var(--s-2);border-radius:var(--r-2);min-height:24px;
+  display:inline-flex;align-items:center;
+  transition:background var(--t-fast),color var(--t-fast);
+}
+.msg-actions .action:hover{background:var(--line);color:var(--text)}
+/* One button for both "start a thread" and "read the one that already
+   exists" (see messageActions in messages.js): always in the DOM, at a
+   fixed grid slot, so the node — and any focus or pending click on it — is
+   never replaced by the reply-to-thread-open swap, only re-styled by the
+   .standing class. Not standing, it reveals on hover exactly like .action
+   above; standing, it stays visible regardless. */
+.thread-action{
+  grid-row:5;grid-column:2/4;justify-self:start;margin-top:0;
+  font-size:var(--t-small);color:var(--text-3);letter-spacing:var(--k-small);
+  padding:var(--s-half) var(--s-2);border-radius:var(--r-2);min-height:24px;
+  display:inline-flex;align-items:center;
+  max-height:0;overflow:hidden;opacity:0;
+  transition:opacity var(--t-fast),max-height var(--t-fast),margin-top var(--t-fast),
+    background var(--t-fast),color var(--t-fast);
+}
+.msg:hover .thread-action,.msg:focus-within .thread-action,.msg.actions-open .thread-action{
+  opacity:1;max-height:32px;margin-top:var(--s-1);
+}
+.thread-action:hover{background:var(--line);color:var(--text)}
+.thread-action.standing{
+  opacity:1;max-height:32px;margin-top:var(--s-1);color:var(--accent);
+}
+.thread-action.standing:hover{background:var(--accent-dim)}
+.thread-counts{font-size:var(--t-meta);color:var(--text-3)}
+
+.unread-rule{
+  max-width:var(--content);width:100%;display:flex;align-items:center;gap:var(--s-2);
+  font-size:var(--t-meta);letter-spacing:.1em;text-transform:uppercase;
+  color:var(--accent);margin:var(--s-3) 0 var(--s-half);
+}
+.unread-rule::after{content:"";flex:1;height:1px;background:currentColor;opacity:.3}
+
+/* a run is a record in the transcript, ruled off, not a floating card */
+.branch-activity{
+  max-width:var(--content);width:100%;margin:var(--s-2) 0;
+  border-top:1px solid var(--line-2);border-bottom:1px solid var(--line-2);
+}
+.branch-activity button{
+  width:100%;display:grid;grid-template-columns:22px minmax(0,1fr) auto;
+  gap:var(--s-3);align-items:center;text-align:start;
+  padding-block:var(--s-3);padding-inline-start:0;padding-inline-end:var(--s-2);transition:background var(--t-fast);
+}
+.branch-activity button:hover{background:var(--line)}
+.branch-symbol{
+  width:22px;height:22px;border-radius:var(--r-1);border:1px solid var(--line-2);
+  color:var(--accent);display:grid;place-items:center;font-size:var(--t-ui);
+}
+.branch-title{font-size:var(--t-ui);font-weight:var(--w-medium);letter-spacing:var(--k-ui);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Both spans are inline text nodes by default, so a truncated title's ellipsis
+   ran straight into the meta beside it. A real line, not a margin nothing can see. */
+.branch-detail,.branch-progress{font-size:var(--t-meta);color:var(--text-3);margin-top:var(--s-1);letter-spacing:.01em;display:block}
+.branch-summary{font-size:var(--t-small);color:var(--text-2);margin-top:var(--s-1);letter-spacing:var(--k-small);display:block}
+.status-text{display:inline-flex;align-items:center;gap:var(--s-1);font-size:var(--t-meta);color:var(--text-2)}
+
+.turn-lock{
+  display:none;align-items:center;gap:var(--s-3);max-width:var(--content);
+  margin:0 max(var(--s-5),3vw) var(--s-2);padding:var(--s-2) var(--s-3);
+  border:1px solid var(--line-2);border-radius:var(--r-3);background:var(--surface);
+}
+.turn-lock.visible{display:flex}
+.lock-copy{flex:1;min-width:0}
+.lock-title{font-size:var(--t-ui);font-weight:var(--w-medium);letter-spacing:var(--k-ui)}
+.lock-detail{font-size:var(--t-small);color:var(--text-3);margin-top:var(--s-half)}
+
+/* ---------- composer ---------- */
+.input-bar{padding:var(--s-1) max(var(--s-5),3vw) var(--s-4);flex-shrink:0;position:relative}
+.composer{
+  max-width:var(--content);background:var(--raised);
+  border:1px solid var(--edge);border-radius:var(--r-3);overflow:hidden;
+  transition:border-color var(--t-fast);
+}
+.composer:focus-within{border-color:var(--line-3)}
+.composer textarea{
+  width:100%;min-height:44px;max-height:180px;resize:none;border:0;
+  padding:var(--s-3);background:transparent;
+  font-size:var(--t-body);line-height:1.55;letter-spacing:var(--k-body);
+}
+.composer textarea{caret-color:var(--accent)}
+.composer textarea::placeholder{color:var(--text-3)}
+.composer-tools{display:flex;align-items:center;gap:var(--s-1);padding-block:var(--s-1) var(--s-2);padding-inline-start:var(--s-3);padding-inline-end:var(--s-2);border-top:1px solid var(--line)}
+.composer-tools .send{margin-inline-start:auto}
+.composer-hint{font-size:var(--t-meta);color:var(--text-3);letter-spacing:.05em;text-transform:uppercase}
+.mention-toggle{
+  display:inline-flex;align-items:center;gap:var(--s-2);
+  font-size:var(--t-small);color:var(--text-2);letter-spacing:var(--k-small);
+  padding:var(--s-1) var(--s-2);border-radius:var(--r-2);cursor:pointer;
+  transition:background var(--t-fast),color var(--t-fast);
+}
+.mention-toggle:hover{background:var(--line);color:var(--text)}
+.mention-toggle input{accent-color:var(--accent);margin:0}
+#ai-trigger{
+  display:inline-flex;align-items:center;gap:var(--s-2);
+  font-size:var(--t-small);font-weight:var(--w-medium);letter-spacing:var(--k-small);
+  color:var(--text-2);border:1px solid var(--line-2);
+  padding:var(--s-1) var(--s-2);border-radius:var(--r-2);
+  transition:background var(--t-fast),color var(--t-fast),border-color var(--t-fast);
+}
+#ai-trigger:hover{background:var(--line);color:var(--text)}
+#ai-trigger[aria-expanded="true"]{color:var(--accent);border-color:currentColor}
+
+/* ---------- branch launcher ---------- */
+.ai-tray{
+  display:none;position:absolute;bottom:84px;z-index:20;
+  inset-inline-start:max(var(--s-5),3vw);inset-inline-end:max(var(--s-5),3vw);max-width:var(--content);max-height:62vh;
+  background:var(--raised);border:1px solid var(--line-2);border-radius:var(--r-3);
+  box-shadow:var(--shadow-2);overflow:hidden;
+}
+.ai-tray.open{display:flex;flex-direction:column;animation:tray-in 160ms cubic-bezier(.25,.46,.45,.94)}
+@keyframes tray-in{from{opacity:0}to{opacity:1}}
+.tray-head{
+  display:grid;grid-template-columns:22px minmax(0,1fr) 28px;align-items:center;gap:var(--s-3);
+  padding:var(--s-3);border-bottom:1px solid var(--line);flex-shrink:0;
+}
+.tray-glyph{
+  width:22px;height:22px;border-radius:var(--r-1);border:1px solid var(--line-2);
+  color:var(--accent);display:grid;place-items:center;
+}
+.tray-title{font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui)}
+.tray-subtitle{font-size:var(--t-small);color:var(--text-3);margin-top:1px;letter-spacing:var(--k-small)}
+.decision-studio{padding:var(--s-3);overflow-y:auto;min-height:0}
+.studio-label{display:block;font-size:var(--t-small);font-weight:var(--w-medium);color:var(--text-2);margin-bottom:var(--s-2);letter-spacing:var(--k-small)}
+.strategy-toggle{display:grid;grid-template-columns:1fr 1fr;gap:var(--s-2);margin-bottom:var(--s-3)}
+.strategy-toggle button{
+  border:1px solid var(--line-2);border-radius:var(--r-2);padding:var(--s-2) var(--s-3);text-align:start;
+  transition:border-color var(--t-fast),background var(--t-fast);
+}
+.strategy-toggle button:hover{background:var(--line)}
+.strategy-toggle button.active{border-color:var(--accent);background:var(--accent-dim)}
+.strategy-name{display:flex;align-items:center;gap:var(--s-2);font-size:var(--t-ui);font-weight:var(--w-medium);letter-spacing:var(--k-ui)}
+.strategy-dot{width:6px;height:6px;border-radius:50%;background:var(--text-3)}
+.strategy-toggle button.active .strategy-dot{background:var(--accent)}
+.strategy-help{display:block;font-size:var(--t-small);color:var(--text-3);margin-top:var(--s-1);line-height:1.45;letter-spacing:var(--k-small)}
+.question-wrap{
+  border:1px solid var(--edge);border-radius:var(--r-2);background:var(--bg);
+  overflow:hidden;margin-bottom:var(--s-3);transition:border-color var(--t-fast);
+}
+.question-wrap:focus-within{border-color:var(--line-3)}
+.question-input{
+  width:100%;min-height:62px;max-height:180px;resize:vertical;border:0;
+  padding:var(--s-3);background:transparent;font-size:var(--t-body);line-height:1.55;letter-spacing:var(--k-body);
+}
+.question-input::placeholder{color:var(--text-3)}
+.question-meta{
+  display:flex;justify-content:space-between;gap:var(--s-2);padding:var(--s-1) var(--s-3);
+  border-top:1px solid var(--line);font-size:var(--t-meta);color:var(--text-3);
+}
+.field-label{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--s-2);
+  font-size:var(--t-small);font-weight:var(--w-medium);color:var(--text-2);
+  margin-bottom:var(--s-2);letter-spacing:var(--k-small);
+}
+#template-selection-count{font-size:var(--t-meta);font-weight:var(--w-normal);color:var(--text-3)}
+.template-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(206px,1fr));gap:var(--s-2)}
+.template-option{
+  display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--s-3);align-items:start;
+  border:1px solid var(--line-2);border-radius:var(--r-2);padding:var(--s-2) var(--s-3);
+  cursor:pointer;transition:border-color var(--t-fast),background var(--t-fast);
+}
+.template-option:hover{background:var(--line)}
+.template-option.active{border-color:var(--accent);background:var(--accent-dim)}
+.template-option.active .template-state{color:var(--text-2)}
+.template-option > input{accent-color:var(--accent);margin-top:var(--s-half)}
+.template-body{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:var(--s-2)}
+.template-check{display:none}
+.template-copy{display:block;min-width:0}
+.template-name{display:block;font-size:var(--t-ui);font-weight:var(--w-medium);letter-spacing:var(--k-ui)}
+.template-role{display:block;font-size:var(--t-meta);color:var(--accent);margin-top:var(--s-half)}
+.template-state{display:block;font-size:var(--t-meta);color:var(--text-3);white-space:nowrap;text-transform:uppercase;letter-spacing:.05em}
+.studio-footer{display:flex;align-items:center;gap:var(--s-3);margin-top:var(--s-3)}
+.launch-note{flex:1;font-size:var(--t-small);color:var(--text-3);line-height:1.45;letter-spacing:var(--k-small)}
+.empty-outputs{font-size:var(--t-small);color:var(--text-3);padding:var(--s-3);text-align:center}
+
+/* ---------- center view stack ---------- */
+.center-views{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
+.center-view{display:none;flex:1;min-height:0;flex-direction:column;overflow:hidden}
+.center-view.active{display:flex}
+.view-scroll{flex:1;overflow-y:auto;min-height:0}
+/* Meta and Artifact are reading surfaces, not working grids: give the column a
+   ceiling and center it instead of letting prose hug the left edge of a wide window. */
+#view-meta .view-scroll,#view-artifact .view-scroll{max-width:920px;width:100%;margin:0 auto;padding-top:var(--s-4)}
+.view-head{
+  display:flex;align-items:flex-start;justify-content:space-between;gap:var(--s-3);
+  padding:var(--s-4) max(var(--s-5),3vw) var(--s-3);
+}
+.view-empty{
+  flex:1;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;
+  gap:var(--s-3);max-width:52ch;padding:var(--s-5) max(var(--s-5),3vw);
+}
+.view-empty p{font-size:var(--t-ui);color:var(--text-2);line-height:1.55;letter-spacing:var(--k-ui)}
+
+/* ---------- context panel (Thread / Search / People only) ---------- */
+.right-panel{
+  display:none;width:min(392px,36vw);min-width:340px;
+  background:var(--surface);border-inline-start:1px solid var(--line);
+  flex-direction:column;min-height:0;
+}
+.right-panel.open{display:flex}
+.context-head{
+  display:flex;align-items:center;gap:var(--s-2);height:48px;flex-shrink:0;
+  padding-block:0;padding-inline-start:var(--s-4);padding-inline-end:var(--s-2);border-bottom:1px solid var(--line);
+}
+.context-head h2{font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui)}
+.context-head .icon-button{margin-inline-start:auto}
+.context-scroll{flex:1;overflow-y:auto;min-height:0}
+.context-view{display:none}
+.context-view.active{display:block}
+.panel-section{padding:var(--s-4)}
+.panel-title{font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui)}
+.panel-copy{font-size:var(--t-small);color:var(--text-3);line-height:1.5;margin-top:var(--s-1);letter-spacing:var(--k-small)}
+
+.outputs-head{
+  display:flex;align-items:baseline;justify-content:space-between;gap:var(--s-2);
+  padding:var(--s-2) max(var(--s-5),3vw);border-top:1px solid var(--line);
+}
+.outputs-head h3{font-size:var(--t-meta);letter-spacing:.1em;text-transform:uppercase;color:var(--text-3);font-weight:var(--w-normal)}
+.outputs-count{font-size:var(--t-meta);color:var(--text-3)}
+.outputs-grid{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:var(--s-3);
+  padding:0 max(var(--s-5),3vw) var(--s-4);align-items:stretch;
+}
+/* Branch view: the header block above stays its natural size, the grid takes
+   whatever is left of the viewport instead of shrink-wrapping to its content, and
+   each card stretches to that row height — long or short, the surface reads full. */
+#view-branch .view-scroll{display:flex;flex-direction:column}
+/* Cards size to their own content — a short output should not be forced to fill
+   the viewport. min-height keeps short cards from looking clipped-thin; content
+   past that scrolls inside the card instead of stretching it. */
+#view-branch .outputs-grid{grid-auto-rows:minmax(160px,auto)}
+.output-card{
+  border:1px solid var(--line);border-radius:var(--r-3);background:var(--raised);
+  padding:var(--s-3);display:flex;flex-direction:column;min-height:0;
+}
+.output-card.excluded{opacity:.72}
+.output-card.excluded .output-content{color:var(--text-3)}
+.output-card.excluded .output-author{text-decoration:line-through;text-decoration-thickness:1px;text-underline-offset:2px}
+.output-card-head{display:flex;align-items:center;gap:var(--s-2)}
+.output-author{font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui)}
+.output-role{font-size:var(--t-meta);color:var(--accent);margin-top:var(--s-half)}
+.output-content{
+  font-size:var(--t-small);line-height:1.6;color:var(--text-2);letter-spacing:var(--k-small);
+  flex:1;min-height:80px;max-height:50vh;overflow:auto;margin:var(--s-2) 0;white-space:pre-wrap;
+}
+.output-content.md,.artifact-doc-content.md,.meta-answer.md{white-space:normal}
+.output-content h3,.output-content h4,.output-content h5,
+.artifact-doc-content h3,.artifact-doc-content h4,.artifact-doc-content h5,
+.meta-answer h3,.meta-answer h4,.meta-answer h5{margin:var(--s-3) 0 var(--s-1);font-weight:var(--w-strong);color:var(--text)}
+.output-content p,.artifact-doc-content p,.meta-answer p{margin:var(--s-2) 0}
+.output-content ul,.artifact-doc-content ul,.meta-answer ul{margin:var(--s-2) 0;padding-inline-start:1.2em}
+.output-content pre,.artifact-doc-content pre,.meta-answer pre{
+  background:var(--sunken);border-radius:var(--r-2);padding:var(--s-2);overflow:auto;
+  font-family:var(--mono);font-size:var(--t-small);margin:var(--s-2) 0;
+}
+.output-content code,.artifact-doc-content code,.meta-answer code{
+  font-family:var(--mono);font-size:.92em;background:var(--sunken);padding:0 3px;border-radius:var(--r-1);
+}
+.output-provenance{font-size:var(--t-meta);color:var(--text-3);line-height:1.5}
+.review-state{font-size:var(--t-meta);color:var(--text-3);text-transform:uppercase;letter-spacing:.05em}
+.review-actions{display:flex;gap:var(--s-3);margin-top:var(--s-2)}
+/* Include/Exclude sit close together (8px was tight enough that a hit-area
+   extension would cover half the gap) - the gap above grew to 12px and the
+   real box grows here instead of adding an extension that could still reach
+   across it. */
+.review-actions button{
+  border:1px solid var(--line-2);border-radius:var(--r-2);padding:var(--s-2) var(--s-3);
+  font-size:var(--t-small);color:var(--text-2);letter-spacing:var(--k-small);
+  min-height:36px;transition:background var(--t-fast);
+}
+.review-actions button:hover{background:var(--line)}
+/* Text-color-only active state read as barely-different from the inactive
+   outline in the light theme. A filled chip is unmistakable in both. */
+.review-actions button.active.include{color:var(--ok);border-color:currentColor;background:var(--accent-dim);font-weight:var(--w-medium)}
+.review-actions button.active.exclude{color:var(--danger);border-color:currentColor;background:var(--accent-dim);font-weight:var(--w-medium)}
+/* Unplaced, this lands in the grid's next auto-row starting at column 1 --
+   the 22px avatar column -- same width as the avatar itself, so every word
+   of the record wraps onto its own line. It belongs in the content column,
+   on its own row after .thread-action's row 5. Scoped to .msg specifically:
+   the same markup also renders inside .thread-item, which is plain block
+   flow, not a grid, where a grid-column/-row would simply have nothing to
+   place onto. */
+.msg .output-record{grid-row:6;grid-column:2/4}
+.output-record-head{font-size:var(--t-small);font-weight:var(--w-medium);letter-spacing:var(--k-small)}
+.output-record-body{font-size:var(--t-small);color:var(--text-2);margin-top:var(--s-1);line-height:1.5;letter-spacing:var(--k-small)}
+.synthesis-gate{
+  position:sticky;bottom:0;background:var(--surface);
+  border-top:1px solid var(--line-2);padding:var(--s-3) var(--s-4);
+}
+.synthesis-row{display:flex;align-items:flex-end;gap:var(--s-3);flex-wrap:wrap}
+.synthesis-title{font-size:var(--t-small);font-weight:var(--w-medium);letter-spacing:var(--k-small)}
+.synthesis-meta{font-size:var(--t-small);color:var(--text-3);margin-top:var(--s-half);line-height:1.45;max-width:34ch;letter-spacing:var(--k-small)}
+.synthesis-actions{display:flex;flex-wrap:wrap;gap:var(--s-2);align-items:center;margin-inline-start:auto}
+.synthesis-actions select,.synthesis-actions input{
+  background:var(--bg);border:1px solid var(--edge);border-radius:var(--r-2);
+  padding:var(--s-1) var(--s-2);font-size:var(--t-small);
+}
+.synthesis-actions input{width:min(220px,40vw)}
+
+/* meta */
+.meta-head{padding:var(--s-4) max(var(--s-5),3vw)}
+.meta-head h3{font-size:var(--t-title);font-weight:var(--w-strong);letter-spacing:var(--k-title)}
+.meta-head p{font-size:var(--t-ui);color:var(--text-3);line-height:1.55;margin-top:var(--s-1);letter-spacing:var(--k-ui);max-width:60ch}
+.meta-presets{display:flex;flex-wrap:wrap;gap:var(--s-2);margin-top:var(--s-3)}
+.meta-presets button{
+  font-size:var(--t-small);color:var(--text-2);border:1px solid var(--line-2);
+  border-radius:var(--r-2);padding:var(--s-1) var(--s-2);letter-spacing:var(--k-small);
+  transition:background var(--t-fast),color var(--t-fast);
+}
+.meta-presets button:hover{background:var(--line);color:var(--text)}
+.meta-query{display:flex;gap:var(--s-2);padding:0 max(var(--s-5),3vw) var(--s-3);max-width:68ch}
+.meta-query input{
+  flex:1;min-width:0;background:var(--bg);border:1px solid var(--edge);
+  border-radius:var(--r-2);padding:var(--s-2) var(--s-3);font-size:var(--t-ui);caret-color:var(--accent);
+}
+.meta-query button{
+  border:1px solid var(--line-2);border-radius:var(--r-2);
+  padding:var(--s-2) var(--s-3);font-size:var(--t-small);font-weight:var(--w-medium);
+  transition:background var(--t-fast);
+}
+.meta-query button:hover{background:var(--line)}
+.meta-scope{font-size:var(--t-small);color:var(--text-3);padding:0 max(var(--s-5),3vw) var(--s-2);line-height:1.5}
+.meta-answer{
+  margin:0 max(var(--s-5),3vw);padding:var(--s-3);background:var(--bg);border:1px solid var(--line);
+  border-radius:var(--r-3);font-size:var(--t-ui);line-height:1.6;color:var(--text-2);letter-spacing:var(--k-ui);
+  max-width:68ch;
+}
+.meta-evidence{padding:var(--s-3) max(var(--s-5),3vw);display:grid;gap:var(--s-2);max-width:68ch}
+.meta-chain{
+  border-inline-start:1px solid var(--line-2);padding-block:var(--s-half);padding-inline-start:var(--s-3);padding-inline-end:0;
+  font-size:var(--t-small);color:var(--text-3);line-height:1.5;letter-spacing:var(--k-small);
+}
+.meta-chain pre{font-size:var(--t-meta);white-space:pre-wrap;color:var(--text-2);margin-top:var(--s-1)}
+
+/* artifact reader */
+.artifact-selector{display:flex;flex-wrap:wrap;gap:var(--s-2);padding:var(--s-4) max(var(--s-5),3vw) 0}
+.artifact-selector button{
+  border:1px solid var(--line-2);border-radius:var(--r-2);padding:var(--s-1) var(--s-2);
+  font-size:var(--t-small);color:var(--text-2);letter-spacing:var(--k-small);
+  transition:background var(--t-fast),border-color var(--t-fast);
+}
+.artifact-selector button:hover{background:var(--line)}
+.artifact-selector button.active{border-color:var(--accent);background:var(--accent-dim);color:var(--text)}
+.artifact-doc{padding:var(--s-4) max(var(--s-5),3vw)}
+.artifact-doc h2{font-size:var(--t-head);font-weight:var(--w-strong);letter-spacing:var(--k-head);max-width:68ch}
+.artifact-doc-meta{font-size:var(--t-small);color:var(--text-3);margin-top:var(--s-1);letter-spacing:var(--k-small)}
+.artifact-doc-content{
+  font-size:var(--t-body);line-height:1.65;color:var(--text-2);letter-spacing:var(--k-body);
+  max-width:68ch;margin-top:var(--s-4);white-space:pre-wrap;
+}
+.artifact-doc .btn-sm{margin-top:var(--s-3)}
+
+/* ontology */
+.ontology-head{display:flex;align-items:flex-start;gap:var(--s-2);padding:var(--s-4) max(var(--s-5),3vw)}
+.ontology-head h3{font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui)}
+.ontology-head p{font-size:var(--t-small);color:var(--text-3);line-height:1.5;margin-top:var(--s-1);letter-spacing:var(--k-small)}
+.ontology-mode{font-size:var(--t-meta);color:var(--text-3);border:1px solid var(--line-2);border-radius:var(--r-1);padding:1px var(--s-2);white-space:nowrap;text-transform:uppercase;letter-spacing:.05em}
+.ontology-tree{padding:0 max(var(--s-5),3vw) var(--s-3);display:grid;gap:var(--s-2);max-width:68ch}
+.ontology-node{border-inline-start:1px solid var(--line-2);padding-block:var(--s-half);padding-inline-start:var(--s-3);padding-inline-end:0}
+.ontology-node-head{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap}
+.ontology-label{font-size:var(--t-small);font-weight:var(--w-medium);letter-spacing:var(--k-small)}
+.ontology-meta{font-size:var(--t-meta);color:var(--text-3);margin-top:var(--s-half);line-height:1.5}
+.ontology-badge{font-size:var(--t-meta);color:var(--text-3);border:1px solid var(--line-2);border-radius:var(--r-1);padding:1px var(--s-2)}
+.ontology-actions{display:flex;gap:var(--s-2);margin-top:var(--s-2)}
+.ontology-actions button{border:1px solid var(--line-2);border-radius:var(--r-2);padding:var(--s-1) var(--s-2);font-size:var(--t-small);color:var(--text-2);letter-spacing:var(--k-small)}
+.ontology-actions button:hover{background:var(--line)}
+.ontology-empty{font-size:var(--t-small);color:var(--text-3);padding:var(--s-2) 0;letter-spacing:var(--k-small)}
+.ontology-history{padding:0 max(var(--s-5),3vw) var(--s-4);font-size:var(--t-small);color:var(--text-2);max-width:68ch}
+.ontology-history summary{cursor:pointer;color:var(--text-3);font-size:var(--t-small);padding:var(--s-1) 0}
+.history-item{border-inline-start:1px solid var(--line-2);padding-block:var(--s-1);padding-inline-start:var(--s-3);padding-inline-end:0;margin-top:var(--s-2);font-size:var(--t-meta);color:var(--text-3)}
+.history-values{font-size:var(--t-small);color:var(--text-2);margin-top:var(--s-half);letter-spacing:var(--k-small)}
+.edge-review{display:flex;gap:var(--s-2);margin-top:var(--s-1);flex-wrap:wrap}
+
+/* thread + search */
+.thread-item{padding:var(--s-3) var(--s-4);border-bottom:1px solid var(--line)}
+/* One attribution renderer serves both panes; the thread lays its output on
+   one baseline row instead of growing a template of its own. */
+.thread-item .sender{display:flex;align-items:baseline;gap:var(--s-2);flex-wrap:wrap;
+  font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui);color:var(--text)}
+.thread-item .sender .time{font-size:var(--t-meta);font-weight:var(--w-normal);color:var(--text-3)}
+.thread-body{font-size:var(--t-ui);line-height:1.6;margin-top:var(--s-half);white-space:pre-wrap;overflow-wrap:anywhere;letter-spacing:var(--k-ui)}
+.thread-reply,.search-form,.invite-form{
+  display:flex;gap:var(--s-2);align-items:center;flex-wrap:wrap;
+  padding:var(--s-3) var(--s-4);border-top:1px solid var(--line);
+}
+/* The query grows full-width on its own row; the scope checkbox and the submit
+   control travel together as one unit right under it, never split apart. */
+.search-form{flex-direction:column;align-items:stretch}
+.search-form input#search-input{width:100%;flex:none}
+.search-form-row{display:flex;align-items:center;gap:var(--s-2)}
+/* The scope checkbox is a compact unit with its label, never the flexible
+   text input this rule is meant for — a checkbox that also matched here is
+   what stretched it into a 118px bar overlapping the label. */
+.thread-reply input:not([type="checkbox"]),.search-form input:not([type="checkbox"]),
+.invite-form input:not([type="checkbox"]),.invite-form select{
+  flex:1;min-width:118px;background:var(--bg);border:1px solid var(--edge);
+  border-radius:var(--r-2);padding:var(--s-2) var(--s-3);font-size:var(--t-ui);caret-color:var(--accent);
+}
+.search-hit{padding:var(--s-3) var(--s-4);border-bottom:1px solid var(--line);cursor:pointer;transition:background var(--t-fast)}
+.search-hit:hover{background:var(--line)}
+.hit-meta{font-size:var(--t-meta);color:var(--text-3);margin-top:var(--s-1)}
+.search-focus{outline:2px solid var(--accent);outline-offset:3px}
+
+/* records */
+.records{border-top:1px solid var(--line);padding:var(--s-3) var(--s-4)}
+.records > summary{cursor:pointer;font-size:var(--t-meta);color:var(--text-3);text-transform:uppercase;letter-spacing:.06em}
+.records h3{
+  display:flex;align-items:center;justify-content:space-between;
+  font-size:var(--t-meta);text-transform:uppercase;letter-spacing:.1em;
+  color:var(--text-3);margin:var(--s-3) 0 0;font-weight:var(--w-normal);
+}
+.card,.approval-card,.item{
+  border:1px solid var(--line);border-radius:var(--r-2);background:var(--raised);
+  padding:var(--s-3);margin-top:var(--s-2);font-size:var(--t-small);line-height:1.5;letter-spacing:var(--k-small);
+}
+.card .title,.approval-card .title,.item .title{font-size:var(--t-small);font-weight:var(--w-strong);letter-spacing:var(--k-small)}
+.card .detail,.approval-card .detail,.item .detail,.reason,.prompt-detail{
+  font-size:var(--t-meta);color:var(--text-3);margin-top:var(--s-1);line-height:1.5;
+}
+.btns{display:flex;gap:var(--s-2);margin-top:var(--s-2)}
+.btn-approve,.btn-reject{border-radius:var(--r-2);padding:var(--s-1) var(--s-2);font-size:var(--t-small);font-weight:var(--w-medium);border:1px solid currentColor}
+.btn-approve{color:var(--ok)}
+.btn-reject{color:var(--danger)}
+
+/* toasts */
+.toast-region{position:fixed;inset-inline-end:var(--s-4);bottom:var(--s-4);z-index:200;display:grid;gap:var(--s-2)}
+.toast{
+  background:var(--raised);color:var(--text);border:1px solid var(--line-2);
+  padding:var(--s-2) var(--s-3);border-radius:var(--r-3);box-shadow:var(--shadow-2);
+  max-width:340px;font-size:var(--t-ui);line-height:1.5;letter-spacing:var(--k-ui);
+}
+
+/* ---------- responsive ---------- */
+@media(max-width:1120px){
+  .main{grid-template-columns:248px minmax(0,1fr)}
+  .right-panel{position:fixed;z-index:60;top:0;inset-inline-end:0;bottom:0;width:min(392px,92vw);box-shadow:var(--shadow-2)}
+}
+@media(max-width:860px){
+  .main{grid-template-columns:minmax(0,1fr)}
+  .room-header{padding-inline-start:var(--s-2);gap:var(--s-1)}
+  .room-header .meta{display:none}
+  /* The dot alone carries the state at this width; the word stays for screen
+     readers via aria-label instead of clipping mid-letter. */
+  .header-actions .status{
+    font-size:0;width:5px;height:5px;padding:0;gap:0;overflow:hidden;
+  }
+  .composer-hint{display:none}
+  .messages{padding:var(--s-3) var(--s-3) var(--s-1)}
+  .view-head,.view-empty,.outputs-head,.outputs-grid{padding-inline-start:var(--s-3);padding-inline-end:var(--s-3)}
+  .outputs-grid{grid-template-columns:1fr}
+  .input-bar{padding:var(--s-1) var(--s-3) var(--s-3)}
+  .ai-tray{inset-inline-start:var(--s-3);inset-inline-end:var(--s-3)}
+  .sidebar{
+    width:248px;position:fixed;z-index:70;top:0;bottom:0;inset-inline-start:0;
+    transform:translateX(-102%);transition:transform 160ms cubic-bezier(.25,.46,.45,.94);
+  }
+  /* inset-inline-start:0 sits the closed drawer at the START edge, the right
+     edge under rtl, so hiding it means translating further right, not left:
+     a fixed -102% would leave it sitting on screen at that edge instead. */
+  [dir="rtl"] .sidebar{transform:translateX(102%)}
+  .sidebar.open{transform:none}
+  .sidebar-backdrop{
+    /* A dark tint alone reads fine over a light page but nearly vanishes over
+       an already-near-black dark theme — blur reads as "dimmed, not focused"
+       regardless of how much luminance contrast the tint has to work with. */
+    display:none;position:fixed;inset:0;z-index:65;background:rgba(10,9,7,.55);
+    backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);
+  }
+  .sidebar-backdrop.open{display:block}
+  .mobile-nav{display:grid!important}
+  .right-panel{width:100vw;min-width:0}
+  #setup-screen{flex-direction:column;align-items:stretch;justify-content:flex-start;gap:var(--s-6);padding:var(--s-6) var(--s-5)}
+  .setup-intro{max-width:none}
+  .setup-intro h1{font-size:var(--t-head);letter-spacing:var(--k-head)}
+  .strategy-toggle,.template-grid{grid-template-columns:1fr}
+  /* Every synthesis control stacked and full-width rather than fighting a
+     margin-inline-start:auto for a row too narrow to hold all three at once. */
+  .synthesis-row{flex-direction:column;align-items:stretch}
+  .synthesis-actions{margin-inline-start:0;width:100%}
+  .synthesis-actions input{width:100%}
+  .synthesis-actions select,.synthesis-actions button{flex:1}
+}
+
+/* Motion is an affordance, not decoration: switch it off when asked. */
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{
+    animation-duration:.01ms!important;animation-iteration-count:1!important;
+    transition-duration:.01ms!important;scroll-behavior:auto!important;
+  }
+  /* the spinner reports state, so it slows rather than stops */
+  .spinner{animation-duration:2.4s!important;animation-iteration-count:infinite!important}
+}
+
+/* ---------- moved off inline attributes (round 2, strict CSP) ---------- */
+/* Default-hidden state for elements JS reveals once auth/config resolves —
+   an inline style="display:none" used to carry this before a strict CSP
+   forbade the attribute. JS keeps toggling element.style.display itself,
+   which an inline stylesheet rule with no !important never outranks. */
+#setup-demo-button,#setup-token-summary,#app-header,#app-main{display:none}
+#setup-first-run{margin-top:var(--s-4)}
+.setup-first-run-summary{cursor:pointer;margin-top:0}
+.panel-section-flush{padding-top:0}
+.panel-copy-tight{padding:0 14px}
+.panel-copy-snug{padding:0 16px}
+.badge-push{margin-inline-start:auto}
+.thread-depth-0{margin-inline-start:0}
+.thread-depth-1{margin-inline-start:12px}
+.thread-depth-2{margin-inline-start:24px}
+.thread-depth-3{margin-inline-start:36px}
+.thread-depth-4{margin-inline-start:48px}

@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>XYZZY</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<div id="setup-screen">
+<section class="setup-intro" aria-labelledby="welcome-title">
+  <div class="setup-mark"><span class="product-mark">X</span> XYZZY</div>
+  <h1 id="welcome-title">Decide together. Keep every line of reasoning.</h1>
+  <p>One durable channel for your team, specialist branches you can compare side by side, and artifacts that link back to the exact evidence behind them.</p>
+  <div class="setup-steps">
+    <span><b class="step-no">1</b> <span id="setup-step-1-text">Sign in with your access token</span></span>
+    <span><b class="step-no">2</b> Talk in the shared channel</span>
+    <span><b class="step-no">3</b> Branch to specialists when the question is ready</span>
+  </div>
+</section>
+<div class="setup-card">
+<h2>Open your workspace</h2>
+<p id="setup-card-intro">Your token stays in this tab. Sign in from another tab with a different token to work together.</p>
+<!-- Nothing variant-specific (SSO button vs token form) paints until /auth/config
+     resolves — the card reserves its own height (see .setup-card min-height) so
+     revealing this doesn't shift the page, and hiding it up front means the
+     wrong variant never flashes before the right one replaces it. -->
+<div id="setup-card-variant" class="hidden">
+<button id="setup-demo-button" data-action="enterDemoWorkspace">Explore the demo workspace</button>
+<button id="setup-sso-button" data-action="startSsoLogin">Continue with single sign-on</button>
+<details id="setup-token-details" open>
+<summary id="setup-token-summary" tabindex="0" role="button" aria-expanded="true" data-keydown-action="handleSummaryKey">Use an access token instead</summary>
+<label for="setup-token">Access token</label>
+<input id="setup-token" type="password" placeholder="Access token" autocomplete="off" spellcheck="false" data-input-action="clearTokenError" data-enter-action="clickSetupButton">
+<div class="field-error hidden" id="setup-token-error" role="alert"></div>
+<details id="setup-first-run">
+<summary class="field-help setup-first-run-summary">Setting up a new workspace?</summary>
+<label for="setup-name">Display name</label>
+<input id="setup-name" placeholder="Your name">
+<div class="field-help">Used only to create your member record on first sign-in. After that, your name shown here always comes from the workspace.</div>
+<label for="setup-room">Channel name</label>
+<input id="setup-room" placeholder="e.g. Authentication Migration" data-enter-action="clickSetupButton">
+<div class="field-help">Your first sign-in creates this channel. Returning members land in the channels they belong to.</div>
+</details>
+<button id="setup-button" data-action="setup">Enter workspace</button>
+</details>
+</div>
+</div>
+</div>
+
+<div class="header" id="app-header">
+<span class="product-mark">X</span>
+<h1>XYZZY</h1>
+<span class="status" id="ws-status-shell">Connecting</span>
+</div>
+
+<div class="main" id="app-main">
+<div class="sidebar" id="sidebar">
+  <div class="workspace-head">
+    <div class="workspace-badge" aria-hidden="true">X</div>
+    <div>
+      <div class="workspace-name">XYZZY Workspace</div>
+      <div class="workspace-sub" id="workspace-sub">Shared decision space</div>
+    </div>
+    <button class="icon-button" data-action="openContext" data-action-arg="members" aria-label="Workspace details" title="People and permissions"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="3.2" r=".9"/><circle cx="8" cy="8" r=".9"/><circle cx="8" cy="12.8" r=".9"/></svg></button>
+  </div>
+  <div class="sidebar-scroll">
+    <div class="nav-label">Channels<button class="icon-button" data-action="openCreateChannelModal" aria-label="Create channel" title="Create channel"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button></div>
+    <div id="rooms-list"></div>
+    <button class="nav-item" data-action="openBrowseChannels" aria-label="Browse channels"><span class="nav-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.4"/><path d="m10.4 10.4 3 3"/></svg></span><span class="nav-name">Browse channels</span></button>
+
+    <div class="nav-label">AI work</div>
+    <div id="branches-list"><div class="nav-item"><span class="nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span><span class="nav-name">No branches yet</span></div></div>
+    <button class="nav-item" id="nav-meta" data-action="openContext" data-action-arg="meta" title="Room-scoped answers from the published decision record" aria-label="Ask Meta"><span class="nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.4 13.6 8 8 13.6 2.4 8z"/></svg></span><span class="nav-name">Ask Meta</span></button>
+    <button class="nav-item" id="nav-artifacts" data-action="openContext" data-action-arg="artifacts" aria-label="Artifacts"><span class="nav-icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.6" y="2.6" width="10.8" height="10.8" rx="1.4"/><path d="M5.4 6.2h5.2M5.4 9.4h3.4"/></svg></span><span class="nav-name">Artifacts</span><span class="nav-meta" id="artifact-nav-count">0</span></button>
+
+    <div class="nav-label">People</div>
+    <div id="team-list"></div>
+    <div id="agents-sidebar" class="hidden"></div>
+
+    <details><summary class="nav-label" id="activity-log-summary">Activity log</summary><div class="events-log" id="events-log"></div></details>
+  </div>
+  <div class="sidebar-footer">
+    <div class="identity-avatar" id="identity-avatar">Y</div>
+    <div>
+      <div class="identity-name" id="identity-name">You</div>
+      <div class="identity-role" id="identity-role">viewer</div>
+    </div>
+    <button class="icon-button" id="theme-toggle" data-action="toggleTheme" aria-label="Switch between light and dark" title="Switch between light and dark">
+      <svg class="theme-sun" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 1.4v1.6M8 13v1.6M14.6 8H13M3 8H1.4M12.7 3.3l-1.1 1.1M4.4 11.6l-1.1 1.1M12.7 12.7l-1.1-1.1M4.4 4.4 3.3 3.3"/></svg>
+      <svg class="theme-moon" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.4 9.6A5.8 5.8 0 0 1 6.4 2.6a5.8 5.8 0 1 0 7 7z"/></svg>
+    </button>
+    <button class="icon-button" id="sign-out-button" data-action="signOut" aria-label="Sign out" title="Sign out"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.4 13.6H3.6A1.2 1.2 0 0 1 2.4 12.4V3.6A1.2 1.2 0 0 1 3.6 2.4H6.4M10.8 11 14 8l-3.2-3M14 8H6"/></svg></button>
+  </div>
+</div>
+
+<div class="sidebar-backdrop" id="sidebar-backdrop" data-action="closeSidebar"></div>
+
+<div class="center">
+  <div class="room-header" id="room-header">
+    <button class="icon-button mobile-nav hidden" id="sidebar-toggle" data-action="toggleSidebar" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7"/></svg></button>
+    <button class="icon-button hidden" id="header-back" data-action="openCenterView" data-action-arg="conversation" aria-label="Back to channel" title="Back to channel"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.6 3.4 4.4 8l5.2 4.6"/></svg></button>
+    <div>
+      <h2><span class="room-hash" id="room-hash-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.1 2.6 4.9 13.4M11.1 2.6 9.9 13.4M2.8 6h10.4M2.4 10h10.4"/></svg></span><span id="room-name">channel</span></h2>
+      <div class="meta" id="room-meta"></div>
+    </div>
+    <div class="header-actions">
+      <span class="status" id="ws-status" aria-label="Connecting">Connecting</span>
+      <span class="unread-pill" id="unread-pill" hidden>0</span>
+      <button class="icon-button" data-action="markRoomRead" id="mark-read-button" aria-label="Mark channel read" title="Mark this channel read"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 8.4 3.1 3.1L13 4.6"/></svg></button>
+      <button class="icon-button" data-action="openContext" data-action-arg="search" aria-label="Search channel" title="Search"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.4"/><path d="m10.4 10.4 3 3"/></svg></button>
+      <button class="icon-button" data-action="openContext" data-action-arg="members" aria-label="Open members" title="People"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5.6" r="2.4"/><path d="M2.2 13c0-2.2 1.7-3.6 3.8-3.6S9.8 10.8 9.8 13"/><path d="M11 4.4a2.2 2.2 0 0 1 0 4.3M13.8 13c0-1.7-.8-2.8-2.2-3.3"/></svg></button>
+      <button class="icon-button" data-action="openContext" data-action-arg="branch" aria-label="Open AI work" title="AI work"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3" width="11.6" height="10" rx="1.4"/><path d="M9.6 3v10"/></svg></button>
+      <button class="icon-button" id="notif-bell" data-action="openNotifications" aria-label="Notifications" title="Notifications"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.4a3.6 3.6 0 0 0-3.6 3.6v2.2c0 .8-.3 1.6-.9 2.2l-.5.5h10l-.5-.5a3.1 3.1 0 0 1-.9-2.2V6a3.6 3.6 0 0 0-3.6-3.6z"/><path d="M6.6 12.8a1.4 1.4 0 0 0 2.8 0"/></svg><span class="notif-dot hidden" id="notif-dot"></span></button>
+      <button class="icon-button" id="channel-menu-button" data-action="toggleChannelMenu" aria-label="Channel options" title="Channel options"><svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="13" cy="8" r="1.3"/></svg></button>
+    </div>
+  </div>
+
+  <div class="popover-menu hidden" id="channel-menu" role="menu" aria-label="Channel options">
+    <button role="menuitem" data-action="invitePeopleFromMenu">Invite people</button>
+    <button role="menuitem" data-action="channelDetailsFromMenu">Channel details</button>
+    <button role="menuitem" class="danger" data-action="leaveChannelFromMenu">Leave channel</button>
+  </div>
+
+  <div class="center-views">
+    <section class="center-view active" data-center-view="conversation" id="view-conversation">
+      <div class="messages" id="messages" role="log" aria-live="polite" aria-label="Channel conversation"></div>
+
+      <div class="turn-lock" id="turn-lock-banner" role="status">
+        <span class="spinner"></span>
+        <div class="lock-copy">
+          <div class="lock-title" id="turn-lock-title">AI owns this turn</div>
+          <div class="lock-detail" id="turn-lock-detail">Messages resume when the branch finishes.</div>
+        </div>
+        <button class="btn-sm" data-action="openContext" data-action-arg="branch">Inspect</button>
+        <button class="btn-sm" id="cancel-turn-button" data-action="cancelCurrentTurn">Cancel</button>
+      </div>
+
+      <div class="input-bar">
+        <div class="composer">
+          <textarea id="msg-input" aria-label="Message channel" placeholder="Message #channel" data-keydown-action="handleComposerKey"></textarea>
+          <div class="composer-tools">
+            <button id="ai-trigger" data-action="toggleAITray" aria-expanded="false"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg> Branch</button>
+            <label class="mention-toggle" title="An @agent mention only notifies unless you tick this"><input type="checkbox" id="invoke-agents"> Run @agents</label>
+            <span class="composer-hint">Enter to send</span>
+            <button class="btn-primary send" id="send-message-button" data-action="sendMessage">Send</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="center-view" data-center-view="branch" id="view-branch" aria-label="AI branch">
+      <div class="view-scroll">
+        <div class="view-head">
+          <div><div class="panel-title" id="branch-panel-title">No AI branch selected</div><div class="panel-copy" id="branch-panel-copy">Start AI work from the composer. Runs and outputs stay together here.</div></div>
+          <button class="btn-sm" data-action="openAiTray">New branch</button>
+        </div>
+        <div id="resume-runs-banner" class="panel-section panel-section-flush hidden"></div>
+        <div id="branch-runs" class="panel-section panel-section-flush"></div>
+        <div class="outputs-head">
+          <h3>Inspectable outputs</h3>
+          <span class="outputs-count" id="outputs-count">0 authored branches</span>
+        </div>
+        <div class="outputs-grid" id="outputs-panel"></div>
+      <!-- Inside the scroller: sits right under the outputs when they are short,
+           sticks to the bottom edge while long outputs scroll. -->
+      <div class="synthesis-gate">
+        <div class="synthesis-row">
+          <div>
+            <div class="synthesis-title" id="selection-summary">No outputs selected</div>
+            <div class="synthesis-meta">Selections are shared with the channel. Every published claim links to its source.</div>
+          </div>
+          <div class="synthesis-actions">
+            <input id="synthesis-title" aria-label="Synthesis title" placeholder="Title" required data-input-action="updateSelectionSummary">
+            <select id="synthesis-type" aria-label="Synthesis type" data-change-action="updateSelectionSummary">
+              <option value="GENERAL_SYNTHESIS">General Synthesis</option>
+              <option value="DECISION_BRIEF" selected>Decision Brief</option>
+              <option value="PROGRESS_REPORT">Progress Report</option>
+            </select>
+            <button class="btn-primary" id="synthesize-button" data-action="publishSynthesis" disabled>Publish</button>
+          </div>
+        </div>
+      </div>
+      </div>
+    </section>
+
+    <section class="center-view" data-center-view="artifact" id="view-artifact" aria-label="Artifacts">
+      <div class="view-scroll">
+        <div class="artifact-selector" id="artifact-selector"></div>
+        <div id="artifact-surface"></div>
+        <div id="ontology-panel">
+          <div class="ontology-head">
+            <div><h3 id="ontology-title">Evidence</h3><p>Decision → Claim → exact AgentOutput. Every inferred link stays reviewable.</p></div>
+            <span class="ontology-mode hidden" id="ontology-mode">Read-only until published</span>
+          </div>
+          <div class="ontology-tree" id="ontology-tree"><div class="ontology-empty">Publish a Decision Brief to materialize its evidence tree.</div></div>
+          <details class="ontology-history" id="ontology-history"><summary>Review history · 0 entries</summary><div id="ontology-history-list"></div></details>
+        </div>
+      </div>
+    </section>
+
+    <section class="center-view" data-center-view="meta" id="view-meta" aria-label="Ask Meta">
+      <div class="view-scroll">
+        <div class="meta-head">
+          <h3 id="meta-title">Ask Meta</h3>
+          <p>Room-scoped answers from the published decision and its governed evidence. Pick a question, or type your own.</p>
+          <div class="meta-presets" id="meta-kinds">
+            <button data-action="askMetaKind" data-action-arg="STATUS">Where things stand</button>
+            <button data-action="askMetaKind" data-action-arg="BLOCKERS">What is blocked</button>
+            <button data-action="askMetaKind" data-action-arg="CHANGES">What changed</button>
+            <button data-action="askMetaKind" data-action-arg="DECISIONS_OPEN">Still to decide</button>
+            <button data-action="askMetaKind" data-action-arg="DECISIONS_MADE">Already decided</button>
+            <button data-action="askMetaKind" data-action-arg="DISAGREEMENT">Where we disagree</button>
+            <button data-action="askMetaKind" data-action-arg="WHY_DECISION">Why this decision?</button>
+            <button data-action="askMetaKind" data-action-arg="DECISION_EVIDENCE">Show supporting evidence</button>
+          </div>
+        </div>
+        <div class="meta-query">
+          <input id="meta-question" aria-label="Ask Meta a question" placeholder="Ask in your own words" data-enter-action="askMeta">
+          <button data-action="askMeta">Ask</button>
+        </div>
+        <div class="meta-scope" id="meta-scope">Scope: current room · latest Decision Brief · maximum 10 claims</div>
+        <div class="meta-answer" id="meta-answer">Pick a question above, or type one. Why and supporting evidence need a published Decision Brief.</div>
+        <div class="meta-evidence" id="meta-evidence"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="ai-tray" id="ai-tray">
+    <div class="tray-head">
+      <span class="tray-glyph"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span>
+      <div>
+        <div class="tray-title">Start AI work</div>
+        <div class="tray-subtitle">Branches from this channel's context as it stands now.</div>
+      </div>
+      <button class="icon-button" data-action="closeAiTray" aria-label="Close AI launcher"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.2 4.2 7.6 7.6M11.8 4.2l-7.6 7.6"/></svg></button>
+    </div>
+    <section class="decision-studio" aria-labelledby="studio-title">
+      <span class="studio-label" id="studio-title">How should they work?</span>
+      <div class="strategy-toggle" role="group" aria-label="Execution strategy">
+        <button id="strategy-single" type="button" aria-pressed="false" data-action="setStrategy" data-action-arg="single"><span class="strategy-name"><span class="strategy-dot"></span>Single agent</span><span class="strategy-help">One specialist owns the turn.</span></button>
+        <button id="strategy-parallel" type="button" class="active" aria-pressed="true" data-action="setStrategy" data-action-arg="parallel"><span class="strategy-name"><span class="strategy-dot"></span>Parallel</span><span class="strategy-help">Two or three reason independently.</span></button>
+      </div>
+      <input id="turn-locked-mode" type="checkbox" hidden data-change-action="updateTemplateSelection">
+      <label class="studio-label" for="analysis-question">What should they work on?</label>
+      <div class="question-wrap">
+        <textarea class="question-input" id="analysis-question" placeholder="Describe the decision or problem to analyze — every specialist receives this exact prompt"></textarea>
+        <div class="question-meta"><span>Sent verbatim to each specialist</span><span>⌘ Enter to launch</span></div>
+      </div>
+      <div class="field-label">Specialists <span id="template-selection-count">Choose 2 to 3</span></div>
+      <div class="template-grid" id="template-grid"><div class="empty-outputs">Loading specialists…</div></div>
+      <div class="studio-footer">
+        <div class="launch-note" id="launch-note">Every individual output is kept, with its provenance.</div>
+        <button class="btn-primary" id="launch-button" data-action="launchParallelAnalyses" disabled>Run in parallel</button>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div class="right-panel">
+<div class="context-head"><h2 id="context-title">Thread</h2><button class="icon-button" data-action="closeContext" aria-label="Close context panel"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.2 4.2 7.6 7.6M11.8 4.2l-7.6 7.6"/></svg></button></div>
+<div class="context-scroll">
+
+<section class="context-view active" data-context-view="thread" aria-labelledby="thread-title">
+  <div class="panel-section"><div class="panel-title" id="thread-title">No thread open</div><div class="panel-copy" id="thread-copy">Reply to any message to branch the conversation. Reply counts are derived from the replies themselves, never from a stored counter.</div></div>
+  <div id="thread-list"></div>
+  <form class="thread-reply" id="thread-reply-form" data-submit-action="submitThreadReply" hidden><input id="thread-reply-input" placeholder="Reply in thread" aria-label="Reply in thread" autocomplete="off" required><label class="mention-toggle"><input type="checkbox" id="thread-invoke-agents"> Run @agents</label><button class="btn-sm" type="submit">Reply</button></form>
+</section>
+
+<section class="context-view" data-context-view="search" aria-labelledby="context-title">
+  <div class="panel-section"><div class="panel-copy">Your channel membership constrains the query itself, so results never include a room you cannot read.</div></div>
+  <form class="search-form" data-submit-action="runSearch">
+    <input id="search-input" placeholder="Search messages" aria-label="Search messages" autocomplete="off" required>
+    <div class="search-form-row">
+      <label class="mention-toggle"><input type="checkbox" id="search-this-room" checked> This channel</label>
+      <button class="icon-button" type="submit" aria-label="Search" title="Search"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="4.4"/><path d="m10.4 10.4 3 3"/></svg></button>
+    </div>
+  </form>
+  <div id="search-results"><div class="panel-copy panel-copy-snug">No search yet.</div></div>
+</section>
+
+<section class="context-view" data-context-view="members"><div class="panel-section"><div class="panel-title">People and permissions</div><div class="panel-copy">Your channel role determines which actions are available.</div><div id="posture-panel"></div><div id="members-panel"></div></div><details class="records">
+  <summary>Workspace records</summary>
+  <h3>Agents</h3><div class="panel-section" id="agents-panel"></div>
+  <h3>Tasks</h3><div class="panel-section" id="tasks-panel"></div>
+  <h3>Approvals</h3><div class="panel-section" id="approvals-panel"></div>
+  <h3>Artifacts</h3><div class="panel-section" id="artifacts-panel"></div>
+  <h3>Decisions<button class="icon-button" data-action="openCreateDecisionDialog" aria-label="New decision" title="New decision"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button></h3><div class="panel-section" id="decisions-panel"></div>
+</details>
+</section>
+
+<section class="context-view" data-context-view="browse" aria-labelledby="context-title">
+  <div class="panel-section"><div class="panel-copy">Any workspace member can see a channel exists here. Entering one you are not in needs an invitation.</div></div>
+  <div id="browse-channels-list"></div>
+</section>
+
+<section class="context-view" data-context-view="notifications" aria-labelledby="context-title">
+  <div id="notifications-list"><div class="panel-section"><div class="panel-copy">Nothing yet — mentions and invitations land here.</div></div></div>
+</section>
+</div>
+</div>
+</div>
+<div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+<div class="modal-backdrop hidden" id="modal-backdrop">
+  <div class="modal-card" id="modal-card" role="dialog" aria-modal="true"></div>
+</div>
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

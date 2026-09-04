@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 
 from multiplayer.server import create_app
 
+from ._client_source import client_source_text
+
 OWNER = {"Authorization": "Bearer owner-token"}
 EDITOR = {"Authorization": "Bearer editor-token"}
 
@@ -142,9 +144,9 @@ def test_selective_synthesis_persists_choices_and_exact_provenance_on_reconnect(
         # it holds a token and as the HttpOnly cookie when it does not, with the
         # WS credential in a negotiated subprotocol — never a query-string
         # identity or token in either mode.
-        ui = client.get("/").text
+        ui = client_source_text()
         assert 'id="setup-token"' in ui
-        assert "headers['Authorization'] = `Bearer ${accessToken}`" in ui
+        assert "headers['Authorization'] = `Bearer ${state.accessToken}`" in ui
         assert "['xyzzy.v1', `bearer.${encodedToken}`]" in ui
         assert "output-selections/${outputId}" in ui
         assert "/syntheses`," in ui

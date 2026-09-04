@@ -3,12 +3,12 @@ FROM python:3.11-slim@sha256:d1e9ca7c4e78d1e8ecadb5d44bfc8e956e7a65b659a9950f569
 WORKDIR /app
 COPY pyproject.toml README.md constraints.txt ./
 COPY src ./src
-COPY web ./web
 
-# Installed editable on purpose: the server resolves web/index.html relative to
-# the repository layout, so a copied-into-site-packages install serves the API
-# and 404s the UI.
-RUN pip install --no-cache-dir -c constraints.txt -e . \
+# Non-editable: the web client is package data under src/multiplayer/web (see
+# pyproject's package-data), and the server resolves it with
+# importlib.resources, which works the same whether the package is an
+# editable checkout or, as here, installed into site-packages.
+RUN pip install --no-cache-dir -c constraints.txt . \
     && useradd --system --uid 10001 xyzzy \
     && mkdir /data && chown xyzzy /data
 USER xyzzy

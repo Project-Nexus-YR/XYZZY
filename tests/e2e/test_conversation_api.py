@@ -6,12 +6,13 @@ the durable read cursor, the sequence cursor on the room listing, and search.
 
 from __future__ import annotations
 
-from pathlib import Path
 from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 
 from multiplayer.server import create_app
+
+from ._client_source import client_source_text
 
 OWNER_HEADERS = {"Authorization": "Bearer owner-token"}
 PEER_HEADERS = {"Authorization": "Bearer peer-token"}
@@ -312,18 +313,20 @@ def test_both_panes_attribute_an_agent_answer_through_one_renderer() -> None:
     and no way through to the output, while the channel pane beside it showed all
     four from the same fields.
     """
-    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
+    ui = client_source_text()
 
     assert ui.count("function attribution(") == 1
-    assert "msg.innerHTML = `${attribution(m)}" in ui
+    assert '${attribution(m)}<div class="bubble">' in ui
     assert "${attribution(entry," in ui
     # Both panes reach the roster name and the provenance line only through it, so
     # neither can lose a field the other keeps.
     assert ui.count("displayNameFor(") == 2
     assert ui.count("agentProvenance(") == 2
     assert "entry.sender_id === userId ? userName : entry.sender_id" not in ui
-    # And the output record opens beside whichever row was clicked, thread included.
-    assert "openAgentOutput(this.dataset.outputId, this)" in ui
+    # And the output record opens beside whichever row was clicked, thread included:
+    # the trigger element itself travels through the delegated action, not a copy.
+    assert 'data-output-id="${escHtml(meta.output_id)}" data-action="openAgentOutput"' in ui
+    assert "openAgentOutput: (el) => openAgentOutput(el.dataset.outputId, el)" in ui
     assert "trigger.closest('.msg, .thread-item')" in ui
 
 
@@ -334,7 +337,7 @@ def test_every_searchable_kind_has_somewhere_the_view_can_open_it() -> None:
     found" over a result the server had authorized and returned, and container_id — the
     id an artifact version needs alongside its own — was sent and never read.
     """
-    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
+    ui = client_source_text()
 
     # The hit carries what it is and where it lives, not a message id it may not be.
     assert 'data-object-kind="${escHtml(hit.object_kind)}"' in ui
@@ -357,7 +360,7 @@ def test_every_searchable_kind_has_somewhere_the_view_can_open_it() -> None:
 
 def test_the_composer_says_when_a_message_was_refused() -> None:
     """A 403 used to reach console.error and nothing else, so the author saw nothing."""
-    ui = (Path(__file__).parents[2] / "web" / "index.html").read_text(encoding="utf-8")
+    ui = client_source_text()
 
     assert "console.error('Failed to send message:'" not in ui
     assert "toast(`Message was not sent: ${errorMessage(err)}`, 'error')" in ui
