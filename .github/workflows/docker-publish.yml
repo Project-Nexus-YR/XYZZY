@@ -17,7 +17,16 @@ on:
 # version tag adds its own immutable tag beside it.
 jobs:
   publish:
-    if: github.event_name == 'push' || github.event.workflow_run.conclusion == 'success'
+    # A workflow_run fires for any gates run on a branch called main, including
+    # a fork's pull request from a branch of that name, and it runs with this
+    # repository's write token. Publish only when the gates ran for a push to
+    # this repository's own main; a tag push is a maintainer's deliberate act.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     permissions:
       contents: read
