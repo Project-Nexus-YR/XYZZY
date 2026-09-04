@@ -120,8 +120,6 @@ class NexusAgentBridge:
         self._run_executions: dict[str, str] = {}  # run_id -> execution_id
         self._agent_executions: dict[str, str] = {}  # agent_id -> execution_id
         self._cancellation_flags: dict[str, bool] = {}
-        self._interventions: dict[str, list[str]] = {}  # run_id -> list of interventions
-        self._pending_execution_interventions: dict[str, list[str]] = {}
         self._fallback_states: dict[str, str] = {}
         self._specialist_contexts: dict[str, _SpecialistContext] = {}
 
@@ -177,9 +175,6 @@ class NexusAgentBridge:
                 self._agent_executions[agent_instance.agent_id] = execution.execution_id
                 self._fallback_states[run_id] = "CREATED"
                 self._specialist_contexts[execution.execution_id] = specialist_context
-                pending = self._pending_execution_interventions.pop(execution.execution_id, [])
-                if pending:
-                    self._interventions.setdefault(run_id, []).extend(pending)
             return nexus_agent, None
         budget = Budget(
             max_tokens=100_000,
@@ -200,9 +195,6 @@ class NexusAgentBridge:
             self._run_executions[run.run_id] = execution.execution_id
             self._agent_executions[agent_instance.agent_id] = execution.execution_id
             self._specialist_contexts[execution.execution_id] = specialist_context
-            pending = self._pending_execution_interventions.pop(execution.execution_id, [])
-            if pending:
-                self._interventions.setdefault(run.run_id, []).extend(pending)
         return nexus_agent, budget
 
     async def execute_step(
@@ -211,7 +203,13 @@ class NexusAgentBridge:
         prompt: str,
         schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Execute one step of an agent run. This is the core execution loop."""
+        """Execute one step of an agent run. This is the core execution loop.
+
+        A steer is built into ``prompt`` by the caller, from the durable
+        intervention rows it already read: this bridge carries no queue of its
+        own, so a step run by whichever process holds the durable record reads
+        the same steer whether or not it is the process that queued it.
+        """
         async with self._lock:
             run_id = self._active_runs.get(execution_id)
             if not run_id:
@@ -219,11 +217,6 @@ class NexusAgentBridge:
 
             if self._cancellation_flags.get(run_id):
                 return {"status": "cancelled", "reason": "cancellation requested"}
-
-            # Collect and clear interventions atomically
-            interventions = list(self._interventions.get(run_id, []))
-            if interventions:
-                self._interventions[run_id] = []
 
         if schema is None:
             schema = {
@@ -236,14 +229,6 @@ class NexusAgentBridge:
                 },
                 "required": ["action"],
             }
-
-        # Inject interventions into the prompt. A steer is an authorized human
-        # instruction, so it is screened for invisible characters, not fenced.
-        if interventions:
-            intervention_text = "\n".join(
-                f"- HUMAN INTERVENTION: {screen(i, 'steer').text}" for i in interventions
-            )
-            prompt = f"{prompt}\n\n{intervention_text}\n\nPlease incorporate these instructions."
 
         context = self._specialist_contexts.get(execution_id)
         provider_prompt = self._build_specialist_prompt(prompt, context)
@@ -299,7 +284,6 @@ class NexusAgentBridge:
                     response=response,
                     output=output,
                     provider_input=provider_prompt,
-                    interventions=interventions,
                 ),
             }
 
@@ -309,10 +293,19 @@ class NexusAgentBridge:
         if run.state == AgentRunState.CREATED:
             self._executor.transition(run_id, AgentRunState.RUNNING, "begin execution")
 
-        # Execute one step
+        # Execute one step. NEXUS's own call is synchronous, so it runs in a worker
+        # thread: awaited in place on the event loop it would hold every room, every
+        # WebSocket and the lease sweep for as long as the provider takes to answer,
+        # turning one slow or hung call into an outage of the whole process rather
+        # than of the one room waiting on it.
         try:
-            response = self._executor.reason(run_id, provider_prompt, schema)
+            response = await asyncio.to_thread(
+                self._executor.reason, run_id, provider_prompt, schema
+            )
             action = self._executor.choose_action(run_id, response)
+            evidence_response = response if isinstance(response, dict) else {}
+            raw_token_usage = evidence_response.get("token_usage", 0)
+            token_usage = raw_token_usage if isinstance(raw_token_usage, int) else 0
             if str(action.get("action", "")) == "tool":
                 # NEXUS may execute a step; it may not decide a tool call. Its own
                 # ToolRegistry answers to a PolicyEngine this bridge never configures,
@@ -326,9 +319,10 @@ class NexusAgentBridge:
                 return self._tool_request_step(
                     action,
                     provider_prompt=provider_prompt,
-                    interventions=interventions,
+                    response=evidence_response,
+                    token_usage=token_usage,
                 )
-            result = self._executor.execute_action(run_id, action)
+            result = await asyncio.to_thread(self._executor.execute_action, run_id, action)
             self._executor.update_state(run_id)
             result_data = result if isinstance(result, dict) else {"result": result}
             return {
@@ -337,11 +331,11 @@ class NexusAgentBridge:
                 "action": action.get("action"),
                 "tool": "",
                 "input": {},
+                "token_usage": token_usage,
                 "provenance": self._provider_provenance(
-                    response={},
+                    response=evidence_response,
                     output=result_data,
                     provider_input=provider_prompt,
-                    interventions=interventions,
                 ),
             }
         except ModelProviderError as e:
@@ -359,7 +353,8 @@ class NexusAgentBridge:
         action: dict[str, Any],
         *,
         provider_prompt: str,
-        interventions: list[str],
+        response: dict[str, Any] | None = None,
+        token_usage: int = 0,
     ) -> dict[str, Any]:
         """One step that asks for a tool, in the one shape every caller reads.
 
@@ -376,11 +371,11 @@ class NexusAgentBridge:
             "action": "tool",
             "tool": str(action.get("tool", "")),
             "input": dict(raw_input) if isinstance(raw_input, dict) else {},
+            "token_usage": token_usage,
             "provenance": self._provider_provenance(
-                response={},
+                response=response or {},
                 output=output,
                 provider_input=provider_prompt,
-                interventions=interventions,
             ),
         }
 
@@ -410,7 +405,6 @@ class NexusAgentBridge:
         response: dict[str, Any],
         output: dict[str, Any],
         provider_input: str,
-        interventions: list[str],
     ) -> dict[str, Any]:
         """Capture only request/response evidence, never provider credentials.
 
@@ -419,6 +413,10 @@ class NexusAgentBridge:
         ``model_provider``/``model_name`` is never consulted here: those are
         caller-supplied strings, and provenance that trusted them would let an
         unverified claim into the audit trail.
+
+        ``interventions`` is always empty here: this bridge no longer tracks a
+        steer of its own, and the caller (the step that read the durable rows
+        and built them into the prompt) fills that field in afterwards.
         """
         evidence = response.get("provider_evidence")
         if not isinstance(evidence, str):
@@ -434,7 +432,7 @@ class NexusAgentBridge:
             "provider_name": str(provider_name),
             "provider_model": str(provider_model),
             "provider_response_id": str(response.get("provider_response_id") or ""),
-            "interventions": list(interventions),
+            "interventions": [],
             "provider_evidence": evidence,
         }
 
@@ -584,21 +582,6 @@ class NexusAgentBridge:
         async with self._lock:
             self._cancellation_flags[run_id] = True
 
-    async def add_intervention(self, run_id: str, instruction: str) -> None:
-        async with self._lock:
-            if run_id not in self._interventions:
-                self._interventions[run_id] = []
-            self._interventions[run_id].append(instruction)
-
-    async def add_execution_intervention(self, execution_id: str, instruction: str) -> None:
-        """Queue an intervention even when the provider run has not been created yet."""
-        async with self._lock:
-            run_id = self._active_runs.get(execution_id)
-            if run_id is not None:
-                self._interventions.setdefault(run_id, []).append(instruction)
-                return
-            self._pending_execution_interventions.setdefault(execution_id, []).append(instruction)
-
     async def get_run_state(self, execution_id: str) -> AgentRunState | None:
         async with self._lock:
             run_id = self._active_runs.get(execution_id)
@@ -714,8 +697,6 @@ class NexusAgentBridge:
             if run_id:
                 self._run_executions.pop(run_id, None)
                 self._cancellation_flags.pop(run_id, None)
-                self._interventions.pop(run_id, None)
-            self._pending_execution_interventions.pop(execution_id, None)
             self._specialist_contexts.pop(execution_id, None)
             # Remove from agent_executions
             agent_to_remove = None

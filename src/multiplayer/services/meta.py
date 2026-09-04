@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from ..domain.meta import (
     DECISION_KINDS,
@@ -27,10 +27,6 @@ from ..domain.models import (
     OntologyReview,
     OntologyReviewStatus,
 )
-
-if TYPE_CHECKING:
-    from .service import MultiplayerService as MultiplayerService
-
 from ._shared import (
     _DISAGREEMENT_TEMPLATE,
     _MAX_AUDITED_QUESTION,
@@ -282,7 +278,7 @@ class _MetaMixin(_SharedMixin):
             for claim in claims:
                 if claim["assertion_type"] != "ENTITY":
                     continue
-                status = MultiplayerService._claim_status(claim)
+                status = _MetaMixin._claim_status(claim)
                 counts[status] = counts.get(status, 0) + 1
             grouped = ", ".join(f"{status} {count}" for status, count in sorted(counts.items()))
             return (
@@ -552,14 +548,12 @@ class _MetaMixin(_SharedMixin):
             endpoints[relationship.to_entity_id].kind,
         ):
             return False
-        if kind in MultiplayerService._DECISION_SCOPED_KINDS:
+        if kind in _MetaMixin._DECISION_SCOPED_KINDS:
             return relationship.to_entity_id in entity_ids
         if kind is MetaQuestionKind.DISAGREEMENT:
             return (
-                endpoints[relationship.from_entity_id].kind
-                in MultiplayerService._DISAGREEMENT_ENDPOINTS
-                and endpoints[relationship.to_entity_id].kind
-                in MultiplayerService._DISAGREEMENT_ENDPOINTS
+                endpoints[relationship.from_entity_id].kind in _MetaMixin._DISAGREEMENT_ENDPOINTS
+                and endpoints[relationship.to_entity_id].kind in _MetaMixin._DISAGREEMENT_ENDPOINTS
             )
         return True
 

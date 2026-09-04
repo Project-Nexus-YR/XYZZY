@@ -31,6 +31,7 @@ from ..db.connection import Database
 from ..db.repositories import Repos
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
+    TERMINAL_EXECUTION_STATUSES,
     AddressingMode,
     AgentInstance,
     AgentOutput,
@@ -375,7 +376,6 @@ class _ServiceCore(ABC):
     _running_executions: dict[str, asyncio.Task[None]]
     _run_credentials: dict[str, str]
     _dispatch_claim: str
-    _ontology_drains: set[str]
     _background_tasks: set[asyncio.Task[None]]
     _event_chain_migration_is_new: bool
 
@@ -421,9 +421,6 @@ class _ServiceCore(ABC):
     async def _is_published_synthesis(self, artifact_id: str) -> bool: ...
     @abstractmethod
     async def _ontology_entity_record(self, entity: OntologyEntity) -> dict[str, Any]: ...
-    @staticmethod
-    @abstractmethod
-    def _ontology_id(prefix: str, room_id: str, *source_ids: str) -> str: ...
     @staticmethod
     @abstractmethod
     def _ontology_relationship_record(relationship: OntologyRelationship) -> dict[str, Any]: ...
@@ -476,9 +473,6 @@ class _ServiceCore(ABC):
     @staticmethod
     @abstractmethod
     def _tool_response(request: ToolRequest) -> dict[str, Any]: ...
-    @staticmethod
-    @abstractmethod
-    def _validate_limit(limit: int) -> int: ...
     @staticmethod
     @abstractmethod
     def _with_currency(record: dict[str, Any], currency: tuple[bool, int]) -> dict[str, Any]: ...
@@ -743,6 +737,12 @@ class _SharedMixin(_ServiceCore):
         its approval PENDING and its tool request PENDING_APPROVAL for ever, and that
         approval could still be granted afterwards against a run that had ended long
         before. It belongs to settlement, not to expiry, so every settlement calls it.
+
+        The list this reads is not itself re-read inside the transaction, but every
+        write below is guarded on the row's own current status, so a reviewer who
+        decided one of these approvals in the gap between that read and this write
+        is not overwritten: her decision is what the row still says, and no event
+        is appended for a row this call never actually changed.
         """
         pending_approvals = await self.repos.approvals.list_pending_by_execution(execution_id)
         if not pending_approvals:
@@ -752,9 +752,13 @@ class _SharedMixin(_ServiceCore):
         events: list[RoomEvent] = []
         async with self.db.transaction():
             for approval in pending_approvals:
-                await self.repos.approvals.update(
+                expired = await self.repos.approvals.expire_if_pending_in_transaction(
                     replace(approval, status=ApprovalStatus.EXPIRED, reviewed_at=utcnow())
                 )
+                if not expired:
+                    # A reviewer decided this one after the read above; her
+                    # decision stands, and this pass has nothing to say about it.
+                    continue
                 events.append(
                     await self.repos.events.append_with_next_sequence_in_transaction(
                         RoomEvent(
@@ -1164,24 +1168,35 @@ class _SharedMixin(_ServiceCore):
             log.debug("Skipping invalid agent transition for %s: -> %s", agent_id, status.value)
 
     async def _settle_run(
-        self, run: AgentRun, settlement: RunSettlement, decided_by: str, error: str
+        self,
+        run: AgentRun,
+        settlement: RunSettlement,
+        decided_by: str,
+        error: str,
+        *,
+        expected_lease_expires_at: datetime | None = None,
     ) -> bool:
-        """Bring one run and the execution it envelopes to a terminal state together."""
+        """Bring one run and the execution it envelopes to a terminal state together.
+
+        ``expected_lease_expires_at``, when given, is the lease this decision was
+        made from: passed to the write as a compare and swap, it is what keeps a
+        heartbeat that renewed the lease after that read from being overwritten
+        by a sweep that decided the run was orphaned on stale information.
+        """
         execution = await self.repos.executions.get(run.execution_id)
         if execution is None:
             return False
-        terminal = {
-            ExecutionStatus.COMPLETED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-        }
+        terminal = TERMINAL_EXECUTION_STATUSES
         try:
             if execution.status in terminal:
                 async with self.db.transaction():
                     events = [
                         await self.repos.events.append_with_next_sequence_in_transaction(event)
                         for event in await self.repos.agent_runs.settle_in_transaction(
-                            run.execution_id, settlement, decided_by
+                            run.execution_id,
+                            settlement,
+                            decided_by,
+                            expected_lease_expires_at=expected_lease_expires_at,
                         )
                     ]
             else:
@@ -1209,6 +1224,7 @@ class _SharedMixin(_ServiceCore):
                     ],
                     settlement,
                     decided_by,
+                    expected_lease_expires_at=expected_lease_expires_at,
                 )
         except DomainError:
             # The run moved on between the read and this write. Settling a run somebody
@@ -1235,11 +1251,7 @@ class _SharedMixin(_ServiceCore):
         is.
         """
         execution = await self.repos.executions.get(execution_id)
-        if execution is None or execution.status in {
-            ExecutionStatus.COMPLETED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-        }:
+        if execution is None or execution.status in TERMINAL_EXECUTION_STATUSES:
             return
         session = await self.repos.sessions.get(execution.session_id)
         if session is None:
@@ -1293,6 +1305,15 @@ class _SharedMixin(_ServiceCore):
             },
             default=str,
         )
+
+    @staticmethod
+    def _validate_limit(limit: int) -> int:
+        return max(1, min(limit, 500))
+
+    @staticmethod
+    def _ontology_id(prefix: str, room_id: str, *source_ids: str) -> str:
+        material = ":".join((room_id, *source_ids)).encode()
+        return f"{prefix}_{hashlib.sha256(material).hexdigest()[:24]}"
 
     @staticmethod
     def _validate_id(value: str, field_name: str) -> str:

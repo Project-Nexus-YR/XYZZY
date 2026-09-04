@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -104,7 +104,24 @@ class Database:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[None]:
-        """Run a transaction with exclusive, task-scoped connection ownership."""
+        """Run a transaction with exclusive, task-scoped connection ownership.
+
+        A task cancelled while awaiting ``BEGIN IMMEDIATE`` used to leave the
+        connection sitting inside an open transaction with the lock already
+        released: the statement can finish on aiosqlite's own worker thread
+        after the cancellation has already unwound this coroutine, and that
+        await sat outside the try/except below that would otherwise roll it
+        back. Reading ``in_transaction`` right here cannot see that: the
+        worker thread may still be mid-call, so the flag has not flipped yet.
+        The outer finally instead unconditionally queues a ``ROLLBACK`` behind
+        whatever the pending call was — aiosqlite's worker thread runs one
+        call at a time in submission order, so this one only runs once that
+        call has actually finished one way or another, and rolls back exactly
+        when there turns out to be something to roll back. A ``ROLLBACK`` with
+        no open transaction is the harmless, expected case, so any failure
+        here is swallowed rather than replacing whatever this block is really
+        unwinding from.
+        """
         owner = asyncio.current_task()
         if owner is None:
             raise RuntimeError("database transaction requires an asyncio task")
@@ -122,6 +139,8 @@ class Database:
                 await self.conn.execute("ROLLBACK")
                 raise
         finally:
+            with suppress(Exception):
+                await self.conn.execute("ROLLBACK")
             self._transaction_owner = None
             self._connection_lock.release()
 

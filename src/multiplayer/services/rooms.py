@@ -43,17 +43,6 @@ log = logging.getLogger(__name__)
 class _RoomsMixin(_SharedMixin):
     """Mixin providing the rooms surface of MultiplayerService."""
 
-    async def _check_room_membership(self, room_id: str, user_id: str) -> None:
-        """Verify user is a member of the room. Raises DomainError if not."""
-        if not await self.repos.room_members.is_member(room_id, user_id):
-            raise DomainError(f"user {user_id} is not a member of room {room_id}")
-
-    async def _check_workspace_membership(self, workspace_id: str, user_id: str) -> None:
-        """Basic authorization check - verify user can access the workspace's room."""
-        ws = await self.repos.workspaces.get(workspace_id)
-        if not ws:
-            raise DomainError(f"workspace not found: {workspace_id}")
-
     async def create_room(
         self,
         workspace_id: str,

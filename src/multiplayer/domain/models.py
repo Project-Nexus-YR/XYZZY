@@ -492,6 +492,15 @@ class ExecutionStatus(StrEnum):
     PAUSED = "PAUSED"
 
 
+#: The three statuses nothing further ever happens to. Spelled out once here
+#: rather than at every call site that needs to ask, so adding a fourth
+#: terminal status is one edit instead of a search across the codebase for
+#: every place this set was hand-copied.
+TERMINAL_EXECUTION_STATUSES = frozenset(
+    {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+)
+
+
 class AgentTrigger(StrEnum):
     """Why an agent turn happened, recorded on the turn itself."""
 

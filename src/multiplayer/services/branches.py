@@ -10,6 +10,7 @@ from typing import Any
 
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
+    TERMINAL_EXECUTION_STATUSES,
     AgentOutput,
     AgentRun,
     Artifact,
@@ -441,15 +442,7 @@ class _BranchesMixin(_SharedMixin):
                 f"at least {minimum_included} branch output(s) must be included for this mode"
             )
         runs = await self.repos.executions.list_by_branch(branch_id)
-        if any(
-            run.status
-            not in {
-                ExecutionStatus.COMPLETED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-            }
-            for run in runs
-        ):
+        if any(run.status not in TERMINAL_EXECUTION_STATUSES for run in runs):
             raise DomainError("branch synthesis requires every AgentRun to be terminal")
 
         selected_records = [
@@ -794,11 +787,6 @@ class _BranchesMixin(_SharedMixin):
             provider_interventions=output.provider_interventions,
             provider_evidence=output.provider_evidence,
         )
-
-    @staticmethod
-    def _ontology_id(prefix: str, room_id: str, *source_ids: str) -> str:
-        material = ":".join((room_id, *source_ids)).encode()
-        return f"{prefix}_{hashlib.sha256(material).hexdigest()[:24]}"
 
     async def _decision_brief_ontology(
         self,

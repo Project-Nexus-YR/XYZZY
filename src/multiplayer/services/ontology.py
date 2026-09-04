@@ -281,22 +281,6 @@ class _OntologyMixin(_SharedMixin):
         await self._broadcast_persisted_events(persisted)
         return result
 
-    async def drain_room_ontology(self, room_id: str) -> dict[str, Any] | None:
-        """The asynchronous drain, under one in-process lease per room.
-
-        Inference is slow and fallible, so it never sits in a write path; the lease
-        keeps two drains for one room from doing the same pass twice. Nothing
-        schedules a call to it yet, and no read path may make one, so a room's
-        asynchronous backlog is disclosed by `drain_lag_events` rather than hidden.
-        """
-        if room_id in self._ontology_drains:
-            return None
-        self._ontology_drains.add(room_id)
-        try:
-            return await self.run_ontology_extraction(room_id, OntologyExtractor.ASYNC)
-        finally:
-            self._ontology_drains.discard(room_id)
-
     async def _extract(
         self,
         room_id: str,

@@ -7,6 +7,7 @@ from dataclasses import replace
 
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
+    TERMINAL_EXECUTION_STATUSES,
     AddressingMode,
     AgentAddressing,
     AgentIdentity,
@@ -568,11 +569,7 @@ class _AgentsMixin(_SharedMixin):
                 await self.repos.agent_runs.advance(
                     run.run_id, HarnessState.CANCEL_REQUESTED, utcnow(), removed_by
                 )
-                if execution.status in {
-                    ExecutionStatus.COMPLETED,
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.CANCELLED,
-                }:
+                if execution.status in TERMINAL_EXECUTION_STATUSES:
                     for event in await self.repos.agent_runs.settle_in_transaction(
                         run.execution_id, RunSettlement.AGENT_REMOVED, removed_by
                     ):

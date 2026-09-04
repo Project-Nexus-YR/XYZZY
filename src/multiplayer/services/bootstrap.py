@@ -7,6 +7,7 @@ import re
 from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from ..domain.models import (
     AgentTemplate,
@@ -83,28 +84,42 @@ class _BootstrapMixin(_SharedMixin):
                     prev_hash = event_hash
 
     async def _apply_migrations(self, migrations_dir: Path) -> None:
-        """Apply each pending migration and the row recording it as one commit.
+        """Apply each pending migration, one self-contained transaction per file.
 
-        A crash mid-migration leaves the database exactly at the previous
-        migration: the script's statements and its schema_migrations row are one
-        transaction, so nothing half-applied is ever marked done, and nothing
-        applied is ever left unmarked to fail on replay. A migration that uses
-        the sanctioned rebuild recipe declares PRAGMA foreign_keys=OFF, which a
-        transaction would silently ignore, so that toggle is hoisted onto the
-        connection around the transaction.
+        Two processes booting the same fresh file used to each decide which
+        migrations were pending from one read taken before either held any
+        lock. The loser's own ``BEGIN IMMEDIATE`` for a file blocked it until
+        the winner committed that same file, but the loser never re-checked
+        after waiting: it replayed a migration the winner had just committed
+        and failed on a ``UNIQUE`` violation (or an earlier "already exists"
+        from the body itself) instead of finding nothing to do. The fix does
+        not try to make the check-then-act atomic before the write — that
+        would need one SQLite transaction spanning every pending file, and
+        ``executescript`` (the only way to run a migration's multiple
+        statements, some of them trigger bodies with their own embedded
+        semicolons) commits whatever transaction is open the moment it runs,
+        so no such span is possible with the tools SQLite's Python driver
+        gives a caller. Instead, a file that fails to apply is re-checked
+        against ``schema_migrations`` before being treated as a real failure:
+        if it is there now, another process applied it while this one was
+        waiting for the same lock, which is success by another name, not an
+        error.
+
+        A crash mid-migration leaves the database exactly at the previous one:
+        the script's statements and its schema_migrations row are one
+        transaction, so nothing half-applied is ever marked done.
+
+        A migration that uses the sanctioned rebuild recipe declares
+        ``PRAGMA foreign_keys=OFF``, which a transaction would silently ignore,
+        so that toggle is hoisted onto the connection around the transaction.
         """
         await self.db.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
             "name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
         )
-        applied_rows = await self.db.fetch_all("SELECT name FROM schema_migrations")
-        applied = {str(row["name"]) for row in applied_rows}
-        # Read before this boot applies anything: true only for the one boot
-        # that is about to apply the event chain migration for the first time.
-        self._event_chain_migration_is_new = self._EVENT_CHAIN_MIGRATION_NAME not in applied
-        for migration_file in sorted(migrations_dir.glob("*.sql")):
-            if migration_file.name in applied:
-                continue
+        migration_files = sorted(migrations_dir.glob("*.sql"))
+        bodies: dict[str, str] = {}
+        for migration_file in migration_files:
             body = migration_file.read_text()
             # A body that commits inside the wrapper would leave its own DDL
             # committed but unrecorded on a later failure - wedged forever.
@@ -112,11 +127,32 @@ class _BootstrapMixin(_SharedMixin):
             # and rolls back cleanly.)
             if re.search(r"(?im)(?:^|;)\s*(COMMIT|ROLLBACK)\b", body):
                 raise RuntimeError(f"migration {migration_file.name} manages its own transaction")
-            # Case and whitespace insensitive, and blind to a comment mentioning the
-            # pragma rather than issuing it: a substring match on the raw body would
-            # miss a respelled pragma (extra spaces, lower case) and would also fire
-            # on a comment that merely names the literal, disabling FK enforcement
-            # for a migration that never asked for that.
+            bodies[migration_file.name] = body
+        applied_rows = await self.db.fetch_all("SELECT name FROM schema_migrations")
+        applied = {str(row["name"]) for row in applied_rows}
+        # A name this checkout does not ship means a newer build already
+        # migrated this database: opening it anyway would run old code against
+        # triggers, columns and CHECK vocabularies it never saw, so refuse at
+        # boot rather than fail later at request time on a write those
+        # never-seen constraints reject.
+        unknown = applied - set(bodies)
+        if unknown:
+            raise RuntimeError(
+                "database was migrated by a newer build: this checkout does not "
+                f"ship {sorted(unknown)}"
+            )
+        # Read before this boot applies anything: true only for the one boot
+        # that is about to apply the event chain migration for the first time.
+        self._event_chain_migration_is_new = self._EVENT_CHAIN_MIGRATION_NAME not in applied
+        for migration_file in migration_files:
+            if migration_file.name in applied:
+                continue
+            body = bodies[migration_file.name]
+            # Case and whitespace insensitive, and blind to a comment mentioning
+            # the pragma rather than issuing it: a substring match on the raw
+            # body would miss a respelled pragma (extra spaces, lower case) and
+            # would also fire on a comment that merely names the literal,
+            # disabling FK enforcement for a migration that never asked for that.
             body_without_comments = re.sub(r"--[^\n]*", "", body)
             wants_foreign_keys_off = bool(
                 re.search(
@@ -131,10 +167,65 @@ class _BootstrapMixin(_SharedMixin):
             if wants_foreign_keys_off:
                 await self.db.execute("PRAGMA foreign_keys=OFF")
             try:
-                await self.db.execute_script(f"BEGIN IMMEDIATE;\n{body}\n{record}\nCOMMIT;")
+                if wants_foreign_keys_off:
+                    # The SQLite rebuild recipe's own step 10: a rebuild that drops
+                    # a referenced row or copies with a wrong column list commits
+                    # an orphan and records itself as applied unless this is
+                    # checked before the commit, at the one moment it is still
+                    # reversible. Run inside the same transaction, so the check
+                    # sees the rebuild's own uncommitted rows.
+                    #
+                    # Scoped to the tables this migration itself creates: a bare
+                    # ``PRAGMA foreign_key_check`` inspects the whole database, and
+                    # this product deliberately keeps rows an erasure or a legacy
+                    # import left referencing something gone — a rebuild of some
+                    # unrelated table must not be refused for an orphan it did not
+                    # create and is not touching. The sanctioned recipe creates the
+                    # rebuild under a temporary name and renames it over the
+                    # original once the copy is done, so a table this script
+                    # renames away is replaced here with what it was renamed to —
+                    # the name that will actually exist once the script finishes.
+                    rebuilt_tables = dict.fromkeys(
+                        re.findall(
+                            r"(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+                            r"([A-Za-z_][A-Za-z0-9_]*)",
+                            body_without_comments,
+                        )
+                    )
+                    for old_name, new_name in re.findall(
+                        r"(?im)^\s*ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+"
+                        r"RENAME\s+TO\s+([A-Za-z_][A-Za-z0-9_]*)",
+                        body_without_comments,
+                    ):
+                        if old_name in rebuilt_tables:
+                            del rebuilt_tables[old_name]
+                            rebuilt_tables[new_name] = None
+                    await self.db.execute_script(f"BEGIN IMMEDIATE;\n{body}\n{record}")
+                    violations: list[Any] = []
+                    for table in rebuilt_tables:
+                        cursor = await self.db.execute(f"PRAGMA foreign_key_check({table})")
+                        violations.extend(await cursor.fetchall())
+                    if violations:
+                        raise RuntimeError(
+                            f"migration {migration_file.name} left "
+                            f"{len(violations)} foreign key violation(s)"
+                        )
+                    await self.db.execute("COMMIT")
+                else:
+                    await self.db.execute_script(f"BEGIN IMMEDIATE;\n{body}\n{record}\nCOMMIT;")
             except Exception as exc:
                 with suppress(Exception):
                     await self.db.execute("ROLLBACK")
+                # This connection's own BEGIN IMMEDIATE blocked until a competing
+                # process's identical pass committed this very file, and it woke
+                # up still holding a decision made before that wait. Asking again
+                # now is what tells "somebody else just finished this" apart from
+                # an actual failure in the body.
+                recorded = await self.db.fetch_one(
+                    "SELECT 1 FROM schema_migrations WHERE name = ?", (migration_file.name,)
+                )
+                if recorded is not None:
+                    continue
                 raise RuntimeError(f"migration {migration_file.name} failed") from exc
             finally:
                 if wants_foreign_keys_off:
@@ -377,7 +468,3 @@ class _BootstrapMixin(_SharedMixin):
                 "UPDATE messages SET created_at = ? WHERE message_id = ?",
                 (elapsed.isoformat(), row["message_id"]),
             )
-
-    @staticmethod
-    def _validate_limit(limit: int) -> int:
-        return max(1, min(limit, 500))

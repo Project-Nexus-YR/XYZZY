@@ -27,7 +27,6 @@ from ..realtime.hub import RealtimeHub
 from ..security.authorization import AuthorizationError as AuthorizationError
 from ..security.authorization import RoomPolicy
 from ..services.presence import PresenceService
-from . import meta as _meta_module
 from ._shared import (
     _ROOM_EVENTS_MAX_LIMIT as _ROOM_EVENTS_MAX_LIMIT,
 )
@@ -130,8 +129,6 @@ class MultiplayerService(
         # Identifies this dispatcher's claims on runs, so another process can tell
         # a run somebody is dispatching from one nobody ever picked up.
         self._dispatch_claim = new_id("dispatch")
-        # One in-process lease per room, so two drains never do the same pass twice.
-        self._ontology_drains: set[str] = set()
         # Holds a strong reference to every background dispatch this process has
         # scheduled, so the event loop cannot garbage-collect a task nobody is
         # awaiting out from under it mid-flight; the done callback below is what
@@ -162,10 +159,3 @@ class MultiplayerService(
         # settled some other way) is failed here too, so a restart is enough
         # even when nothing this process runs afterward will ever revisit it.
         await self.sweep_stranded_working_agent_tasks()
-
-
-# A few Meta methods dispatch through the composed class by name (see
-# meta.py's own comment). meta.py cannot import this class at module load
-# time (that is this very import statement, still running), so the name is
-# bound into its namespace here, once, right after the class exists.
-setattr(_meta_module, "MultiplayerService", MultiplayerService)  # noqa: B010

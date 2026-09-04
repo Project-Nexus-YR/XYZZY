@@ -592,11 +592,16 @@ class _AgentTasksMixin(_SharedMixin):
             await self.repos.agent_tasks.attach_execution_in_transaction(
                 task_id, execution.execution_id
             )
-        # The asker is a participant of this run, so the run carries a row saying so
-        # and every spend reads it. ``authorized_by`` is already an arm of the bound;
-        # on a delegated task the caller is somebody else, and without this row their
-        # ceiling would apply at the door and nowhere afterwards.
-        await self.repos.executions.record_caller(execution.execution_id, task.requested_by)
+            # The asker is a participant of this run, so the run carries a row
+            # saying so and every spend reads it. ``authorized_by`` is already
+            # an arm of the bound; on a delegated task the caller is somebody
+            # else, and without this row their ceiling would apply at the door
+            # and nowhere afterwards. In the same transaction as the run's own
+            # creation, so a crash between the two cannot leave a WORKING task
+            # whose bound omits its asker.
+            await self.repos.executions.record_caller_in_transaction(
+                execution.execution_id, task.requested_by
+            )
         started = await self._require_agent_task(task_id)
         await self._append_agent_task_event(
             started, started.target_agent_id, "agent", execution_id=execution.execution_id

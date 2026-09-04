@@ -1244,7 +1244,7 @@ AFTER UPDATE OF acting_user_id ON agent_runs
 WHEN NEW.acting_user_id <> ''
 BEGIN
     INSERT OR IGNORE INTO execution_callers(execution_id, caller_id, first_acted_at)
-    VALUES (NEW.execution_id, NEW.acting_user_id, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    VALUES (NEW.execution_id, NEW.acting_user_id, strftime('%Y-%m-%dT%H:%M:%f000', 'now') || '+00:00');
 END
 
 -- trigger agent_runs_record_launch_caller
@@ -1253,7 +1253,7 @@ AFTER INSERT ON agent_runs
 WHEN NEW.acting_user_id <> '' AND NEW.acting_user_id <> NEW.authorized_by
 BEGIN
     INSERT OR IGNORE INTO execution_callers(execution_id, caller_id, first_acted_at)
-    VALUES (NEW.execution_id, NEW.acting_user_id, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    VALUES (NEW.execution_id, NEW.acting_user_id, strftime('%Y-%m-%dT%H:%M:%f000', 'now') || '+00:00');
 END
 
 -- trigger agent_runs_reject_actor_update

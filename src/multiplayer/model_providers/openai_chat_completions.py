@@ -15,6 +15,9 @@ import httpx
 from ._decoding import ModelProviderError, _string_enum, decode_step
 
 _DEFAULT_TIMEOUT_SECONDS = 45.0
+#: Sent as ``max_tokens`` on every call, so an unbounded prompt cannot turn
+#: into an unbounded bill; ``XYZZY_MODEL_MAX_OUTPUT_TOKENS`` overrides it.
+_DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
 
 class OpenAIChatCompletionsProvider:
@@ -27,6 +30,7 @@ class OpenAIChatCompletionsProvider:
         model: str,
         api_key: str | None = None,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
         async_transport: httpx.AsyncBaseTransport | None = None,
         sync_transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -36,10 +40,13 @@ class OpenAIChatCompletionsProvider:
             raise ValueError("model must be non-empty")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key.strip() if api_key else ""
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.max_output_tokens = max_output_tokens
         self._async_transport = async_transport
         self._sync_transport = sync_transport
 
@@ -59,6 +66,7 @@ class OpenAIChatCompletionsProvider:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": self.max_output_tokens,
         }
         properties = response_schema.get("properties")
         # Mirror the Responses provider: synthesis owns a complete closed schema and

@@ -16,6 +16,9 @@ if TYPE_CHECKING:
 _RESPONSES_URL = "https://api.openai.com/v1/responses"
 _DEFAULT_MODEL = "gpt-5.4-mini"
 _DEFAULT_TIMEOUT_SECONDS = 45.0
+#: Sent as ``max_output_tokens`` on every call, so an unbounded prompt cannot
+#: turn into an unbounded bill; ``XYZZY_MODEL_MAX_OUTPUT_TOKENS`` overrides it.
+_DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
 
 class WorkflowOnlyModelProvider:
@@ -70,6 +73,7 @@ class OpenAIResponsesProvider:
         api_key: str,
         model: str = _DEFAULT_MODEL,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
         async_transport: httpx.AsyncBaseTransport | None = None,
         sync_transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -79,9 +83,12 @@ class OpenAIResponsesProvider:
             raise ValueError("model must be non-empty")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
         self._api_key = api_key
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.max_output_tokens = max_output_tokens
         self._async_transport = async_transport
         self._sync_transport = sync_transport
 
@@ -121,6 +128,7 @@ class OpenAIResponsesProvider:
             "input": prompt,
             "store": False,
             "text": text,
+            "max_output_tokens": self.max_output_tokens,
         }
 
     def _headers(self) -> dict[str, str]:
@@ -240,6 +248,13 @@ def model_provider_from_environment(
         timeout = float(raw_timeout)
     except ValueError as exc:
         raise ValueError("XYZZY_MODEL_TIMEOUT_SECONDS must be a number") from exc
+    raw_max_output_tokens = values.get(
+        "XYZZY_MODEL_MAX_OUTPUT_TOKENS", str(_DEFAULT_MAX_OUTPUT_TOKENS)
+    )
+    try:
+        max_output_tokens = int(raw_max_output_tokens)
+    except ValueError as exc:
+        raise ValueError("XYZZY_MODEL_MAX_OUTPUT_TOKENS must be a number") from exc
 
     base_url = values.get("XYZZY_LOCAL_MODEL_BASE_URL", "").strip()
     if base_url:
@@ -249,10 +264,19 @@ def model_provider_from_environment(
 
         api_key = values.get("OPENAI_API_KEY", "").strip() or None
         return OpenAIChatCompletionsProvider(
-            base_url=base_url, model=model, api_key=api_key, timeout_seconds=timeout
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            timeout_seconds=timeout,
+            max_output_tokens=max_output_tokens,
         )
 
     api_key = values.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         return WorkflowOnlyModelProvider()
-    return OpenAIResponsesProvider(api_key=api_key, model=model, timeout_seconds=timeout)
+    return OpenAIResponsesProvider(
+        api_key=api_key,
+        model=model,
+        timeout_seconds=timeout,
+        max_output_tokens=max_output_tokens,
+    )

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import replace
 from typing import Any
 
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
+    TERMINAL_EXECUTION_STATUSES,
     AgentInstance,
     AgentOutput,
     AgentStatus,
@@ -60,6 +62,27 @@ from ._shared import (
 )
 
 log = logging.getLogger(__name__)
+
+#: The default per-run ceiling on tokens spent across every step of one run,
+#: unless the operator configures a different one. Zero or a negative value
+#: disables the ceiling entirely, the same way an unset variable does.
+_DEFAULT_RUN_TOKEN_BUDGET = 500_000
+
+
+def _run_token_budget() -> int | None:
+    """The configured per-run token ceiling, or ``None`` when disabled.
+
+    Read fresh on every call rather than cached at import time, so a test or an
+    operator's changed environment takes effect on the very next step.
+    """
+    raw = os.environ.get("XYZZY_RUN_TOKEN_BUDGET")
+    if raw is None:
+        return _DEFAULT_RUN_TOKEN_BUDGET
+    try:
+        budget = int(raw)
+    except ValueError:
+        return _DEFAULT_RUN_TOKEN_BUDGET
+    return budget if budget > 0 else None
 
 
 class _StepsMixin(_SharedMixin):
@@ -696,11 +719,7 @@ class _StepsMixin(_SharedMixin):
         agent = await self.get_agent(execution.agent_id)
         branch = await self.get_branch(execution.branch_id)
 
-        if execution.status in {
-            ExecutionStatus.COMPLETED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-        }:
+        if execution.status in TERMINAL_EXECUTION_STATUSES:
             raise DomainError(
                 f"execution {execution_id} is terminal (current: {execution.status.value})"
             )
@@ -751,6 +770,19 @@ class _StepsMixin(_SharedMixin):
             )
             raise AuthorizationError(f"run {execution_id} is no longer authorized")
 
+        budget = _run_token_budget()
+        if budget is not None and execution.token_usage >= budget:
+            # Checked before the step that would spend past it runs at all, not
+            # after: the number persisted is the reason the run stopped, never a
+            # postmortem on money already gone.
+            await self._settle_undispatched_run(
+                execution_id,
+                f"run {execution_id} reached its configured token budget "
+                f"({execution.token_usage} of {budget} tokens spent)",
+                RunSettlement.MAX_TOKENS,
+            )
+            raise DomainError(f"run {execution_id} has reached its token budget")
+
         source_prompt = prompt
         provider_prompt = prompt
         if branch.lifecycle_managed:
@@ -788,7 +820,16 @@ class _StepsMixin(_SharedMixin):
             raise DomainError(
                 f"execution {execution_id} is not awaiting a fresh turn, so this step is refused"
             )
-        if not execution.run_id:
+        # A run answered on another process, or resumed after this one restarted,
+        # is durable (the execution row, the agent_run row) but this process's
+        # bridge has never heard of it: its in-memory session table starts empty
+        # every boot. Rehydrating from those durable rows whenever the bridge has
+        # no live session, not only on the execution's very first step, is what
+        # lets the decision that releases a suspended turn be made anywhere: the
+        # alternative is running the approved tool and then failing the turn for
+        # want of an object that only ever lived in one process's memory.
+        has_live_session = await self.nexus.get_run_id_for_execution(execution_id) is not None
+        if not execution.run_id or not has_live_session:
             if agent_run is not None:
                 await harness.session_new(
                     RunContext(
@@ -803,15 +844,33 @@ class _StepsMixin(_SharedMixin):
                 )
             else:
                 await self.nexus.create_execution(agent, session, provider_prompt, execution)
-            run_id = f"run_{execution.execution_id}"
-            # replace(), not a rebuild: a rebuild silently reset triggered_by to
-            # DIRECT, losing why the run was opened at the moment it starts.
-            await self.repos.executions.mark_running(
-                execution.execution_id, run_id, execution.status
+            if not execution.run_id:
+                run_id = f"run_{execution.execution_id}"
+                # replace(), not a rebuild: a rebuild silently reset triggered_by to
+                # DIRECT, losing why the run was opened at the moment it starts.
+                await self.repos.executions.mark_running(
+                    execution.execution_id, run_id, execution.status
+                )
+                execution = replace(execution, run_id=run_id, status=ExecutionStatus.RUNNING)
+
+        # Built here, from the durable rows read above, so both harnesses deliver
+        # the same steer whether or not the process that queued it is the one
+        # that prompts with it. A steer is an authorized human instruction, so
+        # it is screened for invisible characters, not fenced.
+        steer_texts = [steer.instruction for steer in steers]
+        if steer_texts:
+            steer_block = "\n".join(
+                f"- HUMAN INTERVENTION: {screen(text, 'steer').text}" for text in steer_texts
             )
-            execution = replace(execution, run_id=run_id, status=ExecutionStatus.RUNNING)
+            provider_prompt = (
+                f"{provider_prompt}\n\n{steer_block}\n\nPlease incorporate these instructions."
+            )
 
         effective = terms.effective
+        # Carries the true, cumulative spend of every step of this run so far,
+        # updated the moment this step's own usage is known; a step that raised
+        # before the harness answered spent nothing beyond what was already there.
+        total_tokens = execution.token_usage
         try:
             turn = await harness.session_prompt(
                 PromptRequest(
@@ -830,6 +889,12 @@ class _StepsMixin(_SharedMixin):
         else:
             result = dict(turn.output)
             self._record_model_tokens(result)
+            raw_step_tokens = result.get("token_usage", 0)
+            step_tokens = raw_step_tokens if isinstance(raw_step_tokens, int) else 0
+            if step_tokens:
+                total_tokens = await self.repos.executions.add_token_usage(
+                    execution_id, step_tokens
+                )
             # The NEXUS harness carries provenance inside the turn output; the model
             # provider harness returns it in the TurnResult's own field, and the reader
             # below looks only in the output. Without this an agent on that harness
@@ -845,6 +910,14 @@ class _StepsMixin(_SharedMixin):
                 result["status"] = "cancelled"
             else:
                 # The prompt carried the queued steers, so they are spent here.
+                # Provenance is stamped from the same durable rows the prompt was
+                # built from, not from whatever either harness happened to track,
+                # so an intervention shows up in the record on both harnesses and
+                # on any process that reaches this step.
+                if steer_texts:
+                    provenance = dict(result.get("provenance") or {})
+                    provenance["interventions"] = list(steer_texts)
+                    result["provenance"] = provenance
                 await self.repos.interventions.mark_consumed(
                     [steer.intervention_id for steer in steers]
                 )
@@ -949,9 +1022,7 @@ class _StepsMixin(_SharedMixin):
                 execution.status,
                 agent_message,
                 agent_message_event,
-                token_usage=result.get("token_usage", 0)
-                if isinstance(result.get("token_usage", 0), int)
-                else 0,
+                token_usage=total_tokens,
             )
             await self._broadcast_persisted_events(persisted_events)
             await self._set_agent_status_safe(execution.agent_id, AgentStatus.COMPLETED)

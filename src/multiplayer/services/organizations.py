@@ -19,6 +19,8 @@ from ..domain.models import (
     WorkspaceMember,
     new_id,
 )
+from ..security.authorization import AuthorizationError
+from ..security.boundary import require_human_boundary
 from ._shared import (
     _SharedMixin,
 )
@@ -200,3 +202,43 @@ class _OrganizationsMixin(_SharedMixin):
 
     async def list_workspaces(self, org_id: str) -> list[Workspace]:
         return await self.repos.workspaces.list_by_org(org_id)
+
+    async def remove_workspace_member(
+        self, workspace_id: str, user_id: str, requested_by: str
+    ) -> None:
+        """Revoke workspace-scoped standing: room creation, agent spawn, and the
+        room directory, along with membership in every room of this workspace.
+
+        A room editor's invite grants this standing to any account on the
+        deployment (see ``invite_room_member``), and removing that person from
+        every room they were invited to used to still leave them a workspace
+        member with no way to undo it. This is that way, gated the same as
+        ``set_workspace_policy``: only a workspace admin may use it.
+        """
+        require_human_boundary("workspace.member.remove")
+        events: list[RoomEvent] = []
+        async with self.db.transaction():
+            # Re-read inside the transaction that writes, the same fence every
+            # workspace-tier governance write in this module already uses.
+            admin = await self.repos.workspaces.get_member(workspace_id, requested_by)
+            if admin is None or admin.role != "admin":
+                raise AuthorizationError("workspace access forbidden")
+            member = await self.repos.workspaces.get_member(workspace_id, user_id)
+            if member is None:
+                raise DomainError("user is not a workspace member")
+            for room in await self.repos.rooms.list_by_workspace(workspace_id):
+                await self.repos.room_members.remove(room.room_id, user_id)
+                events.append(
+                    await self.repos.events.append_with_next_sequence_in_transaction(
+                        RoomEvent(
+                            room_id=room.room_id,
+                            sequence=0,
+                            event_type=EventType.WORKSPACE_MEMBER_REMOVED,
+                            payload={"workspace_id": workspace_id, "user_id": user_id},
+                            actor_id=requested_by,
+                            actor_type="user",
+                        )
+                    )
+                )
+            await self.repos.workspaces.remove_member(workspace_id, user_id)
+        await self._broadcast_persisted_events(events)

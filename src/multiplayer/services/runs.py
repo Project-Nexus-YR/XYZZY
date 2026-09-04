@@ -10,6 +10,7 @@ from typing import Any
 
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
+    TERMINAL_EXECUTION_STATUSES,
     AgentStatus,
     AgentTrigger,
     Approval,
@@ -117,7 +118,9 @@ class _RunsMixin(_SharedMixin):
             else:
                 settlement = RunSettlement.ORPHANED
                 error = f"lease expired after {run.attempts} attempt(s)"
-            if await self._settle_run(run, settlement, "system", error):
+            if await self._settle_run(
+                run, settlement, "system", error, expected_lease_expires_at=run.lease_expires_at
+            ):
                 settled += 1
         # The periodic caller of this method (server.py's lease-sweep loop) is
         # the only thing that revisits a long-lived process's runs at all, so
@@ -342,7 +345,12 @@ class _RunsMixin(_SharedMixin):
                     actor_type="user",
                 )
             )
-        await self.repos.executions.record_caller(execution.execution_id, resumed_by)
+            # In the same transaction as the resumed run's own creation, so a
+            # crash between the two cannot leave a resumed execution whose
+            # bound omits its resumer.
+            await self.repos.executions.record_caller_in_transaction(
+                execution.execution_id, resumed_by
+            )
         await self._broadcast_persisted_events([event])
         return execution
 
@@ -366,11 +374,7 @@ class _RunsMixin(_SharedMixin):
             raise DomainError("execution not found")
         if require_member:
             await self._require_delegated_authority(execution, cancelled_by)
-        if execution.status in {
-            ExecutionStatus.COMPLETED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-        }:
+        if execution.status in TERMINAL_EXECUTION_STATUSES:
             raise DomainError("execution is already terminal")
         await self.nexus.cancel_execution(execution_id)
         session = await self.repos.sessions.get(execution.session_id)
@@ -455,7 +459,6 @@ class _RunsMixin(_SharedMixin):
                     actor_type="user",
                 )
             )
-        await self.nexus.add_execution_intervention(execution_id, instruction)
         await self._broadcast_persisted_events([event])
 
     @staticmethod
@@ -859,11 +862,7 @@ class _RunsMixin(_SharedMixin):
             )
             return []
         execution = await self.repos.executions.get(execution_id)
-        if execution is not None and execution.status not in {
-            ExecutionStatus.COMPLETED,
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-        }:
+        if execution is not None and execution.status not in TERMINAL_EXECUTION_STATUSES:
             return await self.repos.executions.terminalize_without_output_in_transaction(
                 execution,
                 ExecutionStatus.CANCELLED,
@@ -968,6 +967,4 @@ class _RunsMixin(_SharedMixin):
                     actor_type="user",
                 )
             )
-        if intervention is not None:
-            await self.nexus.add_execution_intervention(intervention.execution_id, instruction)
         await self._broadcast_persisted_events([event])

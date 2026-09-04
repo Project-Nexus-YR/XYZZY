@@ -24,6 +24,7 @@ from ..domain.agent_tasks import (
 )
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
+    TERMINAL_EXECUTION_STATUSES,
     AddressingMode,
     AgentAddressing,
     AgentIdentity,
@@ -98,7 +99,6 @@ from ..domain.models import (
     SessionRefreshToken,
     SessionStatus,
     Task,
-    TaskDependency,
     TaskPriority,
     TaskStatus,
     ThreadReply,
@@ -219,8 +219,20 @@ async def _settle_agent_run_in_transaction(
     execution_id: str,
     settlement: RunSettlement,
     decided_by: str,
+    *,
+    expected_lease_expires_at: datetime | None = None,
 ) -> list[RoomEvent]:
-    """Settle the envelope around one execution, if it has one and is still open."""
+    """Settle the envelope around one execution, if it has one and is still open.
+
+    ``expected_lease_expires_at``, when given, makes this a compare and swap on
+    the lease: the sweep reads a run's lease outside any transaction, and a
+    heartbeat renewing it between that read and this write must not be
+    overwritten by a settlement decided on the stale value. Zero rows moved
+    raises, the same way ``_require_execution_transition`` already does for a
+    caller's stale execution status: the run moved on, so this settlement, and
+    anything else written beside it in the same transaction, is rolled back
+    rather than half-applied.
+    """
     row = await db.fetch_one(
         "SELECT run_id, room_id, harness_state FROM agent_runs WHERE execution_id = ?",
         (execution_id,),
@@ -228,17 +240,23 @@ async def _settle_agent_run_in_transaction(
     if row is None or row["harness_state"] == HarnessState.SETTLED.value:
         return []
     settled_at = serialize_datetime(utcnow())
-    await db.execute(
+    sql = (
         "UPDATE agent_runs SET harness_state = ?, settlement = ?, settled_at = ? "
-        "WHERE run_id = ? AND harness_state <> ?",
-        (
-            HarnessState.SETTLED.value,
-            settlement.value,
-            settled_at,
-            row["run_id"],
-            HarnessState.SETTLED.value,
-        ),
+        "WHERE run_id = ? AND harness_state <> ?"
     )
+    params: list[Any] = [
+        HarnessState.SETTLED.value,
+        settlement.value,
+        settled_at,
+        row["run_id"],
+        HarnessState.SETTLED.value,
+    ]
+    if expected_lease_expires_at is not None:
+        sql += " AND lease_expires_at = ?"
+        params.append(serialize_datetime(expected_lease_expires_at))
+    cursor = await db.execute(sql, tuple(params))
+    if expected_lease_expires_at is not None and cursor.rowcount == 0:
+        raise DomainError(f"run {row['run_id']} lease no longer matches: renewed since it was read")
     events = [
         RoomEvent(
             room_id=str(row["room_id"]),
@@ -287,7 +305,7 @@ async def _finish_managed_branch_if_terminal(
     )
     if not rows:
         return []
-    terminal_values = {"COMPLETED", "FAILED", "CANCELLED"}
+    terminal_values = {status.value for status in TERMINAL_EXECUTION_STATUSES}
     statuses = [str(row["status"]) for row in rows]
     if any(status not in terminal_values for status in statuses):
         return []
@@ -378,10 +396,6 @@ class UserRepo:
             "UPDATE users SET status = ? WHERE user_id = ?", (status.value, user_id)
         )
         await self.db.commit()
-
-    async def list_all(self) -> list[User]:
-        rows = await self.db.fetch_all("SELECT * FROM users ORDER BY created_at")
-        return [self._from_row(r) for r in rows]
 
     async def tombstone_in_transaction(self, user_id: str) -> None:
         """Replace what identifies this person with what identifies nobody.
@@ -880,6 +894,13 @@ class WorkspaceRepo:
                 member.role,
                 serialize_datetime(member.created_at),
             ),
+        )
+        await self.db.commit()
+
+    async def remove_member(self, workspace_id: str, user_id: str) -> None:
+        await self.db.execute(
+            "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+            (workspace_id, user_id),
         )
         await self.db.commit()
 
@@ -1790,10 +1811,21 @@ class AgentRunRepo:
         return [self._from_row(row) for row in rows]
 
     async def settle_in_transaction(
-        self, execution_id: str, settlement: RunSettlement, decided_by: str
+        self,
+        execution_id: str,
+        settlement: RunSettlement,
+        decided_by: str,
+        *,
+        expected_lease_expires_at: datetime | None = None,
     ) -> list[RoomEvent]:
         """Settle the envelope around one execution and return its unsequenced events."""
-        return await _settle_agent_run_in_transaction(self.db, execution_id, settlement, decided_by)
+        return await _settle_agent_run_in_transaction(
+            self.db,
+            execution_id,
+            settlement,
+            decided_by,
+            expected_lease_expires_at=expected_lease_expires_at,
+        )
 
     async def advance(
         self,
@@ -2283,7 +2315,7 @@ class ExecutionRepo:
             updates["output_data"] = json.dumps(output_data)
         if error:
             updates["error"] = error
-        if status in (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED):
+        if status in TERMINAL_EXECUTION_STATUSES:
             updates["completed_at"] = utcnow().isoformat()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         cursor = await self.db.execute(
@@ -2300,6 +2332,25 @@ class ExecutionRepo:
         )
         _require_execution_transition(cursor, execution_id, expected, ExecutionStatus.RUNNING)
         await self.db.commit()
+
+    async def add_token_usage(self, execution_id: str, delta: int) -> int:
+        """Add to the running total this execution has spent so far, and return it.
+
+        Read back before the next step, this is what lets a per-run token budget
+        be enforced before a step runs rather than only known once the money is
+        already gone. A run answered on another process reads the same total,
+        because it lives here rather than in either process's memory.
+        """
+        if delta:
+            await self.db.execute(
+                "UPDATE executions SET token_usage = token_usage + ? WHERE execution_id = ?",
+                (delta, execution_id),
+            )
+            await self.db.commit()
+        row = await self.db.fetch_one(
+            "SELECT token_usage FROM executions WHERE execution_id = ?", (execution_id,)
+        )
+        return int(row["token_usage"]) if row else 0
 
     async def claim_for_dispatch(self, execution_id: str, claim: str) -> bool:
         """Take responsibility for dispatching one PENDING run, or report that
@@ -2321,10 +2372,18 @@ class ExecutionRepo:
         events: list[RoomEvent],
         settlement: RunSettlement | None = None,
         decided_by: str = "",
+        *,
+        expected_lease_expires_at: datetime | None = None,
     ) -> list[RoomEvent]:
         async with self.db.transaction():
             return await self.terminalize_without_output_in_transaction(
-                execution, status, error, events, settlement, decided_by
+                execution,
+                status,
+                error,
+                events,
+                settlement,
+                decided_by,
+                expected_lease_expires_at=expected_lease_expires_at,
             )
 
     async def terminalize_without_output_in_transaction(
@@ -2335,6 +2394,8 @@ class ExecutionRepo:
         events: list[RoomEvent],
         settlement: RunSettlement | None = None,
         decided_by: str = "",
+        *,
+        expected_lease_expires_at: datetime | None = None,
     ) -> list[RoomEvent]:
         """Body of :meth:`terminalize_without_output` for a caller that already owns the
         write transaction, so a membership re-check can share that same transaction.
@@ -2368,7 +2429,11 @@ class ExecutionRepo:
         if session is None:
             raise ValueError("execution session not found")
         settle_events = await _settle_agent_run_in_transaction(
-            self.db, execution.execution_id, settlement, decided_by or execution.agent_id
+            self.db,
+            execution.execution_id,
+            settlement,
+            decided_by or execution.agent_id,
+            expected_lease_expires_at=expected_lease_expires_at,
         )
         branch_events = await _finish_managed_branch_if_terminal(
             self.db, execution.branch_id, session.room_id, execution.agent_id
@@ -2378,12 +2443,6 @@ class ExecutionRepo:
                 await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
             )
         return persisted_events
-
-    async def list_by_session(self, session_id: str) -> list[Execution]:
-        rows = await self.db.fetch_all(
-            "SELECT * FROM executions WHERE session_id = ? ORDER BY started_at", (session_id,)
-        )
-        return [self._from_row(r) for r in rows]
 
     async def list_by_room(self, room_id: str) -> list[Execution]:
         rows = await self.db.fetch_all(
@@ -2446,6 +2505,21 @@ class ExecutionRepo:
             (execution_id, caller_id, utcnow().isoformat()),
         )
         await self.db.commit()
+
+    async def record_caller_in_transaction(self, execution_id: str, caller_id: str) -> None:
+        """Body of :meth:`record_caller` for a caller that already owns the write
+        transaction that creates the run, so a crash between the two can no
+        longer leave a WORKING task or resumed execution whose bound omits its
+        asker or resumer."""
+        if not caller_id:
+            return
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("record_caller_in_transaction requires transaction ownership")
+        await self.db.execute(
+            "INSERT OR IGNORE INTO execution_callers(execution_id, caller_id, first_acted_at) "
+            "VALUES (?, ?, ?)",
+            (execution_id, caller_id, utcnow().isoformat()),
+        )
 
     async def bounding_principals(self, execution_id: str) -> frozenset[str]:
         """Every principal whose grant bounds this run, as one set, in one read.
@@ -2602,7 +2676,7 @@ class ExecutionInterventionRepo:
     async def redact_instruction_in_transaction(self, intervention_id: str, marker: str) -> None:
         """Overwrite one intervention's steer text in place.
 
-        Migration 050 narrows ``execution_interventions_reject_authority_update``
+        Migration 049 narrows ``execution_interventions_reject_authority_update``
         (018/020) to name only ``intervened_by`` as immutable, the same shape
         047 and 048 used for their own narrow exception: who steered stays
         fixed, what they said no longer has to outlive the person who said it.
@@ -3130,13 +3204,6 @@ class TurnLockRepo:
         )
         return None if row is None else self._from_row(row)
 
-    async def get_by_branch(self, branch_id: str) -> TurnLock | None:
-        row = await self.db.fetch_one(
-            "SELECT * FROM turn_locks WHERE branch_id = ? ORDER BY acquired_at DESC LIMIT 1",
-            (branch_id,),
-        )
-        return None if row is None else self._from_row(row)
-
     async def release(self, branch_id: str, reason: str) -> None:
         await self.db.execute(
             "UPDATE turn_locks SET status = ?, released_at = ?, release_reason = ? "
@@ -3258,21 +3325,6 @@ class TaskRepo:
             "WHERE task_id = ?",
             (marker, marker, task_id),
         )
-
-    async def list_by_status(self, room_id: str, status: TaskStatus) -> list[Task]:
-        rows = await self.db.fetch_all(
-            "SELECT * FROM tasks WHERE room_id = ? AND status = ? ORDER BY created_at",
-            (room_id, status.value),
-        )
-        return [self._from_row(r) for r in rows]
-
-    async def add_dependency(self, dep: TaskDependency) -> None:
-        await self.db.execute(
-            "INSERT INTO task_dependencies(task_id, depends_on_task_id, created_at) "
-            "VALUES (?, ?, ?)",
-            (dep.task_id, dep.depends_on_task_id, serialize_datetime(dep.created_at)),
-        )
-        await self.db.commit()
 
     def _from_row(self, row: dict[str, Any]) -> Task:
         return Task(
@@ -3662,13 +3714,6 @@ class MessageRepo:
         await self.db.commit()
         return message
 
-    async def create_with_event_and_turn_guard(
-        self, message: Message, event: RoomEvent
-    ) -> RoomEvent:
-        """Serialize human messages against room turn-lock acquisition."""
-        async with self.db.transaction():
-            return await self.create_with_event_and_turn_guard_in_transaction(message, event)
-
     async def create_with_event_and_turn_guard_in_transaction(
         self, message: Message, event: RoomEvent
     ) -> RoomEvent:
@@ -3895,16 +3940,6 @@ class AttachmentRepo:
             "SELECT * FROM attachments WHERE attachment_id = ?", (attachment_id,)
         )
         return None if row is None else self._from_row(row)
-
-    async def get_metadata_only(self, attachment_id: str) -> Attachment | None:
-        """Every column but the blob, for a caller that only ever needs metadata."""
-        row = await self.db.fetch_one(
-            "SELECT attachment_id, room_id, uploader_id, filename, content_type, "
-            "size_bytes, sha256, created_at, message_id FROM attachments "
-            "WHERE attachment_id = ?",
-            (attachment_id,),
-        )
-        return None if row is None else self._from_row(row, with_data=False)
 
     async def bind_to_message_in_transaction(
         self, attachment_id: str, room_id: str, uploader_id: str, message_id: str
@@ -5355,14 +5390,6 @@ class OntologyRepo:
         )
         return None if row is None else self._entity_from_row(row)
 
-    async def get_latest_review(self, room_id: str, target_id: str) -> OntologyReview | None:
-        row = await self.db.fetch_one(
-            "SELECT * FROM ontology_reviews WHERE room_id = ? AND target_id = ? "
-            "ORDER BY created_at DESC, review_id DESC LIMIT 1",
-            (room_id, target_id),
-        )
-        return None if row is None else self._review_from_row(row)
-
     async def list_entities(self, room_id: str) -> list[OntologyEntity]:
         rows = await self.db.fetch_all(
             "SELECT * FROM ontology_entities WHERE room_id = ? ORDER BY created_at, entity_id",
@@ -5382,17 +5409,6 @@ class OntologyRepo:
         row = await self.db.fetch_one(
             "SELECT * FROM ontology_relationships WHERE relationship_id = ?",
             (relationship_id,),
-        )
-        return None if row is None else self._relationship_from_row(row)
-
-    async def get_relationship_between(
-        self, room_id: str, from_entity_id: str, to_entity_id: str
-    ) -> OntologyRelationship | None:
-        row = await self.db.fetch_one(
-            "SELECT * FROM ontology_relationships WHERE room_id = ? "
-            "AND from_entity_id = ? AND to_entity_id = ? "
-            "ORDER BY updated_at DESC, relationship_id LIMIT 1",
-            (room_id, from_entity_id, to_entity_id),
         )
         return None if row is None else self._relationship_from_row(row)
 
@@ -6101,6 +6117,28 @@ class ApprovalRepo:
         )
         await self.db.commit()
         return approval
+
+    async def expire_if_pending_in_transaction(self, approval: Approval) -> bool:
+        """Close one approval, unless a reviewer already decided it.
+
+        The caller re-reads pending approvals outside any lock, so a reviewer's
+        own decision can commit between that read and this write. Guarding the
+        write on the row's own status, rather than trusting the read, is what
+        keeps that decision — her ``reviewer_id`` and ``review_comment`` — from
+        being overwritten by an expiry that no longer describes what happened.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("expire_if_pending_in_transaction requires transaction ownership")
+        cursor = await self.db.execute(
+            "UPDATE approvals SET status = ?, reviewed_at = ? "
+            "WHERE approval_id = ? AND status = 'PENDING'",
+            (
+                approval.status.value,
+                serialize_datetime(approval.reviewed_at),
+                approval.approval_id,
+            ),
+        )
+        return cursor.rowcount == 1
 
     async def list_ids_by_reviewer(self, user_id: str) -> list[str]:
         rows = await self.db.fetch_all(
