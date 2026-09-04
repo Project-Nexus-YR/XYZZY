@@ -8,10 +8,12 @@ import json
 import logging
 from collections.abc import Sequence
 from contextlib import suppress
+from typing import Protocol
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from ..realtime.hub import RealtimeHub, RealtimeSubscription
+from ..domain.events import RoomEvent
+from ..realtime.hub import RealtimeHub, RealtimeSubscription, room_event_payload
 from ..security import (
     AuthenticationError,
     AuthorizationError,
@@ -21,6 +23,19 @@ from ..security import (
 )
 
 log = logging.getLogger(__name__)
+
+
+class EventSource(Protocol):
+    """What the socket needs to replay history on a subscribe cursor: the
+    same event log `GET /rooms/{id}/state` reads from
+    (`MultiplayerService.get_room_events`), so a fresh socket's cursor and
+    the HTTP reconnect path can never disagree about what "since" means.
+    """
+
+    async def get_room_events(
+        self, room_id: str, after_sequence: int = 0
+    ) -> Sequence[RoomEvent]: ...
+
 
 # How long a revoked credential can keep an already-open socket: the send loop
 # re-reads the token row on this cadence, so an operator's revocation reaches a
@@ -78,6 +93,7 @@ async def websocket_endpoint(
     hub: RealtimeHub,
     authenticator: TokenAuthenticator,
     authorization: RoomPolicy,
+    events: EventSource,
     allowed_origins: Sequence[str] = (),
     session_cookie: str | None = None,
 ) -> None:
@@ -85,13 +101,24 @@ async def websocket_endpoint(
 
     Query params:
         room_id: Room to subscribe to
-        last_sequence: Last known sequence for catch-up (informational)
+        last_sequence: Optional. The sequence the caller's own snapshot
+            (`GET /rooms/{id}/state`) ended at. When present (any
+            non-negative integer, including 0), every room event with a
+            greater sequence is replayed over the socket, in order, before
+            live delivery begins, so a client that fetched a snapshot and
+            then opens this socket sees no gap and no duplicate between the
+            two. Absent (the default): no replay, exactly today's behavior.
     """
     room_id = websocket.query_params.get("room_id", "").strip()
 
     if not room_id:
         await websocket.close(code=4400, reason="room_id required")
         return
+
+    raw_cursor = websocket.query_params.get("last_sequence")
+    replay_cursor: int | None = None
+    if raw_cursor is not None and raw_cursor.strip().isdigit():
+        replay_cursor = int(raw_cursor.strip())
 
     websocket_authorization, accepted_protocol = _websocket_authorization(
         websocket, allowed_origins, session_cookie
@@ -126,6 +153,20 @@ async def websocket_endpoint(
             "room_id": room_id,
         }
     )
+
+    # Every event this backfill already put on the wire, tracked by its
+    # globally unique event_id rather than its (per-room) sequence: this
+    # socket may end up sharing its queue with another room's subscription,
+    # whose sequence numbers live in their own, unrelated namespace.
+    replayed_event_ids: set[str] = set()
+    if replay_cursor is not None:
+        # Subscribed above, before this read: nothing committed from here
+        # on can be missed by both the backfill and live delivery at once,
+        # only double caught by both, which replayed_event_ids dedupes.
+        for room_event in await events.get_room_events(room_id, replay_cursor):
+            payload = room_event_payload(room_event)
+            replayed_event_ids.add(payload["event_id"])
+            await websocket.send_json(payload)
 
     async def send_loop() -> None:
         """Read from subscription queue and send to WebSocket.
@@ -177,6 +218,17 @@ async def websocket_endpoint(
                     # Membership was removed; the hub already dropped the subscription.
                     await websocket.close(code=4403, reason="room access revoked")
                     return
+                if event.get("type") == "resync":
+                    # The hub's queue for this subscription overflowed: this
+                    # socket has a hole it cannot see. Close it so the
+                    # client's existing reconnect and loadState() path
+                    # fetches a fresh snapshot instead of diverging silently.
+                    await websocket.close(code=4408, reason="resync required")
+                    return
+                event_id = event.get("event_id")
+                if event_id is not None and event_id in replayed_event_ids:
+                    # Already sent during the subscribe backfill above.
+                    continue
                 await websocket.send_json(event)
             except TimeoutError:
                 try:

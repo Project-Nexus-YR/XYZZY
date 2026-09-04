@@ -108,10 +108,11 @@ class RedisFanout:
                 async for raw in pubsub.listen():
                     # A subscribe that is ACKed and then dropped must still
                     # escalate the backoff, so the attempt counter resets only
-                    # once the stream has actually yielded something.
-                    attempt = 0
+                    # once the stream has actually yielded a real message, not
+                    # on the subscribe ACK itself.
                     if raw.get("type") != "message":
                         continue
+                    attempt = 0
                     await self._handle_message(raw.get("data"))
             except asyncio.CancelledError:
                 raise
@@ -132,22 +133,31 @@ class RedisFanout:
             message = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             return
-        if message.get("origin") == self.origin:
+        if not isinstance(message, dict) or message.get("origin") == self.origin:
             return  # our own publish, echoed back by Redis — no double delivery
         kind = message.get("kind")
+        # Every field below is read with `.get`, and a missing one drops the
+        # message instead of raising: this channel is shared and unnamespaced
+        # (another XYZZY deployment, a version skew, an operator's manual
+        # PUBLISH), so an off-schema message must not tear down the
+        # subscribe loop that every other message on this connection rides.
         if kind == "room_event":
             room_id = message.get("room_id")
+            event = message.get("event")
             # Cheap drop: nothing to deserialize further, no local subscriber
             # to give the event to.
-            if not room_id or await self._hub.room_subscriber_count(room_id) == 0:
+            if not room_id or event is None or await self._hub.room_subscriber_count(room_id) == 0:
                 return
-            await self._hub.broadcast_to_room(room_id, message["event"])
+            await self._hub.broadcast_to_room(room_id, event)
         elif kind == "revoke":
-            await self._hub.revoke_room_access(
-                message["user_id"], message["room_id"], publish=False
-            )
+            user_id = message.get("user_id")
+            room_id = message.get("room_id")
+            if not user_id or not room_id:
+                return
+            await self._hub.revoke_room_access(user_id, room_id, publish=False)
         elif kind == "send_to_user":
             user_id = message.get("user_id")
-            if not user_id or not await self._hub.get_user_rooms(user_id):
+            event = message.get("event")
+            if not user_id or event is None or not await self._hub.get_user_rooms(user_id):
                 return
-            await self._hub.send_to_user(user_id, message["event"], publish=False)
+            await self._hub.send_to_user(user_id, event, publish=False)

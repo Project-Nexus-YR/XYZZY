@@ -1,7 +1,12 @@
 """Reconnect correctness tests: verify state reconstruction."""
 
-import pytest
+import asyncio
 
+import pytest
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+import multiplayer.api.routes as routes_mod
 from multiplayer.db.connection import Database
 from multiplayer.domain.models import (
     AgentStatus,
@@ -11,7 +16,11 @@ from multiplayer.domain.models import (
     TaskStatus,
 )
 from multiplayer.realtime.hub import RealtimeHub
+from multiplayer.server import create_app
 from multiplayer.services.service import MultiplayerService
+
+TOKENS = {"owner-token": "owner"}
+OWNER = {"Authorization": "Bearer owner-token"}
 
 
 @pytest.fixture
@@ -196,3 +205,158 @@ async def test_reconnect_sequence_zero_gets_all(service):
 
     state = await service.get_room_state(room.room_id, 0)
     assert len(state["events_since"]) > 0
+
+
+def _drain_sequences(queue) -> set[int]:
+    sequences: set[int] = set()
+    while not queue.empty():
+        message = queue.get_nowait()
+        if "sequence" in message:
+            sequences.add(message["sequence"])
+    return sequences
+
+
+@pytest.mark.asyncio
+async def test_late_write_after_subscribe_has_no_gap_via_live_delivery(service) -> None:
+    """Finding 39, the safe half of the seam: a room event that commits while
+    a `GET /state` snapshot is already mid-read, but after the socket has
+    already subscribed. The subscribe happens first and is fully complete
+    before the snapshot's underlying repository read even starts, so this is
+    not asserting on incidental timing: the interleaving is forced with an
+    `asyncio.Event` so the write provably lands between the repository read
+    returning its (necessarily stale) rows and `get_room_state` handing the
+    snapshot back to its caller. The invariant this pins: a socket that
+    subscribed before an event, even one whose broadcast races the snapshot
+    fetch, always gets it live, so the union of snapshot plus socket has no
+    gap regardless of what the snapshot itself captured.
+    """
+    org = await service.create_organization("O", "o", "u1")
+    ws = await service.create_workspace(org.org_id, "W", "w", "u1")
+    room = await service.create_room(ws.workspace_id, "R", "u1")
+
+    sub = await service.hub.subscribe(room.room_id, "u1")  # subscribed before any race begins
+
+    read_returned = asyncio.Event()
+    write_committed = asyncio.Event()
+    original_list_since = service.repos.events.list_since
+
+    async def hooked_list_since(room_id: str, after_sequence: int, limit: int = 500):
+        result = await original_list_since(room_id, after_sequence, limit)
+        if room_id == room.room_id:
+            # The read already has its rows in hand, stale by construction:
+            # everything below happens only after this line.
+            read_returned.set()
+            await write_committed.wait()
+        return result
+
+    service.repos.events.list_since = hooked_list_since  # type: ignore[method-assign]
+    try:
+
+        async def do_snapshot() -> dict:
+            return await service.get_room_state(room.room_id, 0)
+
+        async def do_late_write() -> None:
+            await read_returned.wait()
+            await service.send_message(room.room_id, MessageRole.HUMAN, "u1", "concurrent")
+            write_committed.set()
+
+        state, _ = await asyncio.gather(do_snapshot(), do_late_write())
+    finally:
+        service.repos.events.list_since = original_list_since
+
+    since_sequences = {e["sequence"] for e in state["events_since"]}
+    socket_sequences = _drain_sequences(sub.queue)
+    counter = await service.repos.events.get_sequence_counter(room.room_id)
+
+    assert since_sequences | socket_sequences == set(range(1, counter + 1)), (
+        "gap between the state snapshot and the socket, despite subscribing first"
+    )
+
+
+def test_write_before_late_subscribe_is_replayed() -> None:
+    """Finding 39, the seam's open half, now closed server-side: a client
+    that reads its snapshot and only later opens the socket no longer
+    depends on subscribing before any third party's write. `last_sequence`
+    on `/ws` (the query param `websocket_endpoint`'s docstring long promised
+    as "informational" but never read) replays every event with a greater
+    sequence, in order, before live delivery begins, so the write below,
+    committed before this socket even exists, is not lost: the backfill
+    reads the event log fresh at subscribe time and catches it regardless
+    of when the socket happens to connect relative to it.
+    """
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/me/bootstrap",
+            headers=OWNER,
+            json={"display_name": "Owner", "room_name": "Primary"},
+        )
+        assert response.status_code == 200, response.text
+        room_id = response.json()["room"]["room_id"]
+        svc = routes_mod._svc
+        assert svc is not None
+
+        # The snapshot a client would already have fetched, establishing
+        # its cursor.
+        state = client.get(f"/api/v1/rooms/{room_id}/state", headers=OWNER).json()
+        cursor = state["events_since"][-1]["sequence"] if state["events_since"] else 0
+
+        # Committed after the snapshot, before the socket ever opens: the
+        # exact seam finding 39 named, since nothing has subscribed yet.
+        asyncio.run(svc.send_message(room_id, MessageRole.HUMAN, "owner", "concurrent"))
+
+        with client.websocket_connect(
+            f"/ws?room_id={room_id}&last_sequence={cursor}", headers=OWNER
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "connected"
+
+            replayed = websocket.receive_json()
+            assert replayed["type"] == "room_event"
+            assert replayed["sequence"] == cursor + 1
+            assert replayed["payload"]["content"] == "concurrent"
+
+            # Live delivery picks up right where the replay left off: no
+            # gap, and no repeat of what was just replayed.
+            asyncio.run(svc.send_message(room_id, MessageRole.HUMAN, "owner", "live"))
+            live = websocket.receive_json()
+            assert live["sequence"] == cursor + 2
+            assert live["payload"]["content"] == "live"
+
+
+def test_resync_marker_closes_a_live_socket_with_the_gap_signal() -> None:
+    """Finding 40's consumer side: hub.py's overflow handling (tested at the
+    unit level in test_realtime_track_hub_overflow.py, without a live
+    websocket, to avoid racing that socket's own send loop draining the
+    queue concurrently) enqueues `{"type": "resync"}` in place of the oldest
+    entry. This proves the other half deterministically: a real, live socket
+    that finds a `resync` marker on its queue is closed with the gap signal
+    (code 4408), not left to forward it as an ordinary message or silently
+    swallow it.
+    """
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/me/bootstrap",
+            headers=OWNER,
+            json={"display_name": "Owner", "room_name": "Primary"},
+        )
+        assert response.status_code == 200, response.text
+        room_id = response.json()["room"]["room_id"]
+        svc = routes_mod._svc
+        assert svc is not None
+
+        with client.websocket_connect(f"/ws?room_id={room_id}", headers=OWNER) as websocket:
+            assert websocket.receive_json()["type"] == "connected"
+
+            sub_ids = asyncio.run(svc.hub.get_subscriptions_for_user_room("owner", room_id))
+            assert len(sub_ids) == 1
+            sub = svc.hub._subscriptions[sub_ids[0]]
+            asyncio.run(_put_resync(sub))
+
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                websocket.receive_json()
+            assert exc_info.value.code == 4408
+
+
+async def _put_resync(sub) -> None:
+    sub.queue.put_nowait({"type": "resync"})

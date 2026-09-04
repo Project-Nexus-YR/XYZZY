@@ -80,6 +80,25 @@ _ATTACHMENT_UPLOAD_PATH = re.compile(r"^/api/v1/rooms/[^/]+/attachments$")
 # new authentication path, only a fixed value on the existing one.
 DEMO_BEARER_TOKEN = "demo"
 
+# Defense in depth behind the escaping the app shell and the share page both
+# rely on for member-authored content. 'unsafe-inline' on script-src and
+# style-src is a known gap, forced by the client's inline handlers and inline
+# styles rather than chosen: it still blocks a loaded remote script, which is
+# most of what this header is for. The Google font hosts are for the share
+# page's stylesheet and its vendored-elsewhere fonts; this round keeps them,
+# a later one narrows font-src and style-src to 'self' once every deployment
+# has the fonts vendored locally.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "img-src 'self' data:; "
+    "frame-ancestors 'none'; "
+    "object-src 'none'; "
+    "base-uri 'self'"
+)
+
 
 def _demo_mode_requested() -> bool:
     """XYZZY_DEMO=1 (or any value but empty/"0"/"false") turns on the solo on-ramp."""
@@ -224,7 +243,7 @@ def create_app(
     # fan-out layer and presence moves from process memory to Redis TTL keys.
     # See src/multiplayer/realtime/fanout.py for the guarantee this upholds.
     redis_url = os.environ.get("XYZZY_REDIS_URL", "").strip()
-    hub = RealtimeHub()
+    hub = RealtimeHub(metrics=metrics)
     fanout = None
     presence_redis = None
     if redis_url:
@@ -284,37 +303,45 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await db.connect()
-        await svc.initialize()
-        await ingest_bootstrap_tokens(db, auth_tokens)
-        if demo_requested:
-            await svc.seed_demo_workspace()
-        set_service(svc)
-        set_authenticator(authenticator)
-        set_sessions(sessions)
-        set_demo_enabled(demo_requested)
-        sweeper = asyncio.create_task(sweep_run_leases())
-        if fanout is not None:
-            fanout.start()
-        yield
-        if fanout is not None:
-            await fanout.stop()
-        sweeper.cancel()
-        with suppress(asyncio.CancelledError):
-            await sweeper
-        # Every A2A dispatch svc scheduled fire-and-forget (see
-        # dispatch_agent_task_in_background) still holds the database this
-        # shutdown is about to close; cancelling here is what keeps one from
-        # racing db.close() below and dying mid-write instead of cleanly.
-        for running in list(svc._background_tasks):
-            running.cancel()
-        for running in list(svc._background_tasks):
-            with suppress(asyncio.CancelledError):
-                await running
-        set_demo_enabled(False)
-        set_sessions(None)
-        set_authenticator(None)
-        set_service(None)
-        await db.close()
+        sweeper: asyncio.Task[None] | None = None
+        try:
+            await svc.initialize()
+            await ingest_bootstrap_tokens(db, auth_tokens)
+            if demo_requested:
+                await svc.seed_demo_workspace()
+            set_service(svc)
+            set_authenticator(authenticator)
+            set_sessions(sessions)
+            set_demo_enabled(demo_requested)
+            sweeper = asyncio.create_task(sweep_run_leases())
+            if fanout is not None:
+                fanout.start()
+            yield
+        finally:
+            # A red test (or a real startup failure) must not skip this: the
+            # service globals and the sweeper otherwise outlive the database
+            # they point at, and every later test sharing this process sees
+            # a service whose in-memory database was never closed.
+            if fanout is not None:
+                await fanout.stop()
+            if sweeper is not None:
+                sweeper.cancel()
+                with suppress(asyncio.CancelledError):
+                    await sweeper
+            # Every A2A dispatch svc scheduled fire-and-forget (see
+            # dispatch_agent_task_in_background) still holds the database this
+            # shutdown is about to close; cancelling here is what keeps one from
+            # racing db.close() below and dying mid-write instead of cleanly.
+            for running in list(svc._background_tasks):
+                running.cancel()
+            for running in list(svc._background_tasks):
+                with suppress(asyncio.CancelledError):
+                    await running
+            set_demo_enabled(False)
+            set_sessions(None)
+            set_authenticator(None)
+            set_service(None)
+            await db.close()
 
     app = FastAPI(
         title="XYZZY",
@@ -348,37 +375,50 @@ def create_app(
             _ATTACHMENT_UPLOAD_PATH.match(request.url.path)
         )
         body_limit = max_attachment_bytes() if is_attachment_upload else max_body_bytes
-        # A request that declares its size is refused before the body is read. A
-        # chunked request declares nothing, so this caps the honest case only.
-        if declared.isdigit() and int(declared) > body_limit:
-            response: Response = JSONResponse(
-                status_code=413, content={"detail": "request body too large"}
-            )
-        # The readiness probe and the metrics scrape are exempt: a monitor
-        # polling either must not be able to spend the budget of whoever else
-        # shares its address.
-        elif request.url.path in RATE_LIMIT_EXEMPT_PATHS:
-            response = await call_next(request)
-        else:
-            key = buckets.key_for(request)
-            now = time.monotonic()
-            started, count = buckets.touch(key, now, RATE_LIMIT_WINDOW_SECONDS)
-            if count >= rate_limit:
-                metrics.record_rate_limited()
-                response = JSONResponse(
-                    status_code=429,
-                    content={"detail": "rate limit exceeded"},
-                    headers={
-                        "Retry-After": str(int(RATE_LIMIT_WINDOW_SECONDS - (now - started)) + 1)
-                    },
+        try:
+            # A request that declares its size is refused before the body is
+            # read. A chunked request declares nothing, so this caps the
+            # honest case only.
+            if declared.isdigit() and int(declared) > body_limit:
+                response: Response = JSONResponse(
+                    status_code=413, content={"detail": "request body too large"}
                 )
-            else:
-                buckets.record(key, started, count + 1)
+            # The readiness probe and the metrics scrape are exempt: a monitor
+            # polling either must not be able to spend the budget of whoever
+            # else shares its address.
+            elif request.url.path in RATE_LIMIT_EXEMPT_PATHS:
                 response = await call_next(request)
+            else:
+                key = buckets.key_for(request)
+                now = time.monotonic()
+                started, count = buckets.touch(key, now, RATE_LIMIT_WINDOW_SECONDS)
+                if count >= rate_limit:
+                    metrics.record_rate_limited()
+                    response = JSONResponse(
+                        status_code=429,
+                        content={"detail": "rate limit exceeded"},
+                        headers={
+                            "Retry-After": str(int(RATE_LIMIT_WINDOW_SECONDS - (now - started)) + 1)
+                        },
+                    )
+                else:
+                    buckets.record(key, started, count + 1)
+                    response = await call_next(request)
+        except Exception:
+            # An unhandled route exception unwinds past here. Count it as the
+            # 500 it will become, or the one signal an operator alerts on
+            # never fires and the latency histogram silently omits exactly
+            # the requests that matter.
+            metrics.record_request(request.method, 500, time.monotonic() - request_started)
+            raise
 
         metrics.record_request(
             request.method, response.status_code, time.monotonic() - request_started
         )
+        response.headers["Content-Security-Policy"] = _CSP
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
     app.include_router(router)
@@ -412,6 +452,7 @@ def create_app(
             hub,
             authenticator,
             svc.authorization,
+            svc,
             configured_origins(),
             _ws_session_cookie(),
         )

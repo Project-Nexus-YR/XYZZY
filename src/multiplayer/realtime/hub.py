@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -24,12 +25,42 @@ class FanoutPublisher(Protocol):
     async def publish(self, message: dict[str, Any]) -> None: ...
 
 
+class HubMetrics(Protocol):
+    """What the hub needs from Metrics, defined here so hub.py never imports
+    the metrics module's Prometheus rendering machinery for the sake of one
+    counter.
+    """
+
+    def record_subscriber_queue_overflow(self) -> None: ...
+
+
 @dataclass
 class RealtimeSubscription:
     subscription_id: str
     room_id: str
     user_id: str
     queue: asyncio.Queue[dict[str, Any]] = field(default_factory=lambda: asyncio.Queue(maxsize=256))
+    # Set the first time this subscription's queue overflows, so the warning
+    # below fires once per connection instead of once per dropped event.
+    overflow_warned: bool = False
+
+
+def room_event_payload(room_event: RoomEvent) -> dict[str, Any]:
+    """The wire shape for one RoomEvent, shared by live broadcast
+    (`RealtimeHub.broadcast_room_event`) and subscribe-time history replay
+    (`websocket.py`'s `EventSource` backfill), so the two paths can never
+    disagree about what a client-facing room_event message looks like.
+    """
+    return {
+        "type": "room_event",
+        "event_type": room_event.event_type.value,
+        "sequence": room_event.sequence,
+        "payload": room_event.payload,
+        "actor_id": room_event.actor_id,
+        "actor_type": room_event.actor_type,
+        "timestamp": room_event.timestamp.isoformat(),
+        "event_id": room_event.event_id,
+    }
 
 
 class RealtimeHub:
@@ -40,13 +71,19 @@ class RealtimeHub:
     then delivers outside the lock to avoid holding it during I/O.
     """
 
-    def __init__(self, fanout: FanoutPublisher | None = None) -> None:
+    def __init__(
+        self, fanout: FanoutPublisher | None = None, *, metrics: HubMetrics | None = None
+    ) -> None:
         self._subscriptions: dict[str, RealtimeSubscription] = {}
         self._room_subscriptions: dict[str, set[str]] = defaultdict(set)
         self._lock = asyncio.Lock()
         # None (the default) is single-process mode: no cross-process transport,
         # every method below behaves exactly as it did before this existed.
         self._fanout = fanout
+        # None (the default, and every existing test's hub) means overflow is
+        # still handled, just not counted: the /metrics gauge is optional
+        # instrumentation, not a precondition for correct delivery.
+        self._metrics = metrics
 
     def attach_fanout(self, fanout: FanoutPublisher) -> None:
         """Wire a fan-out layer in after construction.
@@ -77,7 +114,7 @@ class RealtimeHub:
             subscription_id=new_id("sub"),
             room_id=room_id,
             user_id=user_id,
-            **({"queue": queue} if queue is not None else {}),
+            queue=queue if queue is not None else asyncio.Queue(maxsize=256),
         )
         async with self._lock:
             self._subscriptions[sub.subscription_id] = sub
@@ -136,8 +173,35 @@ class RealtimeHub:
                     sub.queue.put_nowait(event)
                     delivered.append(sub.subscription_id)
                 except asyncio.QueueFull:
-                    log.debug("Queue full for subscription %s, dropping event", sub.subscription_id)
+                    self._handle_queue_overflow(sub)
+            else:
+                self._handle_queue_overflow(sub)
         return delivered
+
+    def _handle_queue_overflow(self, sub: RealtimeSubscription) -> None:
+        """A subscriber's queue is full: it fell behind by a whole backlog
+        window and this event cannot be delivered.
+
+        Counted every time (the /metrics signal an operator alerts on),
+        logged once per connection (so a stalled tab does not spam the log),
+        and turned into a `resync` marker enqueued in place of the oldest
+        entry, so `websocket.py`'s send loop learns the socket fell behind
+        and closes it, which the client's existing reconnect and loadState
+        path already heals.
+        """
+        if self._metrics is not None:
+            self._metrics.record_subscriber_queue_overflow()
+        if not sub.overflow_warned:
+            sub.overflow_warned = True
+            log.warning(
+                "Subscriber queue full for subscription %s (room %s): forcing resync",
+                sub.subscription_id,
+                sub.room_id,
+            )
+        with suppress(asyncio.QueueEmpty):
+            sub.queue.get_nowait()
+        with suppress(asyncio.QueueFull):
+            sub.queue.put_nowait({"type": "resync"})
 
     async def broadcast_room_event(
         self, room_event: RoomEvent, *, publish: bool = True
@@ -149,16 +213,7 @@ class RealtimeHub:
         or dead Redis cannot delay or block it. `publish=False` is for the
         fan-out subscriber replaying another process's event locally.
         """
-        payload = {
-            "type": "room_event",
-            "event_type": room_event.event_type.value,
-            "sequence": room_event.sequence,
-            "payload": room_event.payload,
-            "actor_id": room_event.actor_id,
-            "actor_type": room_event.actor_type,
-            "timestamp": room_event.timestamp.isoformat(),
-            "event_id": room_event.event_id,
-        }
+        payload = room_event_payload(room_event)
         delivered = await self.broadcast_to_room(room_event.room_id, payload)
         if publish and self._fanout is not None:
             await self._fanout.publish(
