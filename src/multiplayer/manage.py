@@ -5,6 +5,7 @@ the database file. A token is printed exactly once at mint time — only its
 digest is stored, so a lost token is revoked, never recovered.
 
     python -m multiplayer.manage app.db user add alice --email alice@example.com
+    python -m multiplayer.manage app.db user erase alice
     python -m multiplayer.manage app.db token mint alice --label laptop
     python -m multiplayer.manage app.db token revoke <token-or-hash>
     python -m multiplayer.manage app.db token list
@@ -42,6 +43,18 @@ async def add_user(db: Database, user_id: str, email: str, display_name: str | N
         raise ValueError(f"user {user_id!r} already exists")
     user = User(user_id=user_id, display_name=display_name or user_id, email=email)
     return await UserRepo(db).create(user)
+
+
+async def erase_user(db: Database, user_id: str) -> dict[str, Any]:
+    """Tombstone a user and redact what they authored. See services/erasure.py.
+
+    ``erase_user`` raises ``DomainError`` for an unknown id, which is a
+    ``ValueError`` subclass; ``_run``'s existing ``except ValueError`` already
+    turns that into the same clean, nonzero-exit refusal every other unknown-id
+    error in this CLI gets.
+    """
+    service = MultiplayerService(db, RealtimeHub(), known_users=frozenset())
+    return await service.erase_user(user_id)
 
 
 async def mint_token(db: Database, user_id: str, label: str | None) -> str:
@@ -93,6 +106,12 @@ async def _run(args: argparse.Namespace) -> int:
         if args.command == "user" and args.user_command == "add":
             user = await add_user(db, args.user_id, args.email, args.display_name)
             print(f"created {user.user_id} <{user.email}>")
+        elif args.command == "user" and args.user_command == "erase":
+            result = await erase_user(db, args.user_id)
+            print(
+                f"erased {result['user_id']}: {result['redactions']} redaction(s) "
+                f"across {len(result['rooms_touched'])} room(s)"
+            )
         elif args.command == "token" and args.token_command == "mint":
             token = await mint_token(db, args.user_id, args.label)
             print(token)
@@ -138,6 +157,8 @@ def main() -> int:
     user_add.add_argument("user_id")
     user_add.add_argument("--email", required=True)
     user_add.add_argument("--display-name")
+    user_erase = user.add_parser("erase")
+    user_erase.add_argument("user_id")
 
     token = commands.add_parser("token").add_subparsers(dest="token_command", required=True)
     token_mint = token.add_parser("mint")

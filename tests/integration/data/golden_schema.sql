@@ -95,6 +95,9 @@ CREATE INDEX idx_branches_room_created
 -- index idx_decisions_room
 CREATE INDEX idx_decisions_room ON decisions(room_id)
 
+-- index idx_event_redactions_room
+CREATE INDEX idx_event_redactions_room ON event_redactions(room_id)
+
 -- index idx_execution_interventions_unconsumed
 CREATE INDEX idx_execution_interventions_unconsumed
     ON execution_interventions(execution_id, consumed_at)
@@ -564,6 +567,17 @@ CREATE TABLE decisions (
     created_by TEXT NOT NULL DEFAULT '',
     reviewed_by TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
+)
+
+-- table event_redactions
+CREATE TABLE event_redactions (
+    redaction_id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE,
+    room_id TEXT NOT NULL REFERENCES rooms(room_id) ON DELETE CASCADE,
+    original_event_hash TEXT NOT NULL,
+    redacted_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    actor_id TEXT NOT NULL
 )
 
 -- table execution_callers
@@ -1394,7 +1408,12 @@ END
 
 -- trigger branch_syntheses_reject_completed_update
 CREATE TRIGGER branch_syntheses_reject_completed_update
-BEFORE UPDATE ON branch_syntheses
+BEFORE UPDATE OF
+    branch_id, room_id, synthesis_type, status, initiated_by, provider_input,
+    provider_name, provider_model, provider_response_id, provider_evidence,
+    simulated, content, error, artifact_version_id, created_at, completed_at,
+    token_usage
+ON branch_syntheses
 WHEN OLD.status IN ('COMPLETED', 'FAILED')
 BEGIN
     SELECT RAISE(ABORT, 'terminal branch synthesis is immutable');
@@ -1445,8 +1464,8 @@ END
 
 -- trigger branches_reject_context_update
 CREATE TRIGGER branches_reject_context_update
-BEFORE UPDATE OF room_id, initiated_by, initiating_prompt, context_event_sequence,
-    context_message_ids, context_snapshot, context_hash ON branches
+BEFORE UPDATE OF room_id, initiated_by, context_event_sequence,
+    context_message_ids, context_hash ON branches
 BEGIN
     SELECT RAISE(ABORT, 'branch context boundary is immutable');
 END
@@ -1467,7 +1486,7 @@ END
 
 -- trigger execution_interventions_reject_authority_update
 CREATE TRIGGER execution_interventions_reject_authority_update
-BEFORE UPDATE OF intervened_by, instruction ON execution_interventions
+BEFORE UPDATE OF intervened_by ON execution_interventions
 BEGIN
     SELECT RAISE(ABORT, 'an intervention keeps the identity that produced it');
 END

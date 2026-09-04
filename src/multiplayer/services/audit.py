@@ -74,20 +74,29 @@ class _AuditMixin(_SharedMixin):
                 break
             for row in page:
                 exported += 1
-                yield (
-                    json.dumps(
-                        {
-                            "sequence": row["sequence"],
-                            "event_type": row["event_type"],
-                            "actor": {"actor_id": row["actor_id"], "actor_type": row["actor_type"]},
-                            "created_at": row["timestamp"],
-                            "payload": json.loads(row["payload"]),
-                            "event_hash": row["event_hash"],
-                            "prev_hash": row["prev_hash"],
+                payload = json.loads(row["payload"])
+                line: dict[str, Any] = {
+                    "sequence": row["sequence"],
+                    "event_type": row["event_type"],
+                    "actor": {"actor_id": row["actor_id"], "actor_type": row["actor_type"]},
+                    "created_at": row["timestamp"],
+                    "payload": payload,
+                    "event_hash": row["event_hash"],
+                    "prev_hash": row["prev_hash"],
+                }
+                # A marker payload names a redaction id; the row it replaced tells an
+                # auditor when the content was removed, why, and by whom, without
+                # ever handing back what was removed.
+                if payload.get("redacted") is True and isinstance(payload.get("redaction_id"), str):
+                    redaction = await self.repos.event_redactions.get_by_event_id(row["event_id"])
+                    if redaction is not None:
+                        line["redaction"] = {
+                            "redaction_id": redaction["redaction_id"],
+                            "redacted_at": redaction["redacted_at"],
+                            "reason": redaction["reason"],
+                            "actor_id": redaction["actor_id"],
                         }
-                    )
-                    + "\n"
-                )
+                yield json.dumps(line) + "\n"
             after_sequence = int(page[-1]["sequence"])
         sequence_counter = await self.repos.events.get_sequence_counter(room_id)
         _, breaks = await verify_event_chain(self.db, room_id=room_id)

@@ -348,6 +348,27 @@ against the copy. Restoring is copying the backup into place while the server
 is stopped; the `-wal` and `-shm` files belong to the live database and must
 not be copied alongside it.
 
+### Erasing a user
+
+The event log is hash-chained and append-only, so erasing a person cannot
+mean deleting their rows: that breaks the chain for the whole room. The
+operator CLI does the honest version instead: it tombstones the user's own
+row (name, email, and handle cleared, every credential and session revoked)
+and replaces the payload of every event they authored that carried personal
+content (message text, titles, attachment names) with a marker, recording
+what the marker replaced in a new table rather than rewriting the event's
+own stored hash.
+
+```bash
+python -m multiplayer.manage multiplayer.db user erase alice
+```
+
+`audit verify` still reports the room clean afterward: a redacted event's
+marker is checked against the redaction record that names its original
+hash, and against a later `event.redacted` event that announces it, rather
+than against a hash recomputed from content that is no longer there. See
+`SECURITY.md`'s Data Lifecycle section for the full mechanism.
+
 ## Running Tests
 
 ```bash

@@ -13,10 +13,44 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from typing import Any
 
 from ..db.connection import Database
 
 GENESIS_HASH = ""
+
+
+def _redaction_marker(payload_json: str) -> str | None:
+    """The redaction id a marker payload names, or None for an ordinary payload.
+
+    A marker is exactly ``{"redacted": true, "redaction_id": "..."}``: any other
+    shape, including one that merely happens to carry a ``redacted`` key, is left
+    to the normal hash check rather than treated as an erasure.
+    """
+    try:
+        parsed: Any = json.loads(payload_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict) or parsed.get("redacted") is not True:
+        return None
+    redaction_id = parsed.get("redaction_id")
+    return redaction_id if isinstance(redaction_id, str) and redaction_id else None
+
+
+def _announced_redaction_ids(event_type: str, payload_json: str) -> set[str]:
+    """The redaction ids one event.redacted event names, empty for any other event."""
+    if event_type != "event.redacted":
+        return set()
+    try:
+        parsed: Any = json.loads(payload_json)
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    if not isinstance(parsed, dict):
+        return set()
+    ids = parsed.get("redaction_ids")
+    if not isinstance(ids, list):
+        return set()
+    return {item for item in ids if isinstance(item, str)}
 
 
 def event_chain_hash(
@@ -98,9 +132,14 @@ async def verify_event_chain(
         prev_hash = GENESIS_HASH
         last_sequence = 0
         broken = False
+        # A redaction row is announced by a later event.redacted event in the same
+        # room; until that event is met, its redaction id waits here, keyed to the
+        # row that named it so an unresolved redaction can be reported at that row.
+        pending_redactions: dict[str, tuple[int, str]] = {}
         for row in rows:
             sequence = int(row["sequence"])
             event_id = str(row["event_id"])
+            payload_json = str(row["payload"])
             if sequence != last_sequence + 1:
                 reason = f"sequence {last_sequence + 1} is missing"
                 breaks.append(ChainBreak(room_id, sequence, event_id, reason))
@@ -113,27 +152,76 @@ async def verify_event_chain(
                 )
                 broken = True
                 break
-            expected = event_chain_hash(
-                prev_hash,
-                event_id,
-                room_id,
-                sequence,
-                str(row["event_type"]),
-                str(row["payload"]),
-                str(row["actor_id"]),
-                str(row["actor_type"]),
-                str(row["timestamp"]),
-                int(row["schema_version"]),
-            )
-            if row["event_hash"] != expected:
-                reason = "stored hash does not match the recomputed chain"
-                breaks.append(ChainBreak(room_id, sequence, event_id, reason))
-                broken = True
-                break
+            marker_redaction_id = _redaction_marker(payload_json)
+            if marker_redaction_id is not None:
+                redaction_row = await db.fetch_one(
+                    "SELECT original_event_hash FROM event_redactions "
+                    "WHERE redaction_id = ? AND event_id = ?",
+                    (marker_redaction_id, event_id),
+                )
+                if redaction_row is None:
+                    breaks.append(
+                        ChainBreak(
+                            room_id,
+                            sequence,
+                            event_id,
+                            "redaction marker has no matching event_redactions row",
+                        )
+                    )
+                    broken = True
+                    break
+                original_hash = str(redaction_row["original_event_hash"])
+                # The row's own event_hash and prev_hash were never rewritten, so the
+                # recorded original hash must still be exactly what is stored here.
+                # A mismatch means event_redactions was tampered with after the fact.
+                if original_hash != str(row["event_hash"]):
+                    breaks.append(
+                        ChainBreak(
+                            room_id,
+                            sequence,
+                            event_id,
+                            "original_event_hash does not match the row's own stored hash",
+                        )
+                    )
+                    broken = True
+                    break
+                expected = original_hash
+                pending_redactions[marker_redaction_id] = (sequence, event_id)
+            else:
+                expected = event_chain_hash(
+                    prev_hash,
+                    event_id,
+                    room_id,
+                    sequence,
+                    str(row["event_type"]),
+                    payload_json,
+                    str(row["actor_id"]),
+                    str(row["actor_type"]),
+                    str(row["timestamp"]),
+                    int(row["schema_version"]),
+                )
+                if row["event_hash"] != expected:
+                    reason = "stored hash does not match the recomputed chain"
+                    breaks.append(ChainBreak(room_id, sequence, event_id, reason))
+                    broken = True
+                    break
+            for announced in _announced_redaction_ids(str(row["event_type"]), payload_json):
+                pending_redactions.pop(announced, None)
             prev_hash = expected
             last_sequence = sequence
             verified += 1
         if broken:
+            continue
+        if pending_redactions:
+            first_sequence, first_event_id = min(pending_redactions.values())
+            breaks.append(
+                ChainBreak(
+                    room_id,
+                    first_sequence,
+                    first_event_id,
+                    "no later event.redacted event names this redaction",
+                )
+            )
             continue
         counter_seq = counters_by_room.get(room_id)
         if counter_seq is None:

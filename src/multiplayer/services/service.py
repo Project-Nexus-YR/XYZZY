@@ -4,8 +4,8 @@ The class itself is only the composition: construction and startup. Its
 surface is provided by the mixins in this package, one module per domain
 cluster (organizations and workspaces, rooms, agents, runs, agent turns,
 branches and synthesis, conversation, room records, ontology, Meta, audit,
-agent tasks, and bootstrap); ``_shared.py`` holds what more than one of them
-needs. Splitting a 9,700 line class by import made every mixin's ``self``
+agent tasks, erasure, and bootstrap); ``_shared.py`` holds what more than one
+of them needs. Splitting a 9,700 line class by import made every mixin's ``self``
 untyped; ``_ServiceCore`` in ``_shared.py`` is what keeps ``mypy --strict``
 able to check each one on its own.
 """
@@ -70,6 +70,7 @@ from .audit import _AuditMixin
 from .bootstrap import _BootstrapMixin
 from .branches import _BranchesMixin
 from .conversation import _ConversationMixin
+from .erasure import _ErasureMixin
 from .meta import _MetaMixin
 from .ontology import _OntologyMixin
 from .organizations import _OrganizationsMixin
@@ -92,6 +93,7 @@ class MultiplayerService(
     _MetaMixin,
     _AuditMixin,
     _AgentTasksMixin,
+    _ErasureMixin,
     _BootstrapMixin,
 ):
     """Orchestrates domain operations across repos, realtime events, and NEXUS.

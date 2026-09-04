@@ -18,6 +18,7 @@ from ..domain.agent_tasks import (
     AgentTaskState,
     DelegationCycleError,
     Part,
+    PartKind,
     TaskMessageRole,
     require_transition,
 )
@@ -162,6 +163,7 @@ class Repos:
         self.read_cursors = ReadCursorRepo(db)
         self.search = SearchRepo(db)
         self.events = EventRepo(db)
+        self.event_redactions = EventRedactionRepo(db)
         self.artifacts = ArtifactRepo(db)
         self.artifact_shares = ArtifactShareRepo(db)
         self.decisions = DecisionRepo(db)
@@ -379,6 +381,21 @@ class UserRepo:
     async def list_all(self) -> list[User]:
         rows = await self.db.fetch_all("SELECT * FROM users ORDER BY created_at")
         return [self._from_row(r) for r in rows]
+
+    async def tombstone_in_transaction(self, user_id: str) -> None:
+        """Replace what identifies this person with what identifies nobody.
+
+        The handle they typed under and the room slots they filled stay: history
+        still names a participant. What named the person behind it does not. The
+        placeholder email keeps the column's uniqueness rather than reusing one
+        real address's slot, and is written even on a row already erased, so a
+        second pass changes nothing new.
+        """
+        await self.db.execute(
+            "UPDATE users SET display_name = 'Erased user', email = ?, avatar_url = '' "
+            "WHERE user_id = ?",
+            (f"erased+{user_id}@invalid.local", user_id),
+        )
 
     def _from_row(self, row: dict[str, Any]) -> User:
         return User(
@@ -654,6 +671,30 @@ class UserSessionRepo:
             (jti, issuer, serialize_datetime(moment)),
         )
         return bool(cursor.rowcount)
+
+    async def revoke_all_for_user_in_transaction(self, user_id: str, moment: datetime) -> None:
+        """Kill every session, access credential, and refresh token this person holds.
+
+        Same shape as :meth:`revoke_in_transaction`, widened from one session to
+        every session the user has: an erasure that revoked only the session it
+        happened to know about would leave every other signed-in device authenticated
+        as someone the database no longer names.
+        """
+        await self.db.execute(
+            "UPDATE user_sessions SET revoked_at = ?, revoked_reason = 'user erased' "
+            "WHERE user_id = ? AND revoked_at IS NULL",
+            (serialize_datetime(moment), user_id),
+        )
+        await self.db.execute(
+            "UPDATE user_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+            (serialize_datetime(moment), user_id),
+        )
+        await self.db.execute(
+            "UPDATE session_refresh_tokens SET consumed_at = ? "
+            "WHERE consumed_at IS NULL AND session_id IN "
+            "(SELECT session_id FROM user_sessions WHERE user_id = ?)",
+            (serialize_datetime(moment), user_id),
+        )
 
     async def supersede_access_tokens_in_transaction(
         self, session_id: str, moment: datetime, keep_hash: str
@@ -1155,6 +1196,23 @@ class RoomRepo:
             (allowed, room_id),
         )
         await self.db.commit()
+
+    async def redact_metadata_in_transaction(self, room_id: str, marker: str) -> None:
+        """Replace a room's stored name and description with the same marker its
+        ``room.created`` event carries.
+
+        Both are what a person typed when opening the room, not a fact the server
+        derived, and both are durable columns every room listing reads directly,
+        not the event log.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("room redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE rooms SET name = ?, "
+            "description = CASE WHEN description = '' THEN description ELSE ? END "
+            "WHERE room_id = ?",
+            (marker, marker, room_id),
+        )
 
 
 class RoomMemberRepo:
@@ -1900,6 +1958,80 @@ class BranchRepo:
         )
         return await self.create(branch)
 
+    async def redact_message_in_context_snapshots_in_transaction(
+        self, room_id: str, message_id: str | None, event_id: str, marker: str
+    ) -> None:
+        """Overwrite one message's copy inside every branch context snapshot for the room.
+
+        A branch's ``context_snapshot`` is captured once, at branch start, as its
+        own literal copy of the room's recent messages and events. Redacting the
+        source row does not touch this copy: without this sweep, a snapshot taken
+        before an erasure would go on quoting the original text forever, in a
+        table the room-event redaction above never looks at.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("branch snapshot redaction requires transaction ownership")
+        clauses = ["context_snapshot LIKE ?"]
+        like_params: list[Any] = [f'%"{event_id}"%']
+        if message_id:
+            clauses.append("context_snapshot LIKE ?")
+            like_params.append(f'%"{message_id}"%')
+        rows = await self.db.fetch_all(
+            f"SELECT branch_id, context_snapshot FROM branches WHERE room_id = ? "
+            f"AND ({' OR '.join(clauses)})",
+            (room_id, *like_params),
+        )
+        for row in rows:
+            try:
+                snapshot = json.loads(row["context_snapshot"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(snapshot, dict):
+                continue
+            changed = False
+            if message_id:
+                for entry in snapshot.get("messages", []):
+                    if isinstance(entry, dict) and entry.get("message_id") == message_id:
+                        entry["content"] = marker
+                        changed = True
+            for entry in snapshot.get("events", []):
+                if isinstance(entry, dict) and entry.get("event_id") == event_id:
+                    entry["payload"] = json.loads(marker)
+                    changed = True
+            if changed:
+                await self.db.execute(
+                    "UPDATE branches SET context_snapshot = ? WHERE branch_id = ?",
+                    (
+                        json.dumps(snapshot, sort_keys=True, separators=(",", ":")),
+                        row["branch_id"],
+                    ),
+                )
+
+    async def list_ids_by_initiator(self, user_id: str) -> list[str]:
+        rows = await self.db.fetch_all(
+            "SELECT branch_id FROM branches WHERE initiated_by = ?", (user_id,)
+        )
+        return [str(r["branch_id"]) for r in rows]
+
+    async def redact_initiating_prompt_in_transaction(self, branch_id: str, marker: str) -> None:
+        """Replace a branch's stored initiating prompt, no event or redaction row involved.
+
+        Like a synthesis title, a branch's initiating_prompt never rides inside a
+        chained event payload (``branch.started`` carries only branch_id, mode,
+        status, and context bookkeeping, never the prompt), so there is nothing
+        here for ``verify_event_chain`` to account for and no ``event_redactions``
+        row to write; the durable column is the only live copy. Migration 048
+        narrows ``branches_reject_context_update`` (046, itself narrowing 007) so
+        this one column may still change; every other context-boundary column
+        stays exactly as immutable as 046 left it.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("branch prompt redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE branches SET initiating_prompt = ? WHERE branch_id = ?",
+            (marker, branch_id),
+        )
+
     async def update_status(self, branch_id: str, status: BranchStatus) -> None:
         completed_at = (
             serialize_datetime(utcnow())
@@ -2104,6 +2236,38 @@ class ExecutionRepo:
             "SELECT * FROM executions WHERE execution_id = ?", (execution_id,)
         )
         return None if row is None else self._from_row(row)
+
+    async def redact_initiating_prompt_in_transaction(self, branch_id: str, marker: str) -> None:
+        """Overwrite the branch's own copy of ``initiating_prompt`` inside every
+        execution's ``input_data`` for that branch.
+
+        ``start_branch`` (services/branches.py) stamps every AgentRun's execution
+        with ``input_data={"initiating_prompt": ..., "context_hash": ...}`` as it
+        launches it: a second, independently mutable copy of the same prompt text,
+        never protected by an immutability trigger the way ``agent_outputs`` or
+        ``branch_syntheses`` are. Nothing else in this schema reaches it, so
+        redacting the ``branches`` row above leaves it standing unless swept here
+        too. Only the ``initiating_prompt`` key is touched; ``context_hash`` and
+        any other key an execution's input_data may carry are left as they are.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("execution prompt redaction requires transaction ownership")
+        rows = await self.db.fetch_all(
+            "SELECT execution_id, input_data FROM executions WHERE branch_id = ?",
+            (branch_id,),
+        )
+        for row in rows:
+            try:
+                input_data = json.loads(row["input_data"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(input_data, dict) or "initiating_prompt" not in input_data:
+                continue
+            input_data["initiating_prompt"] = marker
+            await self.db.execute(
+                "UPDATE executions SET input_data = ? WHERE execution_id = ?",
+                (json.dumps(input_data), row["execution_id"]),
+            )
 
     async def update_status(
         self,
@@ -2417,6 +2581,60 @@ class ExecutionInterventionRepo:
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
+    async def list_ids_by_intervener_in_room(self, room_id: str, user_id: str) -> list[str]:
+        """Every intervention this user authored, scoped to executions launched
+        in this room.
+
+        Neither this table nor ``executions`` carries ``room_id`` directly (a
+        legacy execution's ``branch_id`` can be blank), so the join goes
+        through ``sessions``, which every execution requires.
+        """
+        rows = await self.db.fetch_all(
+            "SELECT ei.intervention_id FROM execution_interventions ei "
+            "JOIN executions e ON e.execution_id = ei.execution_id "
+            "JOIN sessions s ON s.session_id = e.session_id "
+            "WHERE s.room_id = ? AND ei.intervened_by = ?",
+            (room_id, user_id),
+        )
+        return [str(r["intervention_id"]) for r in rows]
+
+    async def redact_instruction_in_transaction(self, intervention_id: str, marker: str) -> None:
+        """Overwrite one intervention's steer text in place.
+
+        Migration 050 narrows ``execution_interventions_reject_authority_update``
+        (018/020) to name only ``intervened_by`` as immutable, the same shape
+        047 and 048 used for their own narrow exception: who steered stays
+        fixed, what they said no longer has to outlive the person who said it.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("intervention instruction redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE execution_interventions SET instruction = ? "
+            "WHERE intervention_id = ? AND instruction <> ?",
+            (marker, intervention_id, marker),
+        )
+
+    async def list_execution_ids_with_only_own_pending(self, user_id: str) -> list[str]:
+        """Every execution whose only *unconsumed* intervention is this user's own.
+
+        ``consumed_at IS NULL`` is "pending": still queued to bound a future
+        step (``steps.py`` reads it via ``list_unconsumed``). An execution
+        named here has nobody else's steer still waiting behind hers, so
+        settling it does not silently drop another member's pending
+        narrowing.
+        """
+        rows = await self.db.fetch_all(
+            "SELECT DISTINCT ei.execution_id FROM execution_interventions ei "
+            "WHERE ei.intervened_by = ? AND ei.consumed_at IS NULL "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM execution_interventions ei2 "
+            "  WHERE ei2.execution_id = ei.execution_id AND ei2.consumed_at IS NULL "
+            "  AND ei2.intervened_by <> ?"
+            ")",
+            (user_id, user_id),
+        )
+        return [str(r["execution_id"]) for r in rows]
+
 
 class SuspendedTurnRepo:
     """The rest of a turn that stopped at a reviewer, held where any process finds it.
@@ -2479,6 +2697,20 @@ class SuspendedTurnRepo:
         """Nothing will prompt this run again, so nothing is waiting to resume it."""
         await self.db.execute("DELETE FROM suspended_turns WHERE execution_id = ?", (execution_id,))
         await self.db.commit()
+
+    async def list_execution_ids_by_acting_as(self, user_id: str) -> list[str]:
+        """Every execution whose parked turn was steered by this user's own input.
+
+        ``acting_as`` is who this specific continuation is being carried out
+        for, the same value ``execute_agent_step`` takes its caller's identity
+        from (``api/routes.py``'s execute-step endpoint passes the request's
+        own principal straight through). It names a principal, not free text,
+        which is why erasure keys the sweep by it rather than redacting it.
+        """
+        rows = await self.db.fetch_all(
+            "SELECT execution_id FROM suspended_turns WHERE acting_as = ?", (user_id,)
+        )
+        return [str(r["execution_id"]) for r in rows]
 
 
 class AgentOutputRepo:
@@ -2815,6 +3047,30 @@ class BranchSynthesisRepo:
         )
         await self.db.commit()
 
+    async def list_ids_by_initiator(self, user_id: str) -> list[str]:
+        rows = await self.db.fetch_all(
+            "SELECT synthesis_id FROM branch_syntheses WHERE initiated_by = ?", (user_id,)
+        )
+        return [str(r["synthesis_id"]) for r in rows]
+
+    async def redact_title_in_transaction(self, synthesis_id: str, marker: str) -> None:
+        """Replace a synthesis's stored title, no event or redaction row involved.
+
+        Unlike a message or a task title, a synthesis's title never rides inside a
+        chained event payload (``branch.synthesis.started`` carries only ids), so
+        there is nothing here for ``verify_event_chain`` to account for and no
+        ``event_redactions`` row to write; the durable column is the only copy.
+        Migration 047 narrows ``branch_syntheses_reject_completed_update`` (008) so
+        this one column may still change after the synthesis went terminal, which
+        is the normal case by the time anyone is erased.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("synthesis redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE branch_syntheses SET title = ? WHERE synthesis_id = ?",
+            (marker, synthesis_id),
+        )
+
     @staticmethod
     def _from_row(row: dict[str, Any]) -> BranchSynthesis:
         return BranchSynthesis(
@@ -2983,6 +3239,24 @@ class TaskRepo:
             "SELECT * FROM tasks WHERE room_id = ? ORDER BY created_at", (room_id,)
         )
         return [self._from_row(r) for r in rows]
+
+    async def redact_content_in_transaction(self, task_id: str, marker: str) -> None:
+        """Replace a task's stored title and description with the same marker its
+        ``task.created`` event carries.
+
+        The title (and, since it too is free text a person typed, the description)
+        is a durable column read by every task listing, not the event log, so an
+        erasure that only touched ``room_events`` would still hand a reader the
+        original words through ``list_by_room`` and everything built on it.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("task redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE tasks SET title = ?, "
+            "description = CASE WHEN description = '' THEN description ELSE ? END "
+            "WHERE task_id = ?",
+            (marker, marker, task_id),
+        )
 
     async def list_by_status(self, room_id: str, status: TaskStatus) -> list[Task]:
         rows = await self.db.fetch_all(
@@ -3301,6 +3575,25 @@ class AgentTaskRepo:
         )
         return [self._message_from_row(r) for r in rows]
 
+    async def redact_asker_parts_in_transaction(self, task_id: str, marker: str) -> None:
+        """Replace every asker-authored message's parts for one task with a marker.
+
+        Only the ``asker`` role, never ``delegate``: a delegate's reply is
+        agent-authored, not something the erased human typed, so it is left
+        untouched. The marker is wrapped in the same ``{kind, content,
+        media_type}`` shape a real :class:`Part` serializes to
+        (``Part.as_dict()``), so a caller that parses an already-redacted row
+        back into a ``Part`` (``AgentTaskMessage`` reads still work exactly as
+        they did before) sees a well-formed text part rather than raw JSON.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("agent task message redaction requires transaction ownership")
+        marker_parts = json.dumps([Part(kind=PartKind.TEXT, content=marker).as_dict()])
+        await self.db.execute(
+            "UPDATE agent_task_messages SET parts = ? WHERE task_id = ? AND role = ?",
+            (marker_parts, task_id, TaskMessageRole.ASKER.value),
+        )
+
     def _from_row(self, row: dict[str, Any]) -> AgentTask:
         return AgentTask(
             task_id=row["task_id"],
@@ -3400,6 +3693,19 @@ class MessageRepo:
     async def get(self, message_id: str) -> Message | None:
         row = await self.db.fetch_one("SELECT * FROM messages WHERE message_id = ?", (message_id,))
         return self._from_row(row) if row else None
+
+    async def redact_content_in_transaction(self, message_id: str, marker: str) -> None:
+        """Replace a message's stored text with the same marker its event carries.
+
+        Every read path that shows a message reads this column, not the event log,
+        so an erasure that only touched room_events would still hand a reader the
+        original words through get_room_state and every route built on this repo.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("message redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE messages SET content = ? WHERE message_id = ?", (marker, message_id)
+        )
 
     async def list_by_room(
         self,
@@ -3628,6 +3934,28 @@ class AttachmentRepo:
         )
         return [self._from_row(r, with_data=False) for r in rows]
 
+    async def list_ids_by_uploader(self, uploader_id: str) -> list[str]:
+        rows = await self.db.fetch_all(
+            "SELECT attachment_id FROM attachments WHERE uploader_id = ?", (uploader_id,)
+        )
+        return [str(r["attachment_id"]) for r in rows]
+
+    async def erase_in_transaction(self, attachment_id: str) -> None:
+        """Remove the bytes and the name for real, not just their message binding.
+
+        The row stays, so a message that claimed this attachment still has one to
+        list, but there is nothing left in it to leak: the blob is gone, the name
+        that could itself be personal is gone, and the digest that fingerprinted
+        the original bytes is gone with them.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("attachment erasure requires transaction ownership")
+        await self.db.execute(
+            "UPDATE attachments SET data = ?, filename = ?, sha256 = ?, size_bytes = 0 "
+            "WHERE attachment_id = ?",
+            (b"", "erased", "", attachment_id),
+        )
+
     @staticmethod
     def _from_row(r: dict[str, Any], *, with_data: bool = True) -> Attachment:
         return Attachment(
@@ -3732,6 +4060,17 @@ class RoomParticipantHandleRepo:
             (room_id,),
         )
         return [self._from_row(r) for r in rows]
+
+    async def list_rooms_for_participant(
+        self, participant_type: ParticipantType, participant_id: str
+    ) -> list[str]:
+        """Every room this participant still holds a handle in."""
+        rows = await self.db.fetch_all(
+            "SELECT room_id FROM room_participant_handles "
+            "WHERE participant_type = ? AND participant_id = ?",
+            (participant_type.value, participant_id),
+        )
+        return [str(r["room_id"]) for r in rows]
 
     @staticmethod
     def _from_row(r: dict[str, Any]) -> RoomParticipantHandle:
@@ -3893,6 +4232,21 @@ class SearchRepo:
                 content,
                 serialize_datetime(created_at),
             ),
+        )
+
+    async def forget_in_transaction(self, kind: SearchObjectKind, object_id: str) -> None:
+        """Remove a document from the index rather than let it outlive the text it copied.
+
+        A redaction overwrites the source row (a message, a snapshot) with a
+        marker, but this table holds its own copy of the original content, made
+        at index time. Deleting the row here is what stops that copy from still
+        resolving as a search hit after the source is gone.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("search forget requires transaction ownership")
+        await self.db.execute(
+            "DELETE FROM search_documents WHERE object_kind = ? AND object_id = ?",
+            (kind.value, object_id),
         )
 
     async def backfill(self) -> None:
@@ -4143,6 +4497,84 @@ class EventRepo:
         )
         return rows
 
+    async def list_by_actor(
+        self, actor_id: str, actor_types: tuple[str, ...]
+    ) -> list[dict[str, Any]]:
+        """Every event this actor authored, across every room, hash included.
+
+        Raw rows rather than ``RoomEvent``: an erasure pass needs the stored
+        ``event_hash`` to carry forward as ``original_event_hash``, which the
+        domain type does not expose.
+
+        ``actor_types`` takes more than one value because a human's own events
+        do not agree on one spelling: most of this codebase writes ``"user"``,
+        but a message a human sent is stamped with its role lowercased, which is
+        ``"human"``. Both name the same principal here.
+        """
+        placeholders = ",".join("?" for _ in actor_types)
+        return await self.db.fetch_all(
+            "SELECT event_id, room_id, sequence, event_type, payload, actor_id, actor_type, "
+            f"timestamp, schema_version, prev_hash, event_hash FROM room_events "
+            f"WHERE actor_id = ? AND actor_type IN ({placeholders}) ORDER BY room_id, sequence",
+            (actor_id, *actor_types),
+        )
+
+    async def redact_payload_in_transaction(self, event_id: str, payload_json: str) -> None:
+        """Replace one event's stored payload; its hash and prev_hash are untouched.
+
+        The stored ``event_hash`` was computed over the original payload and stays
+        exactly as it was, so it still matches ``event_redactions.original_event_hash``
+        for whoever verifies the chain afterwards.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("payload redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE room_events SET payload = ? WHERE event_id = ?", (payload_json, event_id)
+        )
+
+
+class EventRedactionRepo:
+    """What a redacted event's marker stands in for: the original hash, and why."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    async def create_in_transaction(
+        self,
+        redaction_id: str,
+        event_id: str,
+        room_id: str,
+        original_event_hash: str,
+        redacted_at: datetime,
+        reason: str,
+        actor_id: str,
+    ) -> None:
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("redaction record requires transaction ownership")
+        await self.db.execute(
+            "INSERT INTO event_redactions(redaction_id, event_id, room_id, "
+            "original_event_hash, redacted_at, reason, actor_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                redaction_id,
+                event_id,
+                room_id,
+                original_event_hash,
+                serialize_datetime(redacted_at),
+                reason,
+                actor_id,
+            ),
+        )
+
+    async def get_by_event_id(self, event_id: str) -> dict[str, Any] | None:
+        return await self.db.fetch_one(
+            "SELECT * FROM event_redactions WHERE event_id = ?", (event_id,)
+        )
+
+    async def list_by_room(self, room_id: str) -> list[dict[str, Any]]:
+        return await self.db.fetch_all(
+            "SELECT * FROM event_redactions WHERE room_id = ? ORDER BY redacted_at", (room_id,)
+        )
+
 
 class ArtifactRepo:
     def __init__(self, db: Database) -> None:
@@ -4179,6 +4611,27 @@ class ArtifactRepo:
             "SELECT * FROM artifacts WHERE room_id = ? ORDER BY created_at", (room_id,)
         )
         return [self._from_row(r) for r in rows]
+
+    async def redact_metadata_in_transaction(self, artifact_id: str, marker: str) -> None:
+        """Replace a hand-named artifact's stored name and description with the
+        same marker its ``artifact.created`` event carries.
+
+        Never called for a published synthesis: that path names the artifact from
+        a fixed spec (``RESERVED_ARTIFACT_NAMES``), not from anything the erased
+        user typed, so the caller filters those out before reaching here.
+
+        The version *content* this artifact carries is a separate, append-only
+        commitment (``artifact_versions_reject_content_update``, migration 003)
+        bound into a provenance hash; this method never touches it.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("artifact redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE artifacts SET name = ?, "
+            "description = CASE WHEN description = '' THEN description ELSE ? END "
+            "WHERE artifact_id = ?",
+            (marker, marker, artifact_id),
+        )
 
     async def create_version(self, version: ArtifactVersion) -> ArtifactVersion:
         """Insert version and atomically update artifact's current_version in one transaction."""
@@ -5498,6 +5951,27 @@ class DecisionRepo:
         )
         await self.db.commit()
 
+    async def redact_content_in_transaction(self, decision_id: str, marker: str) -> None:
+        """Replace a decision's stored title, content, and reason with the same
+        marker its ``decision.created`` event carries.
+
+        All three are read by every decision listing, not the event log, so an
+        erasure that only touched ``room_events`` would still hand a reader the
+        original words through ``list_by_room`` and everything built on it. Round
+        4's schema-classification test turned up ``reason`` as a fourth, separately
+        human-typed field (``create_decision``'s optional ``reason`` parameter)
+        that title/content redaction never reached.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("decision redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE decisions SET title = ?, "
+            "content = CASE WHEN content = '' THEN content ELSE ? END, "
+            "reason = CASE WHEN reason = '' THEN reason ELSE ? END "
+            "WHERE decision_id = ?",
+            (marker, marker, marker, decision_id),
+        )
+
     def _from_row(self, row: dict[str, Any]) -> Decision:
         return Decision(
             decision_id=row["decision_id"],
@@ -5560,6 +6034,27 @@ class MemoryRepo:
             (superseded_by, memory_id),
         )
         await self.db.commit()
+
+    async def list_ids_by_creator(self, user_id: str) -> list[str]:
+        rows = await self.db.fetch_all(
+            "SELECT memory_id FROM memories WHERE created_by = ?", (user_id,)
+        )
+        return [str(r["memory_id"]) for r in rows]
+
+    async def redact_content_in_transaction(self, memory_id: str, marker: str) -> None:
+        """Replace a memory's stored content, no event or redaction row involved.
+
+        ``memory.created`` (services/records.py::create_memory) carries only
+        ``memory_id`` and ``type`` in its payload, never the content itself, and a
+        memory can be workspace- or org-scoped with no room at all, so nothing in
+        the per-room event loop can ever reach this column. The durable ``content``
+        column is the only copy, the same shape as a branch synthesis title.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("memory redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE memories SET content = ? WHERE memory_id = ?", (marker, memory_id)
+        )
 
     def _from_row(self, row: dict[str, Any]) -> Memory:
         return Memory(
@@ -5641,6 +6136,29 @@ class ApprovalRepo:
         )
         await self.db.commit()
         return approval
+
+    async def list_ids_by_reviewer(self, user_id: str) -> list[str]:
+        rows = await self.db.fetch_all(
+            "SELECT approval_id FROM approvals WHERE reviewer_id = ? AND review_comment != ''",
+            (user_id,),
+        )
+        return [str(r["approval_id"]) for r in rows]
+
+    async def redact_review_comment_in_transaction(self, approval_id: str, marker: str) -> None:
+        """Replace a reviewer's stored comment, no event or redaction row involved.
+
+        ``approval.granted``/``approval.rejected`` (services/runs.py) carry only
+        ``approval_id`` and ``reviewer_id`` in their payload, never the comment
+        text, so nothing in the per-room event loop can ever reach this column.
+        The durable ``review_comment`` column is the only copy, the same shape as
+        a branch synthesis title.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("approval redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE approvals SET review_comment = ? WHERE approval_id = ?",
+            (marker, approval_id),
+        )
 
     def _from_row(self, row: dict[str, Any]) -> Approval:
         return Approval(

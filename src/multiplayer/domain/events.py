@@ -131,6 +131,13 @@ class EventType(StrEnum):
     HUMAN_TOOK_OVER_TASK = "human.took_over_task"
     HUMAN_HANDED_BACK_TASK = "human.handed_back_task"
 
+    # Erasure
+    # Appended once per room an erasure touched, after every redaction in that
+    # room lands, so the redaction itself is attributed and chained like any
+    # other event. Its payload names the redaction ids it announces; nothing
+    # before it in the chain may be treated as erased until this event exists.
+    EVENT_REDACTED = "event.redacted"
+
     # Presence
     PRESENCE_CHANGED = "presence.changed"
 
