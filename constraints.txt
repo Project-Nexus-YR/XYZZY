@@ -1,0 +1,61 @@
+# Pinned resolution for CI and the published image, so a rebuild of the same
+# commit installs the same dependency versions instead of re-resolving.
+# Generated from `pip freeze` in the project venv (Python 3.14), pruned to
+# packages that pyproject.toml names plus their transitive closure. This
+# package's own self-install (xyzzy / multiplayer-ai) is left out on purpose:
+# constraints pin third-party dependencies, not the package being installed.
+#
+# `ast_serialize` (a mypy dependency) was frozen at 0.8.0 but has no cp311
+# wheel on PyPI, only a source distribution, so pinning it here would force a
+# from-source build on the CI runner (Python 3.11). It is left unpinned so
+# pip resolves whatever version ships a cp311 wheel.
+#
+# `uvloop` does not appear in a Windows `pip freeze` because uvicorn's own
+# `standard` extra marks it `sys_platform != "win32"`: it never installs on
+# the Windows venv this file was generated from, but it is a real dependency
+# on the Linux runners CI and the image actually use. Pinned by hand below
+# from PyPI's latest release, with the same platform marker uvicorn uses, so
+# `pip install -c constraints.txt` still resolves cleanly on Windows.
+aiosqlite==0.22.1
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.14.2
+certifi==2026.7.22
+cffi==2.1.1
+click==8.5.0
+colorama==0.4.6
+cryptography==50.0.1
+fakeredis==2.37.1
+fastapi==0.141.1
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+idna==3.19
+iniconfig==2.3.0
+librt==0.15.0
+mypy==2.3.1
+mypy_extensions==1.1.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.6.0
+pycparser==3.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+Pygments==2.21.0
+PyJWT==2.13.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+python-dotenv==1.2.3
+python-multipart==0.0.32
+PyYAML==6.0.3
+redis==8.1.0
+ruff==0.16.5
+sortedcontainers==2.4.0
+starlette==1.6.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.52.4
+uvloop==0.22.1; sys_platform != "win32"
+watchfiles==1.2.0
+websockets==17.1

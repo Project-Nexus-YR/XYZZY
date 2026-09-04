@@ -40,6 +40,12 @@ nexus = []
 # Cross-process fan-out for the realtime hub (XYZZY_REDIS_URL). The single
 # process default needs none of this; see src/multiplayer/realtime/fanout.py.
 redis = ["redis>=5.0"]
+# Browser-driven end-to-end tests. Not part of dev: it pulls a Chromium
+# binary, so it is installed only by the CI step that runs those tests.
+e2e = ["playwright>=1.45"]
+# Screenshot reproduction for scripts/capture_hero.py and
+# scripts/capture_scenes.py: `pip install -e ".[capture]"`.
+capture = ["playwright>=1.45", "pillow>=10"]
 
 [project.scripts]
 xyzzy = "multiplayer.server:main"

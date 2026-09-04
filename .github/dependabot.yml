@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Keeps the SHA pins in .github/workflows/*.yml fresh; hand maintenance of
+  # a pinned action is exactly the kind of thing that stays fresh only when
+  # something is watching it.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  # Bumps constraints.txt (the reproducible resolution pip installs and the
+  # image build pin against), not the permissive floors in pyproject.toml.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"

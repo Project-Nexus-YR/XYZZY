@@ -1,22 +1,39 @@
 name: image
 
 on:
-  push:
+  # Gated on the gates workflow finishing green on main, so a test-red commit
+  # never refreshes :latest. Tags still publish directly: a release tag is a
+  # deliberate human action, not a push to main.
+  workflow_run:
+    workflows: ["gates"]
+    types: [completed]
     branches: [main]
+  push:
     tags: ["v*"]
 
 # The quickstart everywhere - README, landing page - promises
 # `docker run ... ghcr.io/project-nexus-yr/xyzzy`. This workflow is what makes
-# that one-liner true: every push to main refreshes :latest, every version tag
-# adds its own immutable tag beside it.
+# that one-liner true: every green push to main refreshes :latest, every
+# version tag adds its own immutable tag beside it.
 jobs:
   publish:
+    if: github.event_name == 'push' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # On the workflow_run trigger, github.sha is this workflow's own
+          # definition commit on the default branch, not the commit gates
+          # just passed on. Building that instead would silently publish
+          # whatever main has moved to since, bypassing the gate this
+          # trigger exists to enforce. The push (tag) trigger has no
+          # workflow_run event, so it falls back to the normal checkout ref.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
@@ -33,5 +50,8 @@ jobs:
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
+          provenance: true
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

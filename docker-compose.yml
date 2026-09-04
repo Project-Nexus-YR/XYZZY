@@ -14,9 +14,10 @@ services:
       # OPENAI_API_KEY: ""
       # XYZZY_LOCAL_MODEL_BASE_URL: "http://host.docker.internal:11434/v1"
 
-  # Seeded, sign-in-free demo workspace: docker compose --profile demo up
-  # Mutually exclusive with real auth config by design (the server refuses
-  # XYZZY_DEMO alongside XYZZY_AUTH_TOKENS or OIDC).
+  # Seeded, sign-in-free demo workspace: docker compose run --rm --service-ports demo
+  # `run` starts only the named service, so it never collides with the
+  # always-on xyzzy service on host port 8000 (both publish "8000:8000",
+  # and `up --profile demo` would start both and lose that port race).
   demo:
     build: .
     profiles: ["demo"]

@@ -1,14 +1,14 @@
 FROM python:3.11-slim@sha256:d1e9ca7c4e78d1e8ecadb5d44bfc8e956e7a65b659a9950f569f243d72b326d0
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md constraints.txt ./
 COPY src ./src
 COPY web ./web
 
 # Installed editable on purpose: the server resolves web/index.html relative to
 # the repository layout, so a copied-into-site-packages install serves the API
 # and 404s the UI.
-RUN pip install --no-cache-dir -e . \
+RUN pip install --no-cache-dir -c constraints.txt -e . \
     && useradd --system --uid 10001 xyzzy \
     && mkdir /data && chown xyzzy /data
 USER xyzzy
