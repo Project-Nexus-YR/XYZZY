@@ -1090,21 +1090,17 @@ async def get_room_state(
     """Full room state for reconnect/recovery.
 
     The embedded event list is capped at the caller's request the same way
-    ``list_room_events`` is. `MultiplayerService.get_room_state` still builds
-    its own unbounded page internally (see "Needs lead wiring" in this
-    track's report): this bounds what leaves the process today without
-    waiting on that change.
+    ``list_room_events`` is, and the cap travels down to the query, so a long
+    lived room is never read whole and trimmed after.
     """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
     try:
-        state = await svc.get_room_state(room_id, last_sequence, principal.user_id)
+        return await svc.get_room_state(
+            room_id, last_sequence, principal.user_id, event_limit=events_limit
+        )
     except DomainError as e:
         raise HTTPException(404, str(e)) from e
-    events = state.get("events_since")
-    if isinstance(events, list) and len(events) > events_limit:
-        state["events_since"] = events[:events_limit]
-    return state
 
 
 @router.post("/rooms/{room_id}/join")
