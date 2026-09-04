@@ -20,14 +20,18 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import os
 import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import jwt
+
+log = logging.getLogger(__name__)
 
 # Asymmetric only. A symmetric algorithm verified against a key fetched from the
 # issuer's JWKS is a confusion attack waiting for a provider that publishes one.
@@ -76,6 +80,36 @@ class OidcSettings:
         return bool(self.issuer and self.client_id and self.redirect_uri)
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _warn_if_insecure(name: str, value: str) -> None:
+    """Loudly flag a configured URL that is neither https nor loopback.
+
+    `redirect_uri.startswith("https://")` is what every cookie-security
+    decision in routes.py and server.py is derived from (session_cookie_name,
+    the ``Secure`` flag, the ``__Host-`` prefix). A deployment that terminates
+    TLS at a reverse proxy and forwards plain HTTP to XYZZY, then points this
+    setting at that plain HTTP address, downgrades every session cookie it
+    issues with nothing telling the operator it happened. This warning is that
+    telling.
+    """
+    if not value:
+        return
+    parsed = urlsplit(value)
+    if parsed.scheme == "https" or parsed.hostname in _LOOPBACK_HOSTS:
+        return
+    log.warning(
+        "%s=%r is not https and not loopback: if TLS terminates in front of "
+        "this server (a reverse proxy, a load balancer), session cookies will "
+        "be issued without Secure or the __Host- prefix. Set it to the "
+        "https:// address your browser sees, not the plain HTTP address this "
+        "process listens on.",
+        name,
+        value,
+    )
+
+
 def settings_from_environment() -> OidcSettings:
     """Read the provider from the environment. Absent means SSO is simply off."""
     raw_scopes = os.environ.get("XYZZY_OIDC_SCOPES", "openid profile email").split()
@@ -84,11 +118,15 @@ def settings_from_environment() -> OidcSettings:
         for target in os.environ.get("XYZZY_OIDC_POST_LOGOUT_REDIRECTS", "").split(",")
         if target.strip()
     ]
+    issuer = os.environ.get("XYZZY_OIDC_ISSUER", "").rstrip("/")
+    redirect_uri = os.environ.get("XYZZY_OIDC_REDIRECT_URI", "")
+    _warn_if_insecure("XYZZY_OIDC_ISSUER", issuer)
+    _warn_if_insecure("XYZZY_OIDC_REDIRECT_URI", redirect_uri)
     return OidcSettings(
-        issuer=os.environ.get("XYZZY_OIDC_ISSUER", "").rstrip("/"),
+        issuer=issuer,
         client_id=os.environ.get("XYZZY_OIDC_CLIENT_ID", ""),
         client_secret=os.environ.get("XYZZY_OIDC_CLIENT_SECRET", ""),
-        redirect_uri=os.environ.get("XYZZY_OIDC_REDIRECT_URI", ""),
+        redirect_uri=redirect_uri,
         scopes=tuple(raw_scopes) or ("openid",),
         post_logout_redirects=frozenset(redirects),
     )

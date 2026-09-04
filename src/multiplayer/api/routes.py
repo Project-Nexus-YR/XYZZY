@@ -7,7 +7,7 @@ import os
 import secrets
 from enum import StrEnum
 from typing import Annotated, Any, TypeVar
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 from fastapi import (
@@ -158,6 +158,22 @@ def _sanitize_attachment_filename(filename: str) -> str:
     return cleaned or "attachment"
 
 
+def _content_disposition(filename: str) -> str:
+    """Build a Content-Disposition value that survives a non-latin-1 filename.
+
+    Starlette encodes header values as latin-1, so the quoted `filename`
+    parameter must stay ASCII. Per RFC 6266/5987, a `filename*=UTF-8''...`
+    parameter carries the exact name for clients that support it, alongside
+    an ASCII fallback for clients that do not.
+    """
+    safe_name = _sanitize_attachment_filename(filename)
+    ascii_fallback = safe_name.encode("ascii", "replace").decode("ascii").replace("?", "_")
+    disposition = f'attachment; filename="{ascii_fallback}"'
+    if ascii_fallback != safe_name:
+        disposition += f"; filename*=UTF-8''{quote(safe_name)}"
+    return disposition
+
+
 async def _current_user(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
@@ -183,6 +199,11 @@ async def _current_user(
                 )
             credential = f"Bearer {cookie}"
             request.state.authenticated_via_cookie = True
+    # Stashed so a caller that reauthenticates later in the same request (the
+    # A2A SSE stream's periodic recheck) resolves the credential the same way
+    # this dependency did, rather than re-reading the header and missing a
+    # credential that arrived as a cookie.
+    request.state.effective_credential = credential
     try:
         return await _authenticator.authenticate(credential)
     except AuthenticationError as exc:
@@ -588,7 +609,9 @@ async def auth_config(request: Request) -> AuthConfig:
     session" without the client having to probe an authenticated route and put
     a 401 in the console on every signed-out load. It reveals one bit that a
     cross-site caller cannot read back under CORS, and it deliberately does not
-    require the web-client header: nothing here acts on the session.
+    require the web-client header. It also does not extend the session's idle
+    clock: this route is reachable by a cross-site top-level navigation, and a
+    request nobody asked for must not push idle expiry forward.
     """
     sso = _sessions is not None and _sessions.provider.settings.configured
     label = os.environ.get("XYZZY_OIDC_PROVIDER_LABEL", "single sign-on")
@@ -598,7 +621,7 @@ async def auth_config(request: Request) -> AuthConfig:
         cookie = request.cookies.get(session_cookie_name(secure))
         if cookie:
             try:
-                await _authenticator.authenticate(f"Bearer {cookie}")
+                await _authenticator.authenticate(f"Bearer {cookie}", extend_idle=False)
                 authenticated = True
             except AuthenticationError:
                 authenticated = False
@@ -1062,14 +1085,26 @@ async def get_room_state(
     room_id: str,
     principal: CurrentUser,
     last_sequence: int = Query(0, ge=0),
+    events_limit: int = Query(500, ge=1, le=1000),
 ) -> dict[str, Any]:
-    """Full room state for reconnect/recovery."""
+    """Full room state for reconnect/recovery.
+
+    The embedded event list is capped at the caller's request the same way
+    ``list_room_events`` is. `MultiplayerService.get_room_state` still builds
+    its own unbounded page internally (see "Needs lead wiring" in this
+    track's report): this bounds what leaves the process today without
+    waiting on that change.
+    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
     try:
-        return await svc.get_room_state(room_id, last_sequence, principal.user_id)
+        state = await svc.get_room_state(room_id, last_sequence, principal.user_id)
     except DomainError as e:
         raise HTTPException(404, str(e)) from e
+    events = state.get("events_since")
+    if isinstance(events, list) and len(events) > events_limit:
+        state["events_since"] = events[:events_limit]
+    return state
 
 
 @router.post("/rooms/{room_id}/join")
@@ -1367,10 +1402,18 @@ async def list_room_events(
     room_id: str,
     principal: CurrentUser,
     after: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=1000),
 ) -> list[dict[str, Any]]:
+    """One page of the room's event log, the same shape as every other list route.
+
+    A busy room's whole log used to load into memory in one call: this reads
+    exactly one page from the repository instead, and the client already has
+    the parameter it pages with (``after``, the returned page's own last
+    ``sequence``).
+    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    events = await svc.get_room_events(room_id, after)
+    events = await svc.repos.events.list_since(room_id, after, limit)
     return [
         {
             "event_id": e.event_id,
@@ -2333,12 +2376,11 @@ async def download_attachment(attachment_id: str, principal: CurrentUser) -> Res
         if attachment.content_type in ATTACHMENT_CONTENT_TYPE_ALLOWLIST
         else "application/octet-stream"
     )
-    safe_name = _sanitize_attachment_filename(attachment.filename)
     return Response(
         content=attachment.data,
         media_type=served_type,
         headers={
-            "Content-Disposition": f'attachment; filename="{safe_name}"',
+            "Content-Disposition": _content_disposition(attachment.filename),
             "X-Content-Type-Options": "nosniff",
         },
     )

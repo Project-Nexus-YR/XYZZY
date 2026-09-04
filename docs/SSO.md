@@ -44,8 +44,13 @@ rotation rather than at the absolute clock.
 
 The browser itself never sees either token. `GET /api/v1/auth/callback` sets a
 cookie only when the request prefers `text/html` (a browser arriving by
-redirect); that cookie carries the access token alone, HttpOnly, `__Host-`
-prefixed on an HTTPS deployment, and expires with the session's idle clock.
+redirect); that cookie carries the access token alone, HttpOnly, and expires
+with the session's idle clock. Whether it is also `Secure` and `__Host-`
+prefixed follows the scheme of the configured `XYZZY_OIDC_REDIRECT_URI`, not
+the scheme of the request that reached this process: set it to the `https://`
+address the browser sees, even when a reverse proxy or load balancer
+terminates TLS in front of XYZZY and forwards plain HTTP, or the cookie is
+issued without either protection and a startup warning names the mismatch.
 Every other caller (curl, an agent, `refresh`/`logout`) still gets the JSON
 body with both tokens, unchanged. A cookie authenticates an HTTP request only
 when it also carries header `X-XYZZY-Client: web`, on every method including

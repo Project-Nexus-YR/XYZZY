@@ -478,6 +478,15 @@ async def _task_events(
                     # Either way this stream has lost the right to continue.
                     yield _sse(call_id, _closing_event(task, last_state, "credential-ended"))
                     return
+                try:
+                    await svc.authorization.require(task.room_id, viewer_id, RoomCapability.READ)
+                except AuthorizationError:
+                    # Mirrors websocket.py's own reauth beat: a lost cross-process
+                    # revoke (a missed Redis publish, or any path that skips
+                    # ``hub.revoke_room_access``) must not leave this stream
+                    # delivering one task's status forever to a removed member.
+                    yield _sse(call_id, _closing_event(task, last_state, "access-revoked"))
+                    return
                 next_reauth = loop.time() + REAUTH_SECONDS
             try:
                 event = await asyncio.wait_for(subscription.queue.get(), timeout=REAUTH_SECONDS)
@@ -516,8 +525,15 @@ def _stream(
     snapshot: dict[str, Any],
     call_id: Any,
 ) -> StreamingResponse:
+    # `_current_user` already resolved the credential this request authenticated
+    # with, cookie included; reusing it here is what lets the periodic recheck
+    # below re-validate the same credential instead of a bare header a
+    # cookie-authenticated browser client never sent.
+    credential = getattr(request.state, "effective_credential", None) or request.headers.get(
+        "authorization"
+    )
     return StreamingResponse(
-        _task_events(svc, request.headers.get("authorization"), viewer_id, task, snapshot, call_id),
+        _task_events(svc, credential, viewer_id, task, snapshot, call_id),
         media_type="text/event-stream",
         # A stream held anywhere along the way is a stream that arrives all at
         # once at the end, which is the one thing it exists not to do. The cache

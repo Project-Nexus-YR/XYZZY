@@ -1,5 +1,6 @@
 """Object-addressed routes resolve authorization through their owning room."""
 
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -230,6 +231,95 @@ def test_approval_request_rejects_cross_room_execution_and_agent(
     assert client.get(f"/api/v1/rooms/{second_room_id}/state", headers=ADMIN).json() == state_before
     pending = client.get(f"/api/v1/rooms/{second_room_id}/approvals", headers=ADMIN).json()
     assert pending == []
+
+
+def _all_api_routes(app: Any) -> list[Any]:
+    """Every route FastAPI actually serves, walked past whatever wraps a
+    sub-router on this FastAPI version, rather than a list somebody typed by
+    hand and never revisits when a route is added.
+    """
+    flat: list[Any] = []
+    for route in app.routes:
+        if hasattr(route, "original_router"):
+            flat.extend(_all_api_routes(route.original_router))
+        elif hasattr(route, "routes"):
+            flat.extend(_all_api_routes(route))
+        else:
+            flat.append(route)
+    return flat
+
+
+# Self-scoped (act on the caller's own identity or session, nothing to own a
+# room) or pre-auth (answer before, or without needing, a credential). Every
+# one of these has its own dedicated authorization test elsewhere, or, like
+# `/api/v1/search`, states in its own docstring why a Python-level check would
+# only hide the thing that actually enforces isolation.
+SELF_SCOPED_OR_PRE_AUTH_PATHS = frozenset(
+    {
+        "/",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+        "/openapi.json",
+        "/metrics",
+        "/share/{token}",
+        "/.well-known/agent-card.json",
+        "/a2a/v1",  # JSON-RPC: every call is HTTP 200 with an envelope, per spec.
+        "/api/v1/health",
+        "/api/v1/search",
+        "/api/v1/auth/login",
+        "/api/v1/auth/callback",
+        "/api/v1/auth/config",
+        "/api/v1/auth/refresh",
+        "/api/v1/auth/logout",
+        "/api/v1/auth/logout-everywhere",
+        "/api/v1/auth/end-session",
+        "/api/v1/auth/backchannel-logout",
+        "/api/v1/auth/frontchannel-logout",
+        "/api/v1/me/bootstrap",
+        "/api/v1/me/context",
+        "/api/v1/notifications",
+        "/api/v1/organizations",  # creating one's own org, nothing yet to own it
+        "/api/v1/agent-templates",  # the built-in catalog, not room- or workspace-scoped
+    }
+)
+
+
+def test_every_route_refuses_an_authenticated_outsider_a_200(client: TestClient) -> None:
+    """A structural guard over the route table itself, not a hand-maintained
+    list of paths (finding 21): a new route reaching this app without its own
+    authorization call fails this test by existing, rather than by someone
+    remembering to add it here.
+
+    An outsider who belongs to no organization, workspace, or room anywhere
+    calls every route this app serves with a placeholder id in each path
+    parameter. The one property asserted is the one the finding is about: none
+    of them may answer 200. Body validation on a POST/PUT/PATCH can still
+    produce a 422 before any authorization check runs; that is not this
+    test's concern; a 200 to a stranger is.
+    """
+    full_app = create_app(
+        ":memory:",
+        auth_tokens={"admin-token": "admin-user", "outsider-token": "outsider-user"},
+    )
+    checked = 0
+    with TestClient(full_app) as outsider_client:
+        for route in _all_api_routes(full_app):
+            path = getattr(route, "path", None)
+            methods = getattr(route, "methods", None)
+            if not path or not methods or path in SELF_SCOPED_OR_PRE_AUTH_PATHS:
+                continue
+            placeholder_path = re.sub(r"\{[^}]+\}", "does-not-exist", path)
+            for method in sorted(methods - {"HEAD", "OPTIONS"}):
+                checked += 1
+                response = outsider_client.request(
+                    method,
+                    placeholder_path,
+                    headers=OUTSIDER,
+                    json={} if method in {"POST", "PUT", "PATCH"} else None,
+                )
+                assert response.status_code != 200, (method, path, response.text)
+    assert checked > 50  # the sweep itself must not have silently found nothing
 
 
 def test_notification_query_cannot_override_bearer_identity(client: TestClient) -> None:

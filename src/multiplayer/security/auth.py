@@ -64,7 +64,9 @@ class TokenAuthenticator:
         # either of them knew about the other.
         self._on_session_used = on_session_used
 
-    async def authenticate(self, authorization: str | None) -> AuthenticatedUser:
+    async def authenticate(
+        self, authorization: str | None, *, extend_idle: bool = True
+    ) -> AuthenticatedUser:
         scheme, separator, credential = (authorization or "").partition(" ")
         if not separator or scheme.lower() != "bearer" or not credential:
             raise AuthenticationError("valid bearer token required")
@@ -122,7 +124,7 @@ class TokenAuthenticator:
         )
         if not session.alive_at(utcnow()):
             raise AuthenticationError("valid bearer token required")
-        if self._on_session_used is not None:
+        if extend_idle and self._on_session_used is not None:
             try:
                 await self._on_session_used(session, utcnow())
             except AuthorizationError:
