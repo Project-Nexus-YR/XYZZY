@@ -3116,7 +3116,9 @@ class AgentTaskRepo:
         opened is never swept out from under the background task it is
         already waiting on. The limit bounds one sweep pass: a large backlog
         drains a batch at a time across passes instead of stampeding a
-        restart with every stranded task at once.
+        restart with every stranded task at once. The (state, created_at)
+        index bounds the rows read to find that batch, so the never pruned
+        table is not scanned end to end on every boot.
         """
         rows = await self.db.fetch_all(
             "SELECT * FROM agent_tasks WHERE state = ? AND created_at < ? "

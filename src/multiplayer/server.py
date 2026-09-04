@@ -84,15 +84,13 @@ DEMO_BEARER_TOKEN = "demo"
 # rely on for member-authored content. 'unsafe-inline' on script-src and
 # style-src is a known gap, forced by the client's inline handlers and inline
 # styles rather than chosen: it still blocks a loaded remote script, which is
-# most of what this header is for. The Google font hosts are for the share
-# page's stylesheet and its vendored-elsewhere fonts; this round keeps them,
-# a later one narrows font-src and style-src to 'self' once every deployment
-# has the fonts vendored locally.
+# most of what this header is for. Fonts are vendored under web/fonts/ and
+# served same origin, so font-src and style-src name no outside host.
 _CSP = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline'; "
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-    "font-src 'self' https://fonts.gstatic.com; "
+    "style-src 'self' 'unsafe-inline'; "
+    "font-src 'self'; "
     "img-src 'self' data:; "
     "frame-ancestors 'none'; "
     "object-src 'none'; "
@@ -277,7 +275,11 @@ def create_app(
             )
         auth_tokens = {DEMO_BEARER_TOKEN: DEMO_USER_ID}
     svc = MultiplayerService(
-        db, hub, known_users=frozenset(auth_tokens.values()), presence_redis=presence_redis
+        db,
+        hub,
+        known_users=frozenset(auth_tokens.values()),
+        presence_redis=presence_redis,
+        metrics=metrics,
     )
     sessions = SessionService(
         db=db,
@@ -299,6 +301,12 @@ def create_app(
                 await svc.sweep_expired_run_leases()
             except Exception:
                 log.exception("Run lease sweep failed")
+            try:
+                # Presence entries nobody heartbeats any more would otherwise
+                # sit in the in-memory map for the life of the process.
+                await svc.presence.cleanup_stale()
+            except Exception:
+                log.exception("Presence sweep failed")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -455,6 +463,7 @@ def create_app(
             svc,
             configured_origins(),
             _ws_session_cookie(),
+            presence=svc.presence,
         )
 
     @app.get("/metrics")

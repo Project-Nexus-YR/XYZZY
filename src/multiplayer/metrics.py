@@ -27,6 +27,7 @@ class Metrics:
         self._version = version
         self._requests_total: dict[tuple[str, str], int] = defaultdict(int)
         self._rate_limited_total = 0
+        self._model_tokens_total = 0
         self._redis_publish_failures_total = 0
         self._subscriber_queue_overflows_total = 0
         self._websocket_connections = 0
@@ -44,6 +45,9 @@ class Metrics:
 
     def record_rate_limited(self) -> None:
         self._rate_limited_total += 1
+
+    def record_model_tokens(self, tokens: int) -> None:
+        self._model_tokens_total += max(tokens, 0)
 
     def record_redis_publish_failure(self) -> None:
         self._redis_publish_failures_total += 1
@@ -83,6 +87,9 @@ class Metrics:
             "# HELP xyzzy_rate_limited_total Requests refused by the rate limiter.",
             "# TYPE xyzzy_rate_limited_total counter",
             f"xyzzy_rate_limited_total {self._rate_limited_total}",
+            "# HELP xyzzy_model_tokens_total Tokens the model providers reported spending.",
+            "# TYPE xyzzy_model_tokens_total counter",
+            f"xyzzy_model_tokens_total {self._model_tokens_total}",
             "# HELP xyzzy_websocket_connections Live WebSocket subscriptions.",
             "# TYPE xyzzy_websocket_connections gauge",
             f"xyzzy_websocket_connections {self._websocket_connections}",

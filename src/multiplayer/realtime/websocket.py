@@ -37,6 +37,15 @@ class EventSource(Protocol):
     ) -> Sequence[RoomEvent]: ...
 
 
+class PresenceHeartbeat(Protocol):
+    """What the socket tells presence: this member is still here. Called once
+    on subscribe and again on every revalidation tick, so a connected member
+    never reads as stale and a vanished one does after the stale threshold.
+    """
+
+    async def heartbeat(self, user_id: str, room_id: str) -> None: ...
+
+
 # How long a revoked credential can keep an already-open socket: the send loop
 # re-reads the token row on this cadence, so an operator's revocation reaches a
 # live connection without any channel into the server process.
@@ -96,6 +105,7 @@ async def websocket_endpoint(
     events: EventSource,
     allowed_origins: Sequence[str] = (),
     session_cookie: str | None = None,
+    presence: PresenceHeartbeat | None = None,
 ) -> None:
     """Handle a WebSocket connection for realtime room updates.
 
@@ -139,6 +149,8 @@ async def websocket_endpoint(
     await websocket.accept(subprotocol=accepted_protocol)
 
     sub = await hub.subscribe(room_id, user_id)
+    if presence is not None:
+        await presence.heartbeat(user_id, room_id)
     # Every subscription this socket holds, keyed by room. The primary and
     # every extra room share `sub.queue`, so one send_loop below delivers
     # events from all of them, and every exit path can release exactly the
@@ -203,6 +215,8 @@ async def websocket_endpoint(
                 for subscribed_room in await hub.get_user_rooms(user_id):
                     try:
                         await authorization.require(subscribed_room, user_id, RoomCapability.READ)
+                        if presence is not None:
+                            await presence.heartbeat(user_id, subscribed_room)
                     except AuthorizationError:
                         await hub.revoke_room_access(user_id, subscribed_room)
                     except Exception:

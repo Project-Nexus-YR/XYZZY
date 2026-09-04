@@ -155,6 +155,7 @@ from ..harness import (
     StopReason,
 )
 from ..harness.adapters import MODEL_PROVIDER_HARNESS_ID
+from ..metrics import Metrics
 from ..model_providers import ModelProviderError
 from ..nexus_bridge.agent_bridge import NexusAgentBridge
 from ..realtime.hub import RealtimeHub
@@ -438,12 +439,14 @@ class MultiplayerService:
         hub: RealtimeHub,
         known_users: frozenset[str] | None = None,
         presence_redis: Any | None = None,
+        metrics: Metrics | None = None,
         nexus: NexusAgentBridge | None = None,
     ) -> None:
         self.db = db
         self.repos = Repos(db)
         self.hub = hub
         self.presence = PresenceService(redis_client=presence_redis)
+        self.metrics = metrics
         self.nexus = nexus if nexus is not None else NexusAgentBridge(db_path=":memory:")
         self.authorization = RoomPolicy(self.repos)
         # Principals the server authenticates; an invitation must name one of them
@@ -468,6 +471,14 @@ class MultiplayerService:
         # reads it. False here is the safe default: a backfill that has not
         # been told this is the migration's first boot must not touch anything.
         self._event_chain_migration_is_new = False
+
+    def _record_model_tokens(self, payload: dict[str, Any]) -> None:
+        """Count what a provider said it spent; a missing or odd value counts nothing."""
+        if self.metrics is None:
+            return
+        tokens = payload.get("token_usage", 0)
+        if isinstance(tokens, int):
+            self.metrics.record_model_tokens(tokens)
 
     async def initialize(self) -> None:
         await self._apply_migrations(Path(__file__).parent.parent / "migrations")
@@ -3875,6 +3886,7 @@ class MultiplayerService:
             result: dict[str, Any] = {"status": "error", "error": str(exc)}
         else:
             result = dict(turn.output)
+            self._record_model_tokens(result)
             # The NEXUS harness carries provenance inside the turn output; the model
             # provider harness returns it in the TurnResult's own field, and the reader
             # below looks only in the output. Without this an agent on that harness
@@ -4533,6 +4545,7 @@ class MultiplayerService:
         spec: SynthesisSpec,
     ) -> tuple[Artifact, ArtifactVersion]:
         branch_id = branch.branch_id
+        self._record_model_tokens(model_result)
         document_value = model_result.get("document")
         if not isinstance(document_value, dict):
             raise DomainError("model provider returned invalid synthesis document")
@@ -8618,12 +8631,13 @@ class MultiplayerService:
         after = max(0, after_sequence)
         events: list[RoomEvent] = []
         while len(events) < capped_limit:
-            page = await self.repos.events.list_since(room_id, after)
+            page_size = min(500, capped_limit - len(events))
+            page = await self.repos.events.list_since(room_id, after, limit=page_size)
             if not page:
                 break
             events.extend(page)
             after = page[-1].sequence
-            if len(page) < 500:
+            if len(page) < page_size:
                 break
         return events[:capped_limit]
 
@@ -8662,7 +8676,7 @@ class MultiplayerService:
                 )
             after_sequence = int(page[-1]["sequence"])
         sequence_counter = await self.repos.events.get_sequence_counter(room_id)
-        _, breaks = await verify_event_chain(self.db)
+        _, breaks = await verify_event_chain(self.db, room_id=room_id)
         # A break already covers a divergent hash or a missing sequence; it does not
         # cover this reader stopping early. verify_event_chain makes exactly this
         # comparison for its own break detection (log end vs. room counter) — the
