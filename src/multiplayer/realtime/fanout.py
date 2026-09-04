@@ -1,11 +1,14 @@
 """Redis fan-out: best-effort cross-process transport for the realtime hub.
 
 Redis pub/sub is at-most-once transport BY CONTRACT. That is acceptable
-precisely because XYZZY events carry per-room sequence numbers and the client
-already reconciles gaps against the room event log, which is the single
-source of truth (see `list_since` / the reconnect path). This module only
-shortens latency between processes; it never becomes a delivery guarantee,
-and local delivery in RealtimeHub never waits on it.
+because XYZZY events carry per-room sequence numbers and the client's own
+socket module (see web/js/socket.js) checks continuity on every delivered
+room_event: a sequence that is not the last one plus one is a gap, healed by
+one resync (a fresh HTTP snapshot from the room event log, the single source
+of truth) and reported to the server as a `resync_request`, which the hub
+counts (see `RealtimeHub.record_sequence_gap`). This module only shortens
+latency between processes; it never becomes a delivery guarantee, and local
+delivery in RealtimeHub never waits on it.
 
 Nothing in this file imports the `redis` package: the caller (server.py)
 builds the async redis client and passes it in, so importing this module
@@ -94,10 +97,12 @@ class RedisFanout:
     async def _subscribe_forever(self) -> None:
         """Reconnect with capped exponential backoff and full jitter, forever.
 
-        A reconnect triggers nothing else — no resync request, no replay
-        request. The room event log is the resync; a client that missed
-        anything during the gap recovers it on its own reconnect, not because
-        this loop asked anyone to resend.
+        A reconnect here triggers nothing on its own: whatever was published
+        while this loop was down or backing off is simply gone, by contract
+        (see the module docstring). Nothing recovers it proactively; a
+        socket on this process notices only if its own client-side
+        continuity check catches the resulting gap on its next live event
+        and asks to resync, same as any other dropped publish.
         """
         attempt = 0
         while True:

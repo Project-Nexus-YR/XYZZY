@@ -43,6 +43,13 @@ class RealtimeSubscription:
     # Set the first time this subscription's queue overflows, so the warning
     # below fires once per connection instead of once per dropped event.
     overflow_warned: bool = False
+    # High-water mark per room this subscription's backfill replayed
+    # through (see websocket.py's subscribe-time backfill): a live event at
+    # or below the mark for its room is a duplicate the backfill already
+    # sent, one above it is not. One int per subscribed room rather than a
+    # set of every replayed event_id, so a socket's own state stays O(rooms
+    # subscribed) instead of O(events in a room's backlog).
+    backfilled_through: dict[str, int] = field(default_factory=dict)
 
 
 def room_event_payload(room_event: RoomEvent) -> dict[str, Any]:
@@ -55,6 +62,7 @@ def room_event_payload(room_event: RoomEvent) -> dict[str, Any]:
         "type": "room_event",
         "event_type": room_event.event_type.value,
         "sequence": room_event.sequence,
+        "room_id": room_event.room_id,
         "payload": room_event.payload,
         "actor_id": room_event.actor_id,
         "actor_type": room_event.actor_type,
@@ -84,6 +92,24 @@ class RealtimeHub:
         # still handled, just not counted: the /metrics gauge is optional
         # instrumentation, not a precondition for correct delivery.
         self._metrics = metrics
+
+    def record_sequence_gap(self) -> None:
+        """Count a sequence gap a client detected on a live socket (see
+        websocket.py's `resync_request` handling) and asked to resync from.
+        `multiplayer.metrics.Metrics.record_sequence_gap` renders it as
+        `xyzzy_sequence_gaps_total` on `/metrics`.
+
+        `record_sequence_gap` is deliberately not on `HubMetrics` above:
+        adding it there would require every caller's metrics object to
+        implement it, including any test double that only ever exercised
+        `record_subscriber_queue_overflow`. The `getattr` fallback below is
+        the same one `_handle_queue_overflow` already relies on for a hub
+        with no metrics wired at all, kept here so a partial metrics stub
+        stays a silent no-op instead of an `AttributeError`.
+        """
+        record = getattr(self._metrics, "record_sequence_gap", None)
+        if callable(record):
+            record()
 
     def attach_fanout(self, fanout: FanoutPublisher) -> None:
         """Wire a fan-out layer in after construction.
@@ -127,6 +153,15 @@ class RealtimeHub:
             if sub:
                 self._room_subscriptions[sub.room_id].discard(subscription_id)
 
+    async def get_subscription(self, subscription_id: str) -> RealtimeSubscription | None:
+        """Look up a live subscription by id, e.g. to inspect its own state
+        (`backfilled_through`, `queue`) rather than the hub's aggregate
+        counters. The "connected" frame a socket receives on open carries
+        exactly this id.
+        """
+        async with self._lock:
+            return self._subscriptions.get(subscription_id)
+
     async def revoke_room_access(self, user_id: str, room_id: str, *, publish: bool = True) -> int:
         """Drop a user's live subscriptions to a room and tell each socket to close.
 
@@ -147,7 +182,16 @@ class RealtimeHub:
             try:
                 sub.queue.put_nowait({"type": "access_revoked", "room_id": room_id})
             except asyncio.QueueFull:
-                log.debug("Queue full for revoked subscription %s", sub.subscription_id)
+                # A full queue almost always already carries a resync
+                # marker from broadcast_to_room's own overflow handling,
+                # which closes the socket anyway — but "almost always" is
+                # not "always", and a revoked member's socket must not be
+                # the one case left open with nobody ever telling it.
+                # Evicting the oldest entry for the same marker
+                # `_handle_queue_overflow` already uses is what makes this
+                # path force the reconnect that access_revoked itself
+                # otherwise would have.
+                self._handle_queue_overflow(sub)
         if publish and self._fanout is not None:
             # Published unconditionally, even when nothing was revoked locally:
             # the whole point is telling OTHER processes, which may hold the
@@ -228,12 +272,20 @@ class RealtimeHub:
         delivered = False
         async with self._lock:
             for sub in list(self._subscriptions.values()):
-                if sub.user_id == user_id and not sub.queue.full():
-                    try:
-                        sub.queue.put_nowait(event)
-                        delivered = True
-                    except asyncio.QueueFull:
-                        pass
+                if sub.user_id == user_id:
+                    if not sub.queue.full():
+                        try:
+                            sub.queue.put_nowait(event)
+                            delivered = True
+                            continue
+                        except asyncio.QueueFull:
+                            pass
+                    # Full: silently skipping used to drop room_invited/
+                    # room_removed sidebar notifications without a trace.
+                    # Forcing the same resync marker every other overflow
+                    # path uses is what makes this socket notice it fell
+                    # behind instead of just missing this one event.
+                    self._handle_queue_overflow(sub)
         if publish and self._fanout is not None:
             await self._fanout.publish({"kind": "send_to_user", "user_id": user_id, "event": event})
         return delivered

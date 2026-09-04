@@ -443,7 +443,11 @@ def test_removal_revokes_reads_and_closes_the_live_subscription() -> None:
             == 403
         )
         try:
-            with client.websocket_connect(f"/ws?room_id={room_id}", headers=ALEX):
+            with client.websocket_connect(f"/ws?room_id={room_id}", headers=ALEX) as ws:
+                # Accepted, then closed with the code (see realtime/websocket.py):
+                # the rejection now only surfaces on the first receive, not at
+                # connect time, since a close code cannot exist before an accept.
+                ws.receive_json()
                 raise AssertionError("removed member reconnected")
         except WebSocketDisconnect as exc:
             assert exc.code == 4403

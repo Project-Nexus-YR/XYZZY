@@ -33,23 +33,35 @@ class EventSource(Protocol):
     """
 
     async def get_room_events(
-        self, room_id: str, after_sequence: int = 0
+        self, room_id: str, after_sequence: int = 0, limit: int = 500
     ) -> Sequence[RoomEvent]: ...
 
 
 class PresenceHeartbeat(Protocol):
-    """What the socket tells presence: this member is still here. Called once
-    on subscribe and again on every revalidation tick, so a connected member
-    never reads as stale and a vanished one does after the stale threshold.
+    """What the socket tells presence: who is here, and that they still are.
+
+    A socket is presence's own signal, not merely a refresher of a row `POST
+    /join` created: `user_joined` fires once, on subscribe, `heartbeat` on
+    every revalidation tick so a connected member never reads as stale, and
+    `user_left` when this socket was the last one keeping that (user, room)
+    pair present.
     """
 
     async def heartbeat(self, user_id: str, room_id: str) -> None: ...
+    async def user_joined(self, user_id: str, room_id: str) -> object: ...
+    async def user_left(self, user_id: str, room_id: str) -> None: ...
 
 
 # How long a revoked credential can keep an already-open socket: the send loop
 # re-reads the token row on this cadence, so an operator's revocation reaches a
 # live connection without any channel into the server process.
 REAUTH_SECONDS = 30.0
+
+# The repository's own page size (see MultiplayerService.get_room_events),
+# used to page the subscribe-time backfill to completion instead of trusting
+# any single call's cap: a page shorter than this is the only signal that a
+# reconnecting caller reached the head of the room's history.
+_BACKFILL_PAGE_SIZE = 500
 
 
 def _websocket_authorization(
@@ -121,18 +133,39 @@ async def websocket_endpoint(
     """
     room_id = websocket.query_params.get("room_id", "").strip()
 
-    if not room_id:
-        await websocket.close(code=4400, reason="room_id required")
-        return
-
     raw_cursor = websocket.query_params.get("last_sequence")
     replay_cursor: int | None = None
-    if raw_cursor is not None and raw_cursor.strip().isdigit():
-        replay_cursor = int(raw_cursor.strip())
+    cursor_error = False
+    if raw_cursor is not None:
+        try:
+            replay_cursor = int(raw_cursor.strip())
+        except ValueError:
+            cursor_error = True
+        else:
+            if replay_cursor < 0:
+                cursor_error = True
+                replay_cursor = None
 
     websocket_authorization, accepted_protocol = _websocket_authorization(
         websocket, allowed_origins, session_cookie
     )
+
+    # Accepted before any of the checks below can reject: a WebSocket
+    # handshake rejected pre-accept surfaces to a real browser as a bare
+    # HTTP 403 (`onclose` code 1006, no reason), never as the 4400/4401/4403
+    # code below. Accepting first and then closing with that code is what
+    # lets a real client branch on it, same as it already could through
+    # Starlette's TestClient. Nothing about room state is sent in between.
+    await websocket.accept(subprotocol=accepted_protocol)
+
+    if not room_id:
+        await websocket.close(code=4400, reason="room_id required")
+        return
+
+    if cursor_error:
+        await websocket.close(code=4400, reason="last_sequence must be a non-negative integer")
+        return
+
     try:
         principal = await authenticator.authenticate(websocket_authorization)
     except AuthenticationError:
@@ -146,11 +179,10 @@ async def websocket_endpoint(
         return
 
     user_id = principal.user_id
-    await websocket.accept(subprotocol=accepted_protocol)
 
     sub = await hub.subscribe(room_id, user_id)
     if presence is not None:
-        await presence.heartbeat(user_id, room_id)
+        await presence.user_joined(user_id, room_id)
     # Every subscription this socket holds, keyed by room. The primary and
     # every extra room share `sub.queue`, so one send_loop below delivers
     # events from all of them, and every exit path can release exactly the
@@ -166,19 +198,39 @@ async def websocket_endpoint(
         }
     )
 
-    # Every event this backfill already put on the wire, tracked by its
-    # globally unique event_id rather than its (per-room) sequence: this
-    # socket may end up sharing its queue with another room's subscription,
-    # whose sequence numbers live in their own, unrelated namespace.
-    replayed_event_ids: set[str] = set()
     if replay_cursor is not None:
         # Subscribed above, before this read: nothing committed from here
         # on can be missed by both the backfill and live delivery at once,
-        # only double caught by both, which replayed_event_ids dedupes.
-        for room_event in await events.get_room_events(room_id, replay_cursor):
-            payload = room_event_payload(room_event)
-            replayed_event_ids.add(payload["event_id"])
-            await websocket.send_json(payload)
+        # only double caught by both. `sub.backfilled_through[room_id]`
+        # (a high-water mark, not a per-event record) is what dedupes that:
+        # a room's sequence is strictly increasing, so a live event whose
+        # sequence is at or below the last one this backfill sent is
+        # provably a duplicate, and anything above it is provably live.
+        # This used to be a `set[str]` of every replayed event_id, which
+        # made a socket's own state grow with the room's backlog rather
+        # than the room's fan-out (0.9-12 MB per socket for a 5k-100k event
+        # backlog) — the high-water mark is one int per subscribed room.
+        #
+        # get_room_events itself caps at _ROOM_EVENTS_MAX_LIMIT (5000): a
+        # room with more history than that past the cursor used to have the
+        # remainder silently dropped, with live delivery resuming at head
+        # and no marker of the hole in between. Paging on the repository's
+        # own 500-row page here, past that cap, is what makes the replay
+        # actually gapless for a room of any size: each page's own last
+        # sequence becomes the next page's cursor, and a short page (fewer
+        # rows than asked for) is the only signal that the caller is caught
+        # up, since a room's own event stream never gaps on its own.
+        cursor = replay_cursor
+        while True:
+            page = await events.get_room_events(room_id, cursor, limit=_BACKFILL_PAGE_SIZE)
+            if not page:
+                break
+            for room_event in page:
+                await websocket.send_json(room_event_payload(room_event))
+            cursor = page[-1].sequence
+            if len(page) < _BACKFILL_PAGE_SIZE:
+                break
+        sub.backfilled_through[room_id] = cursor
 
     async def send_loop() -> None:
         """Read from subscription queue and send to WebSocket.
@@ -239,9 +291,15 @@ async def websocket_endpoint(
                     # fetches a fresh snapshot instead of diverging silently.
                     await websocket.close(code=4408, reason="resync required")
                     return
-                event_id = event.get("event_id")
-                if event_id is not None and event_id in replayed_event_ids:
-                    # Already sent during the subscribe backfill above.
+                event_room = event.get("room_id")
+                event_sequence = event.get("sequence")
+                if (
+                    event_room is not None
+                    and event_sequence is not None
+                    and event_sequence <= sub.backfilled_through.get(event_room, -1)
+                ):
+                    # At or below the backfill's own high-water mark for this
+                    # room: already sent during the subscribe backfill above.
                     continue
                 await websocket.send_json(event)
             except TimeoutError:
@@ -305,6 +363,16 @@ async def websocket_endpoint(
                             "room_id": extra_room,
                         }
                     )
+            elif msg_type == "resync_request":
+                # The client's own sequence-continuity check (see
+                # connectWS/handleRealtimeEvent in web/js/socket.js) found a
+                # gap it cannot fill from what this socket already told it,
+                # and is already about to reload its own snapshot over
+                # HTTP. All the server needs to do is count it, not resend
+                # anything: cross-process fan-out (see fanout.py) is a
+                # best-effort transport by contract, and this is that
+                # contract's detection signal.
+                hub.record_sequence_gap()
             else:
                 await websocket.send_json(
                     {
@@ -328,5 +396,13 @@ async def websocket_endpoint(
             await send_task
         except asyncio.CancelledError:
             pass
-        for held_sub in subs_by_room.values():
+        for held_room, held_sub in subs_by_room.items():
             await hub.unsubscribe(held_sub.subscription_id)
+            if presence is not None:
+                # Only the last socket keeping this (user, room) pair
+                # subscribed marks them offline: two tabs, or a primary
+                # room plus an extra `subscribe`, must not flap presence
+                # every time either one alone disconnects.
+                remaining = await hub.get_subscriptions_for_user_room(user_id, held_room)
+                if not remaining:
+                    await presence.user_left(user_id, held_room)

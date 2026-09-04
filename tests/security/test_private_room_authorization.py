@@ -112,7 +112,11 @@ def test_private_room_denies_outsider_and_viewer_mutations_without_side_effects(
             assert response.status_code == 403, path
 
         try:
-            with client.websocket_connect(f"/ws?room_id={room_id}", headers=OUTSIDER_HEADERS):
+            with client.websocket_connect(f"/ws?room_id={room_id}", headers=OUTSIDER_HEADERS) as ws:
+                # Accepted, then closed with the code (see realtime/websocket.py):
+                # the rejection now only surfaces on the first receive, not at
+                # connect time, since a close code cannot exist before an accept.
+                ws.receive_json()
                 raise AssertionError("outsider websocket unexpectedly connected")
         except WebSocketDisconnect as exc:
             assert exc.code == 4403

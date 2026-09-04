@@ -366,6 +366,24 @@ export function handleRealtimeEvent(msg) {
   }
   if (msg.type === 'room_event') {
     if (state.loadStatePromise) state.pendingEventsDuringLoad.push(msg);
+    // Sequence continuity: the server stamps every room_event with its
+    // room's own sequence, so a delivered sequence that is not the last
+    // one seen plus one is a gap this socket cannot fill on its own — the
+    // cross-process fan-out is best-effort by contract (see
+    // realtime/fanout.py). One resync per gap (guarded by
+    // resyncRequested, cleared once the fresh snapshot lands) asks the
+    // server to note it was detected, then reloads state from the room
+    // event log, the single source of truth, rather than leaving a hole
+    // nothing heals until an unrelated reconnect.
+    if (msg.room_id === state.roomId && state.lastSequence && msg.sequence > state.lastSequence + 1
+        && !state.resyncRequested) {
+      state.resyncRequested = true;
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({type: 'resync_request', room_id: state.roomId,
+                                       expected: state.lastSequence + 1, got: msg.sequence}));
+      }
+      loadState().finally(() => { state.resyncRequested = false; });
+    }
     state.lastSequence = Math.max(state.lastSequence, msg.sequence || 0);
     logEvent(msg);
     switch(msg.event_type) {

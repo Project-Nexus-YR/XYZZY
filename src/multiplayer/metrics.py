@@ -30,6 +30,7 @@ class Metrics:
         self._model_tokens_total = 0
         self._redis_publish_failures_total = 0
         self._subscriber_queue_overflows_total = 0
+        self._sequence_gaps_total = 0
         self._websocket_connections = 0
         self._request_seconds_bucket_counts: dict[float, int] = dict.fromkeys(_LATENCY_BUCKETS, 0)
         self._request_seconds_sum = 0.0
@@ -54,6 +55,18 @@ class Metrics:
 
     def record_subscriber_queue_overflow(self) -> None:
         self._subscriber_queue_overflows_total += 1
+
+    def record_sequence_gap(self) -> None:
+        """A client's socket (see realtime/websocket.py's `resync_request`
+        handling) found a delivered sequence was not the last one it saw
+        plus one and asked to resync — most often a cross-process fan-out
+        drop (realtime/fanout.py is at-most-once by contract), occasionally
+        the local hub's own queue overflow. Distinct from
+        `record_subscriber_queue_overflow`: that counts drops this process
+        caused for a queue it owns; this counts gaps a client actually
+        observed, wherever the missing event was lost.
+        """
+        self._sequence_gaps_total += 1
 
     def set_websocket_connections(self, count: int) -> None:
         self._websocket_connections = count
@@ -100,6 +113,10 @@ class Metrics:
             "Realtime events dropped because a subscriber's queue was full.",
             "# TYPE xyzzy_subscriber_queue_overflows_total counter",
             f"xyzzy_subscriber_queue_overflows_total {self._subscriber_queue_overflows_total}",
+            "# HELP xyzzy_sequence_gaps_total "
+            "Sequence gaps a client's socket detected on live delivery and asked to resync from.",
+            "# TYPE xyzzy_sequence_gaps_total counter",
+            f"xyzzy_sequence_gaps_total {self._sequence_gaps_total}",
             "# HELP xyzzy_build_info Build metadata; the value is always 1.",
             "# TYPE xyzzy_build_info gauge",
             f'xyzzy_build_info{{version="{self._version}"}} 1',
