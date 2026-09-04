@@ -21,6 +21,7 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy src
+      - run: python scripts/check_anchors.py
       - run: pip install pip-audit && pip-audit -r constraints.txt
       - run: pytest
 
