@@ -281,6 +281,8 @@ deployment that terminates TLS in front of the server needs the first three.
 | `XYZZY_PORT` | `8000` | Port to bind. |
 | `XYZZY_CORS_ORIGINS` | the two loopback origins | Comma-separated browser origins allowed to call the API. `*` is refused: paired with credentials it would let any site spend a signed-in session. |
 | `XYZZY_RATE_LIMIT_PER_MINUTE` | `120` | Requests per minute per bearer token, or per peer address when there is no token. `/api/v1/health` is exempt so a monitor cannot spend a client's budget. |
+| `XYZZY_MODEL_MAX_OUTPUT_TOKENS` | `4096` | Cap on the tokens one model call may generate (`max_output_tokens` on the Responses API, `max_tokens` on Chat Completions). |
+| `XYZZY_RUN_TOKEN_BUDGET` | `500000` | Ceiling on the tokens one run may spend across all of its steps; the run settles `MAX_TOKENS` before the step that would exceed it. `0` or a negative value disables the ceiling. |
 | `XYZZY_MAX_BODY_BYTES` | `1048576` | Largest declared request body. A chunked request declares no length, so this caps the honest case only. |
 | `XYZZY_MAX_ATTACHMENT_BYTES` | `5242880` | Largest file attachment upload; the body-cap middleware exempts exactly the upload route so this limit governs instead. |
 | `XYZZY_LOG_LEVEL` | `INFO` | Root log level. |
@@ -359,6 +361,11 @@ Verify a backup the same way you verify the live file, with `audit verify`
 against the copy. Restoring is copying the backup into place while the server
 is stopped; the `-wal` and `-shm` files belong to the live database and must
 not be copied alongside it.
+
+The read-only verbs (`db backup`, `token list`, `audit verify`) open the
+database without migrating it and refuse, naming the missing migration, when
+the schema is behind the checkout, so a backup taken before an upgrade is a
+pre-upgrade snapshot. Only the server and `db migrate` apply migrations.
 
 ### Erasing a user
 

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- A redacted row binds its own header: the redaction record snapshots the
+  event's type, actor, timestamp and sequence, the chained `EVENT_REDACTED`
+  event carries that snapshot's hash and the original event hash, and the
+  verifier checks all three, so a marker row can no longer be rewritten
+  unnoticed. Append-only triggers on the event, sequence and redaction
+  tables refuse plain edits, `messages.content` refuses an update outside
+  the redaction path, and `user erase` records which operator ran it.
+- The image publish job runs only for a push to this repository's own
+  `main`; a fork's pull request from a branch of that name can no longer
+  publish `:latest` with the repository's write token.
+- An approval decided on another process, or after a restart, no longer
+  runs the tool and then fails the turn; the deciding process rehydrates the
+  run and continues it, and a steer is consumed only by the step that
+  prompts with it.
 - A stored cross-site script in the Agents panel is closed. The Remove
   button built its click handler as JavaScript inside an HTML attribute, and
   the quote escape ran after the HTML escape, so an agent name chosen by an
@@ -39,6 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Two processes booting one database with pending migrations no longer
+  lose one of them: the migration pass runs under a single write lock and a
+  failed open closes its connection so the process exits. A schema the
+  checkout does not know refuses startup and names the release. The lease
+  sweep settles a run only against the lease value it read, so a heartbeat
+  between the read and the write keeps the run alive.
+- The read-only CLI verbs (`db backup`, `token list`, `audit verify`) no
+  longer migrate the live database; `db migrate` does, on purpose.
 - A second `POST /step` against a run already holding at a reviewer is
   refused instead of re-prompting the model and settling the run behind the
   pending approval. The turn entrance is a compare-and-swap on the run's
@@ -88,6 +110,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `XYZZY_MODEL_MAX_OUTPUT_TOKENS` caps one model call and
+  `XYZZY_RUN_TOKEN_BUDGET` caps a run; a run that would exceed its budget
+  settles `MAX_TOKENS` with a recorded reason. NEXUS mode runs its provider
+  off the event loop and carries token usage and the response id.
+- Workspace members can be removed, by an admin through the service and by
+  the operator with `manage.py workspace remove-member`, with an event.
 - `python -m multiplayer.manage <db> db backup <dest>` writes a consistent
   snapshot through `VACUUM INTO`, and the README explains why a file copy of
   a WAL database is not a backup.
