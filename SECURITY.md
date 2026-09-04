@@ -2,12 +2,12 @@
 
 ## Supported Versions
 
-XYZZY is pre-1.0. The `0.3.x` line is the only one that receives fixes.
+XYZZY is pre-1.0. The `0.4.x` line is the only one that receives fixes.
 
 | Version | Supported |
 | --- | --- |
-| 0.3.x | yes |
-| < 0.3 | no |
+| 0.4.x | yes |
+| < 0.4 | no |
 
 ## Reporting a Vulnerability
 
@@ -93,6 +93,26 @@ then wraps it in a per-call delimiter that names its source, so the model
 sees it labeled as data from a specific origin rather than as an instruction.
 This is a deterministic string transform, not a model call, so it cannot fail
 open the way a model-based classifier can.
+
+## Data Lifecycle
+
+There is no erasure command today: no CLI verb and no API route deletes a
+person's data. This is a known gap, not a policy choice, and it is the
+right question for a buyer to ask before this becomes a compliance
+dependency.
+
+The honest resolution, when built, is not a hard delete. The hash-chained
+event log (`event_chain_hash()` in `src/multiplayer/security/audit.py`)
+makes every row load-bearing for every row after it, so removing one breaks
+the chain for the whole room. The two positions in tension: a tamper-evident
+log wants nothing ever removed, and an erasure request wants a specific
+person's data gone. The resolution that keeps both is to pseudonymize the
+principal (replace the user id with an opaque token everywhere it appears)
+and tombstone the content they authored (replace message/artifact text with
+a marker while preserving the stored hash, since the hash covers the
+original bytes, not their current display) rather than deleting rows. No
+part of this is implemented: there is no `manage.py` command, no API route,
+and no tombstone column in any migration today.
 
 ## Known Gaps
 

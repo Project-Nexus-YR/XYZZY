@@ -3,8 +3,9 @@ site/assets/demo.gif, in the order the README's alt text lists them:
 entry card, General channel, an open thread, the branch view, the top of the
 Decision Brief, its evidence chain, and an Ask Meta answer.
 
-Needs the "xyzzy-demo" server (XYZZY_DEMO=1, port 8010) and Playwright with
-Chromium. Run from the repo root:
+Needs a running XYZZY demo server on port 8010
+(`XYZZY_DEMO=1 XYZZY_PORT=8010 python -m multiplayer.server`) and Playwright
+with Chromium. Run from the repo root:
 
     python scripts/capture_scenes.py [base_url]
     python scripts/build_demo_gif.py build/scenes/*.png

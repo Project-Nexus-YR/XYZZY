@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The web client's accent colour now matches the landing page's forest
+  green, so the app and the site read as one product.
+- The public landing page grew a pinned scroll stage over the three product
+  views and a proof ledger linking each claim on the page to the code and
+  test that back it, with a producer script and trace file for the demo
+  captures behind it.
+
 ## [0.4.0] - 2026-09-02
 
 ### Fixed
@@ -108,6 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open.
 - The benchmark baseline's concessions are now verified against pinned
   source commits of buzz and qm, with one claim withdrawn and two corrected.
+- `GET /metrics`: this process's own counters and gauges in Prometheus text
+  format, exempt from auth and from the rate limiter like `/health`.
 
 - The deployment settings a server needs are configuration rather than source:
   `XYZZY_HOST`, `XYZZY_PORT`, `XYZZY_CORS_ORIGINS`, `XYZZY_RATE_LIMIT_PER_MINUTE`,
@@ -315,3 +326,9 @@ Initial workspace: event-sourced rooms with WebSocket sync, conversation
 layer, five-way capability terms with a tool gateway and human approval,
 agent identity and harness protocol, room postures, decision workflow, and
 the lazy ontology with Meta answers.
+
+[Unreleased]: https://github.com/Project-Nexus-YR/XYZZY/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Project-Nexus-YR/XYZZY/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/Project-Nexus-YR/XYZZY/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/Project-Nexus-YR/XYZZY/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Project-Nexus-YR/XYZZY/releases/tag/v0.1.0

@@ -21,8 +21,8 @@ docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/project-nexus-yr/xyzzy
 ```
 
 Opens a seeded demo workspace at `http://localhost:8000`, signed in with one click. No account,
-no config. Prefer to run from source? `git clone` this repo and run `docker compose --profile
-demo up` instead (see [Docker](#docker) below for the non-demo path).
+no config. Prefer to run from source? `git clone` this repo and run `docker compose run --rm
+--service-ports demo` instead (see [Docker](#docker) below for the non-demo path).
 
 ### What the demo opens
 
@@ -62,6 +62,7 @@ Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 lice
 - **Multi-agent orchestration:** spawn, pause, resume, redirect, and delegate between agents
 - **Human-in-the-loop:** request/approve/reject agent actions before execution
 - **Artifact versioning:** create and version documents, code, and other artifacts
+- **File attachments:** upload images to a message, capped by `XYZZY_MAX_ATTACHMENT_BYTES`
 - **Selective synthesis:** explicitly include/exclude outputs and publish immutable Decision Briefs
 - **Evidence ontology:** typed, reviewable Decision → Claim → AgentOutput relationships
 - **Bounded Meta:** permission-aware “why” and decision-evidence answers with exact drill-down
@@ -89,11 +90,18 @@ Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 lice
 │  Pub/sub lock    │  AgentExecutor · Budget · Events     │
 │  Queue delivery  │  Pause/Resume/Cancel · Interventions  │
 ├──────────────────┴──────────────────────────────────────┤
+│              Security Layer (security/)                  │
+│  Capability gate · Governance boundary · Hash chain ·    │
+│  OIDC sessions · Untrusted-input screening                │
+├─────────────────────────────────────────────────────────┤
 │            Repository Layer (repositories.py)           │
 │   44 typed repos · Atomic event sequencing              │
 ├─────────────────────────────────────────────────────────┤
 │           Database Layer (connection.py)                │
 │         aiosqlite · WAL mode · Transaction support       │
+├─────────────────────────────────────────────────────────┤
+│                  metrics.py (GET /metrics)                │
+│         Process counters and gauges, Prometheus text      │
 ├─────────────────────────────────────────────────────────┤
 │                NEXUS Runtime (optional)                  │
 │    AgentExecutor · ModelProvider · PolicyEngine          │
@@ -105,17 +113,22 @@ Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 lice
 
 ```
 src/multiplayer/
-├── domain/        # models.py, events.py: frozen dataclasses, RoomEvent/OrgEvent
-├── db/            # connection.py, repositories.py: 44 typed repository classes
-├── migrations/    # numbered *.sql, applied in order at startup
-├── services/      # service.py, presence.py: state machines, presence tracking
-├── nexus_bridge/  # agent_bridge.py: NEXUS runtime adapter
-├── realtime/      # hub.py, websocket.py: pub/sub, WebSocket endpoint
-├── api/           # routes.py: REST endpoints
-└── server.py      # Uvicorn entry point with lifespan
+├── domain/          # models.py, events.py: frozen dataclasses, RoomEvent/OrgEvent
+├── db/              # connection.py, repositories.py: 44 typed repository classes
+├── migrations/      # numbered *.sql, applied in order at startup
+├── services/        # service.py, presence.py: state machines, presence tracking
+├── security/        # capabilities.py, boundary.py, audit.py, oidc.py, sessions.py: capability gate, governance boundary, hash chain, OIDC, screening
+├── harness/         # protocol.py, adapters.py: agent harness protocol
+├── model_providers/ # openai_responses.py, openai_chat_completions.py: model provider adapters
+├── nexus_bridge/    # agent_bridge.py: NEXUS runtime adapter
+├── realtime/        # hub.py, websocket.py, fanout.py: pub/sub, WebSocket endpoint, cross-process fan-out
+├── api/             # routes.py, a2a.py, share_page.py: REST endpoints, A2A wire surface, public share pages
+├── manage.py        # operator CLI: user/token management, audit verify
+├── metrics.py       # process counters and gauges served at GET /metrics
+└── server.py        # Uvicorn entry point with lifespan
 web/
-└── index.html     # Single-page workspace UI
-tests/             # unit, integration, concurrency, security, failure, regression
+└── index.html       # Single-page workspace UI
+tests/               # unit, integration, concurrency, security, failure, regression, e2e, model_providers, performance
 ```
 
 ## How It Uses NEXUS
@@ -126,6 +139,11 @@ XYZZY includes an optional integration with [NEXUS](https://github.com/Project-N
 - **Budget** enforces token limits, wall time, and tool call limits
 - **PolicyEngine** gates tool access per agent and room
 - **StateStore** persists agent state for checkpoint/restart
+
+Set `XYZZY_NEXUS_PATH` to the absolute path of a NEXUS checkout to enable
+these capabilities; the bridge imports NEXUS from that path. Leave it unset
+and the bridge runs the configured model provider directly, with none of the
+above.
 
 When NEXUS is unavailable, the bridge runs the configured model provider directly. With an
 `OPENAI_API_KEY`, specialists use the OpenAI Responses API. Without a credential, XYZZY emits a
@@ -167,9 +185,12 @@ resolves to an arm64 wheel.
 
 ## Running
 
-Every route below `/api/v1` needs a bearer token; `/api/v1/health` is the
-exception. Without `OPENAI_API_KEY` the server runs a credential-free
-simulator, which is enough for the whole workflow.
+Every route below `/api/v1` needs a bearer token except `/api/v1/health` and
+the pre-credential OIDC endpoints (`/auth/config`, `/auth/login`,
+`/auth/callback`, `/auth/refresh`, `/auth/backchannel-logout`,
+`/auth/frontchannel-logout`); see [docs/SSO.md](docs/SSO.md). Without
+`OPENAI_API_KEY` the server runs a credential-free simulator, which is enough
+for the whole workflow.
 
 Credentials live in the database, hashed, one row per token, revocable
 without a restart. `XYZZY_AUTH_TOKENS` is bootstrap only: its tokens are
@@ -249,8 +270,10 @@ deployment that terminates TLS in front of the server needs the first three.
 | `XYZZY_CORS_ORIGINS` | the two loopback origins | Comma-separated browser origins allowed to call the API. `*` is refused: paired with credentials it would let any site spend a signed-in session. |
 | `XYZZY_RATE_LIMIT_PER_MINUTE` | `120` | Requests per minute per bearer token, or per peer address when there is no token. `/api/v1/health` is exempt so a monitor cannot spend a client's budget. |
 | `XYZZY_MAX_BODY_BYTES` | `1048576` | Largest declared request body. A chunked request declares no length, so this caps the honest case only. |
+| `XYZZY_MAX_ATTACHMENT_BYTES` | `5242880` | Largest file attachment upload; the body-cap middleware exempts exactly the upload route so this limit governs instead. |
 | `XYZZY_LOG_LEVEL` | `INFO` | Root log level. |
 | `XYZZY_REDIS_URL` | unset | Fans room events, session revocations, and presence out across several server processes sharing one database; see [Scaling out](#scaling-out). |
+| `XYZZY_NEXUS_PATH` | unset | Absolute path to a [NEXUS](https://github.com/Project-Nexus-YR/NEXUS) checkout. Unset, the bridge runs the configured model provider directly; see [How It Uses NEXUS](#how-it-uses-nexus). |
 
 The rate limiter counts in process memory. It bounds one server's exposure, not a
 fleet's; two replicas behind a load balancer each allow the full budget.
@@ -301,7 +324,7 @@ docker build -t xyzzy .
 docker run -p 8000:8000 -v xyzzy-data:/data -e XYZZY_AUTH_TOKENS='{"local-dev-token":"user_local"}' xyzzy
 ```
 
-No account, no config, nothing to try alone: `docker compose --profile demo up` (or
+No account, no config, nothing to try alone: `docker compose run --rm --service-ports demo` (or
 `docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/project-nexus-yr/xyzzy`, the published image;
 see [Try it](#try-it) above) opens a seeded demo workspace at http://localhost:8000, signed in
 with one click.
@@ -340,7 +363,7 @@ The suite covers:
 
 One process is the default and the recommendation until a real deployment
 outgrows it. When one does, set `XYZZY_REDIS_URL` (install with
-`pip install "xyzzy[redis]"`) and run several server processes against the
+`pip install -e ".[redis]"`) and run several server processes against the
 same database file: room events, session revocations, and user notifications
 fan out across processes through Redis pub/sub, and presence stays correct
 cluster-wide through keys that expire on silence. Redis carries no state

@@ -7,9 +7,9 @@
   branch-card-dark.png / -light.png (+@2x)                 the floating layer, cropped
   view-branch-*.png, view-brief-*.png (+@2x)              the other two tabs of the stack
 
-Requires a running XYZZY demo server (the "xyzzy-demo" entry in
-.claude/launch.json, or `XYZZY_DEMO=1 python -m multiplayer.server`) so the
-entry card's "Explore the demo workspace" link enters the seeded room, and
+Requires a running XYZZY demo server on port 8010
+(`XYZZY_DEMO=1 XYZZY_PORT=8010 python -m multiplayer.server`) so the entry
+card's "Explore the demo workspace" link enters the seeded room, and
 Playwright with its Chromium browser installed:
 
     pip install playwright pillow

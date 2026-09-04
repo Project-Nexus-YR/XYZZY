@@ -85,10 +85,12 @@ line: what the API already supports, and why the UI still waits.
 
 ## Asked and answered 2026-08-30 (owner roadmap questions)
 
-- **File upload / binary artifacts.** Not built: artifacts are versioned text in
-  SQLite, no upload endpoint exists, and the body cap is 1MB. Needs its own
-  design pass - storage, content screening for the model path, download
-  authorization - before any UI.
+- **File upload / binary artifacts.** Answered at the time: not built, no
+  upload endpoint existed. Since shipped (migration 039, v0.3.0): multipart
+  upload of images capped by `XYZZY_MAX_ATTACHMENT_BYTES`, bound to a message,
+  served nosniff and filename-sanitized. Artifacts themselves remain
+  versioned text; a client surface for attachments is tracked under
+  "Launch-round server features with no client surface yet" below.
 - **Room templates / quickstart configurations.** Not built; only agent
   templates exist, list-only. The near-term slice: a room template as name +
   description + preselected specialists, offered at channel creation. Best

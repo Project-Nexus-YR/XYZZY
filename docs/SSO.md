@@ -16,6 +16,7 @@ untouched.
 | `XYZZY_SESSION_ABSOLUTE_SECONDS` | Absolute ceiling, 36000 by default (Keycloak's). |
 | `XYZZY_SESSION_ACCESS_SECONDS` | How long one access credential lives before it must be refreshed, 300 by default (Keycloak's). |
 | `XYZZY_OIDC_ALLOW_UNVERIFIABLE_SESSIONS` | Accept a login from a provider that issues no refresh token. Off by default, because such a session can never be re-checked; when on, it is capped at 15 minutes. |
+| `XYZZY_OIDC_PROVIDER_LABEL` | The provider name shown on the sign-in button. `single sign-on` by default. |
 
 `GET /api/v1/auth/login` starts the flow, `GET /api/v1/auth/callback` finishes it
 and returns an access token and a refresh token, `POST /api/v1/auth/refresh`

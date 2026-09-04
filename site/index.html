@@ -611,14 +611,14 @@
           <h3>Governed</h3>
           <div>
             <p>An action that changes the room waits for a person. Task creation and artifact writes are marked as requiring approval, and nothing is written until a reviewer approves.</p>
-            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/security/capabilities.py#L248" target="_blank" rel="noopener">security/capabilities.py:248</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/security/test_model_tool_gateway.py#L240" target="_blank" rel="noopener">tests/security/test_model_tool_gateway.py:240</a></p>
+            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/security/capabilities.py#L249" target="_blank" rel="noopener">security/capabilities.py:249</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/security/test_model_tool_gateway.py#L240" target="_blank" rel="noopener">tests/security/test_model_tool_gateway.py:240</a></p>
           </div>
         </li>
         <li class="reveal" style="--d: 60ms">
           <h3>Revocable mid-task</h3>
           <div>
             <p>What an agent may do is re-read from the room at every step, never cached at the start. A grant withdrawn between two tool calls stops the second one.</p>
-            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/services/service.py#L3668" target="_blank" rel="noopener">services/service.py:3668</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/security/test_continuation_authority.py#L91" target="_blank" rel="noopener">tests/security/test_continuation_authority.py:91</a></p>
+            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/services/service.py#L3673" target="_blank" rel="noopener">services/service.py:3673</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/security/test_continuation_authority.py#L91" target="_blank" rel="noopener">tests/security/test_continuation_authority.py:91</a></p>
           </div>
         </li>
         <li class="reveal" style="--d: 120ms">
@@ -632,7 +632,7 @@
           <h3>Traceable</h3>
           <div>
             <p>A Decision Brief's claims link to the outputs that produced them. The link reads back from the published version.</p>
-            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/domain/models.py#L977" target="_blank" rel="noopener">domain/models.py:977</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/e2e/test_first_class_branches.py#L213" target="_blank" rel="noopener">tests/e2e/test_first_class_branches.py:213</a></p>
+            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/domain/models.py#L977" target="_blank" rel="noopener">domain/models.py:977</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/e2e/test_first_class_branches.py#L214" target="_blank" rel="noopener">tests/e2e/test_first_class_branches.py:214</a></p>
           </div>
         </li>
         <li class="reveal" style="--d: 240ms">
@@ -646,7 +646,7 @@
           <h3>Honest offline</h3>
           <div>
             <p>With no API key configured, every specialist output is labelled SIMULATED. The loop still runs end to end, and nothing pretends to be a model.</p>
-            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/model_providers/openai_responses.py#L323" target="_blank" rel="noopener">model_providers/openai_responses.py:323</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/regression/test_agent_outputs.py#L60" target="_blank" rel="noopener">tests/regression/test_agent_outputs.py:60</a></p>
+            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/model_providers/openai_responses.py#L326" target="_blank" rel="noopener">model_providers/openai_responses.py:326</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/regression/test_agent_outputs.py#L60" target="_blank" rel="noopener">tests/regression/test_agent_outputs.py:60</a></p>
           </div>
         </li>
       </ul>
@@ -669,7 +669,7 @@
             <pre class="code"><code id="quickstart-cmd">docker run -p 8000:8000 -e XYZZY_DEMO=1 ghcr.io/project-nexus-yr/xyzzy</code></pre>
           </div>
           <p class="after">Then open <code>http://localhost:8000</code>. One click enters a seeded workspace already mid-decision, with no account and no config.</p>
-          <p class="after">With no API key set, the specialist outputs are labelled SIMULATED; the loop is the same. From source: <code>git clone</code> the <a href="https://github.com/Project-Nexus-YR/XYZZY" target="_blank" rel="noopener">repo</a> and run <code>docker compose --profile demo up</code>, or one Python process as the <a href="https://github.com/Project-Nexus-YR/XYZZY#readme" target="_blank" rel="noopener">README</a> shows.</p>
+          <p class="after">With no API key set, the specialist outputs are labelled SIMULATED; the loop is the same. From source: <code>git clone</code> the <a href="https://github.com/Project-Nexus-YR/XYZZY" target="_blank" rel="noopener">repo</a> and run <code>docker compose run --rm --service-ports demo</code>, or one Python process as the <a href="https://github.com/Project-Nexus-YR/XYZZY#readme" target="_blank" rel="noopener">README</a> shows.</p>
         </div>
       </div>
     </section>
