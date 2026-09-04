@@ -6,6 +6,14 @@ An outside reviewer audited the launch commit and filed findings beyond the
 correctness fixes shipped the same week. These are the verified remainder,
 deferred with reasons rather than fixed in place:
 
+- **Not built: Skills and Integrations from the PRD's five-way grant
+  intersection.** The PRD (`docs/XYZZY_PRD.md`) defines a Skill as its own
+  grant alongside user, agent, room and channel, but no code ever narrows an
+  agent's capability set below its template's: every `AgentInstance` is
+  spawned with `capabilities=template.capabilities` and nothing updates it
+  afterward, so the skill term always equals the agent term today, making
+  the intersection four-way in practice. Integrations (Slack, GitHub) have
+  no code path beyond a static footer link. Neither is scheduled.
 - **Per-provider-call ledger.** Only the terminal provider response is
   durably stored on an output; intermediate tool-requesting calls keep
   their tool payloads but lose response ids and per-call provenance. The

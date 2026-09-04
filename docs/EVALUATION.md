@@ -8,7 +8,7 @@ want to script it instead.
 ## Setup (5 minutes)
 
 ```bash
-git clone https://github.com/Yasser-Ameur/XYZZY.git
+git clone https://github.com/Project-Nexus-YR/XYZZY.git
 cd XYZZY
 docker compose up
 ```
@@ -107,9 +107,12 @@ walkthrough.
 
 ## Honest limits
 
-- **Single-node SQLite.** There's no Postgres or Redis backend; this is one
-  process with one database file. Fine for a team evaluating or running
-  self-hosted at team scale, not yet a multi-node deployment story.
+- **SQLite is the only storage backend.** There's no Postgres option; the
+  database is always one file. Multi-process fan-out for the realtime hub
+  exists (`XYZZY_REDIS_URL`, Redis is pub/sub only, not a data store), but it
+  still needs a shared local filesystem for that one database file, so this
+  is not yet a multi-node deployment story. See the README's "Scaling out"
+  section for what running more than one process actually requires.
 - **No tasks UI yet.** The task API is complete server-side
   (`POST/GET /rooms/{room_id}/tasks`, `/assign`, `/delegate`, `/complete`,
   `/cancel`) but has no client surface — see `docs/BACKLOG.md`. Reachable

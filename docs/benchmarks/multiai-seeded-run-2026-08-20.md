@@ -1,5 +1,15 @@
 # XYZZY seeded workflow run — 2026-08-20
 
+**Superseded record.** The suite size and file name below predate the
+services split and the erasure track: "Automated suite: 143 tests" is a
+seventh of the current count, and the file's own name still carries the
+product's pre-rename working title, `multiai`, even though the body already
+says XYZZY throughout. Re-run the p95 figure with
+`pytest -s tests/performance/test_ack_latency.py` (it prints the number,
+uncaptured, on a passing test) rather than trusting the value below. No page
+in the repository links to this record; it is kept for the seeded-workflow
+narrative in the sections that follow, not for its numbers.
+
 ## Status
 
 This is the recorded local XYZZY run against the active

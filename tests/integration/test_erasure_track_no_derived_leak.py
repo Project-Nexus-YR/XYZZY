@@ -38,6 +38,7 @@ from multiplayer.domain.models import (
     ArtifactType,
     BranchMode,
     ExecutionIntervention,
+    MemoryScope,
     MessageRole,
     OutputDisposition,
     RunSettlement,
@@ -164,6 +165,28 @@ async def test_erasure_leaves_no_trace_in_any_table(tmp_path):
         assert pending_run_before is not None
         assert pending_run_before.settlement is None
 
+        # Finding 29: three columns the column-coverage allowlist classifies
+        # "redacted" but that no erasure test had ever actually seeded with
+        # the token: memories.content, approvals.review_comment, and
+        # users.avatar_url. Seeded here so the full-dump sweep below and the
+        # per-column checks after erasure both exercise them for real.
+        memory = await svc.create_memory(
+            room_id,
+            None,
+            None,
+            MemoryScope.ROOM,
+            f"remember the {TOKEN} decision",
+            created_by="alice",
+        )
+        approval = await svc.request_approval(
+            room_id, parked_execution_id, agent.agent_id, "publish", requested_by="alice"
+        )
+        await svc.approve_action(approval.approval_id, "alice", comment=f"looks fine, {TOKEN}")
+        await db.execute("UPDATE users SET avatar_url = ? WHERE user_id = ?", (TOKEN, "alice"))
+        avatar_before = await svc.repos.users.get("alice")
+        assert avatar_before is not None
+        assert TOKEN in avatar_before.avatar_url
+
         result = await svc.erase_user("alice")
         # Alice's message, the room name she typed when she created "Room",
         # the task.delegated event her own open_agent_task call appended, the
@@ -174,7 +197,7 @@ async def test_erasure_leaves_no_trace_in_any_table(tmp_path):
 
         # 1. No table anywhere in the database still holds the literal token,
         #    except inside the redaction bookkeeping's own metadata (which never
-        #    stores the token itself, only ids and reasons -- this assertion
+        #    stores the token itself, only ids and reasons: this assertion
         #    would fail immediately if it ever did).
         dump = await _all_table_dump(db)
         offenders = []
@@ -235,8 +258,8 @@ async def test_erasure_leaves_no_trace_in_any_table(tmp_path):
 
         # 6. Round 6: both intervention rows kept (not discarded, unlike the
         #    suspended turn), with their instruction column scrubbed rather
-        #    than the row dropped -- the full-dump sweep above already proved
-        #    the token is gone from execution_interventions, this confirms
+        #    than the row dropped (the full-dump sweep above already proved
+        #    the token is gone from execution_interventions), this confirms
         #    the rows themselves still exist as the audit record 018/020
         #    intend them to.
         consumed_after = await db.fetch_one(
@@ -254,6 +277,21 @@ async def test_erasure_leaves_no_trace_in_any_table(tmp_path):
         pending_execution_after = await svc.repos.executions.get(pending_execution_id)
         assert pending_execution_after is not None
         assert pending_execution_after.status.value in {"FAILED", "CANCELLED"}
+
+        # 7. Finding 29: the three previously-unseeded "redacted" columns are
+        #    actually scrubbed, not merely absent from the full-dump sweep by
+        #    accident.
+        memory_after = await db.fetch_one(
+            "SELECT content FROM memories WHERE memory_id = ?", (memory.memory_id,)
+        )
+        assert memory_after is not None
+        assert TOKEN not in memory_after["content"]
+        approval_after = await svc.repos.approvals.get(approval.approval_id)
+        assert approval_after is not None
+        assert TOKEN not in (approval_after.review_comment or "")
+        avatar_after = await svc.repos.users.get("alice")
+        assert avatar_after is not None
+        assert TOKEN not in avatar_after.avatar_url
     finally:
         await db.close()
 

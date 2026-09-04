@@ -38,6 +38,14 @@ async def test_create_organization_is_atomic_across_a_mid_write_fault(
     with pytest.raises(sqlite3.OperationalError):
         await svc.create_organization("Finding27 org", "finding27-org", OWNER)
 
+    # Finding 77: pin down *which* statement the ordinal actually hit, so a
+    # refactor that adds an execute earlier in the transaction (a slug
+    # uniqueness SELECT, an audit row) fails loudly here instead of silently
+    # moving the fault onto the organization row itself, where the org would
+    # be trivially absent for a reason unrelated to membership atomicity.
+    assert db.faulted_sql is not None
+    assert db.faulted_sql.strip().upper().startswith("INSERT INTO ORGANIZATION_MEMBERS")
+
     orgs = await svc.db.fetch_all(
         "SELECT org_id FROM organizations WHERE slug = ?", ("finding27-org",)
     )
@@ -59,6 +67,9 @@ async def test_create_workspace_is_atomic_across_a_mid_write_fault(
     db.fail_on_execute = db.execute_count + 2
     with pytest.raises(sqlite3.OperationalError):
         await svc.create_workspace(org.org_id, "Main", "main", OWNER)
+
+    assert db.faulted_sql is not None
+    assert db.faulted_sql.strip().upper().startswith("INSERT INTO WORKSPACE_MEMBERS")
 
     workspaces = await svc.db.fetch_all(
         "SELECT workspace_id FROM workspaces WHERE slug = ?", ("main",)

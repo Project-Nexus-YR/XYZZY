@@ -1,11 +1,16 @@
 """Object-addressed routes resolve authorization through their owning room."""
 
 import re
+import types
+import typing
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from fastapi.datastructures import UploadFile
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 from multiplayer.api import routes
 from multiplayer.server import create_app
@@ -285,6 +290,55 @@ SELF_SCOPED_OR_PRE_AUTH_PATHS = frozenset(
 )
 
 
+def _dummy_value(annotation: Any) -> Any:
+    """One syntactically valid value per field type, so a request body passes
+    pydantic parsing rather than failing it: this sweep does not care whether
+    the *value* is a domain-valid one, only that the outsider's request gets
+    far enough to reach an authorization check instead of failing at 422
+    before that check ever runs."""
+    origin = typing.get_origin(annotation)
+    if origin in (typing.Union, types.UnionType):
+        args = [a for a in typing.get_args(annotation) if a is not type(None)]
+        return _dummy_value(args[0]) if args else None
+    if origin is list:
+        return []
+    if origin is dict:
+        return {}
+    if annotation is str:
+        return "x"
+    if annotation is int:
+        return 1
+    if annotation is float:
+        return 1.0
+    if annotation is bool:
+        return True
+    return "x"
+
+
+def _example_request_kwargs(route: Any) -> dict[str, Any]:
+    """A minimally valid body for a route's own declared request model, built
+    from the model's own required fields rather than a hand-typed dict per
+    path that a new field would silently outgrow. A multipart upload route
+    gets a small file instead of JSON."""
+    body_field = getattr(route, "body_field", None)
+    if body_field is None:
+        return {}
+    model_cls = body_field.field_info.annotation
+    if not (isinstance(model_cls, type) and issubclass(model_cls, BaseModel)):
+        return {}
+    upload_fields = [
+        name for name, field in model_cls.model_fields.items() if field.annotation is UploadFile
+    ]
+    if upload_fields:
+        return {"files": {name: ("proof.txt", b"proof", "text/plain") for name in upload_fields}}
+    data = {
+        name: _dummy_value(field.annotation)
+        for name, field in model_cls.model_fields.items()
+        if field.is_required()
+    }
+    return {"json": data}
+
+
 def test_every_route_refuses_an_authenticated_outsider_a_200(client: TestClient) -> None:
     """A structural guard over the route table itself, not a hand-maintained
     list of paths (finding 21): a new route reaching this app without its own
@@ -293,10 +347,11 @@ def test_every_route_refuses_an_authenticated_outsider_a_200(client: TestClient)
 
     An outsider who belongs to no organization, workspace, or room anywhere
     calls every route this app serves with a placeholder id in each path
-    parameter. The one property asserted is the one the finding is about: none
-    of them may answer 200. Body validation on a POST/PUT/PATCH can still
-    produce a 422 before any authorization check runs; that is not this
-    test's concern; a 200 to a stranger is.
+    parameter, and, for a body-taking route, a minimally valid body built
+    from the route's own request model (finding 28): a route that validated
+    the body before checking authorization used to escape this sweep behind
+    a 422, which is not a refusal. 401, 403 and 404 are all legitimate ways
+    to refuse a stranger; 200, 422, and 5xx are not.
     """
     full_app = create_app(
         ":memory:",
@@ -312,14 +367,47 @@ def test_every_route_refuses_an_authenticated_outsider_a_200(client: TestClient)
             placeholder_path = re.sub(r"\{[^}]+\}", "does-not-exist", path)
             for method in sorted(methods - {"HEAD", "OPTIONS"}):
                 checked += 1
+                request_kwargs: dict[str, Any] = {}
+                if method in {"POST", "PUT", "PATCH"}:
+                    request_kwargs = _example_request_kwargs(route)
                 response = outsider_client.request(
                     method,
                     placeholder_path,
                     headers=OUTSIDER,
-                    json={} if method in {"POST", "PUT", "PATCH"} else None,
+                    **request_kwargs,
                 )
-                assert response.status_code != 200, (method, path, response.text)
+                assert response.status_code in {401, 403, 404}, (
+                    method,
+                    path,
+                    response.status_code,
+                    response.text,
+                )
     assert checked > 50  # the sweep itself must not have silently found nothing
+
+
+def test_the_outsider_sweep_would_catch_an_unguarded_body_taking_route() -> None:
+    """Proof that the assertion above is not itself vacuous: a body-taking
+    write route with no authorization call at all really does answer 200 to
+    a stranger, given a minimally valid body, rather than 422. If the
+    production sweep's own bodies were somehow still short of what a route
+    needed, this reproduction would answer 422 too, which would mean the
+    sweep's 401/403/404 assertion could never distinguish "authorized" from
+    "body invalid", and it would fail right here, on this synthetic route,
+    long before it got a chance to fail silently on a real one.
+    """
+
+    class _UnguardedBody(BaseModel):
+        title: str
+
+    probe_app = FastAPI()
+
+    @probe_app.post("/probe/{thing_id}")
+    async def _unguarded(thing_id: str, payload: _UnguardedBody) -> dict[str, str]:
+        return {"thing_id": thing_id, "title": payload.title}
+
+    with TestClient(probe_app) as probe_client:
+        response = probe_client.post("/probe/does-not-exist", json={"title": "x"})
+    assert response.status_code == 200, response.text
 
 
 def test_notification_query_cannot_override_bearer_identity(client: TestClient) -> None:

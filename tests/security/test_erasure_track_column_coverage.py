@@ -34,6 +34,14 @@ from multiplayer.services.service import MultiplayerService
 
 _VALID_CLASSIFICATIONS = {"redacted", "kept_by_ruling", "not_user_authored"}
 
+# Finding 75: the declared-type universe this schema actually uses, checked
+# empirically (see the module docstring). A future migration that declares a
+# personal-text column as VARCHAR, CHAR(n), JSON, CLOB, or with no type at
+# all is legal SQLite, TEXT or NUMERIC affinity, and invisible to a filter
+# that only matches the literal string "TEXT": _text_columns below fails
+# loudly instead, rather than silently skipping it.
+_KNOWN_TYPES = {"TEXT", "INTEGER", "REAL", "BLOB"}
+
 
 async def _text_columns(db: Database) -> set[tuple[str, str]]:
     tables = await db.fetch_all(
@@ -45,7 +53,15 @@ async def _text_columns(db: Database) -> set[tuple[str, str]]:
         if name.endswith("_fts") or "_fts_" in name or name == "schema_migrations":
             continue
         for col in await db.fetch_all(f"PRAGMA table_info({name})"):
-            if str(col["type"] or "").upper() == "TEXT":
+            declared = str(col["type"] or "").upper()
+            if declared not in _KNOWN_TYPES:
+                raise AssertionError(
+                    f"{name}.{col['name']} declares type {declared!r}, outside "
+                    f"{sorted(_KNOWN_TYPES)}: classify it by affinity and add it to "
+                    f"_KNOWN_TYPES (or erasure._COLUMN_CLASSIFICATION if it is "
+                    f"TEXT-affinity) before this test may pass."
+                )
+            if declared == "TEXT":
                 columns.add((name, str(col["name"])))
     return columns
 

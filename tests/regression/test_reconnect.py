@@ -360,3 +360,60 @@ def test_resync_marker_closes_a_live_socket_with_the_gap_signal() -> None:
 
 async def _put_resync(sub) -> None:
     sub.queue.put_nowait({"type": "resync"})
+
+
+def test_socket_backfill_dedupes_an_event_committed_during_its_own_read() -> None:
+    """Finding 73: the `replayed_event_ids` dedupe branch in
+    `websocket_endpoint` exists for exactly one interleaving: a write that
+    commits after `hub.subscribe` but while the backfill's own
+    `get_room_events` read is still in flight, so the event could otherwise
+    arrive twice (once from the backfill, once from live delivery). The hook
+    below commits that write from inside `list_since` itself, on the same
+    event loop the socket's backfill is running on, which is exactly the
+    "committed after the read started, before it returned" interleaving
+    without needing cross-thread signalling to force it.
+    """
+    app = create_app(":memory:", auth_tokens=TOKENS)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/me/bootstrap",
+            headers=OWNER,
+            json={"display_name": "Owner", "room_name": "Primary"},
+        )
+        assert response.status_code == 200, response.text
+        room_id = response.json()["room"]["room_id"]
+        svc = routes_mod._svc
+        assert svc is not None
+
+        original_list_since = svc.repos.events.list_since
+        fired = False
+
+        async def hooked_list_since(target_room_id: str, after_sequence: int, limit: int = 500):
+            nonlocal fired
+            result = await original_list_since(target_room_id, after_sequence, limit)
+            if target_room_id == room_id and not fired:
+                fired = True
+                await svc.send_message(room_id, MessageRole.HUMAN, "owner", "mid-backfill")
+            return result
+
+        svc.repos.events.list_since = hooked_list_since  # type: ignore[method-assign]
+        try:
+            with client.websocket_connect(
+                f"/ws?room_id={room_id}&last_sequence=0", headers=OWNER
+            ) as websocket:
+                assert websocket.receive_json()["type"] == "connected"
+
+                sequences: list[int] = []
+                while True:
+                    message = websocket.receive_json()
+                    sequences.append(message["sequence"])
+                    if message["payload"].get("content") == "mid-backfill":
+                        break
+        finally:
+            svc.repos.events.list_since = original_list_since
+
+        assert fired, "the hook never fired, so this did not exercise the race at all"
+        assert sequences.count(sequences[-1]) == 1, (
+            "the event committed mid-backfill must not be delivered twice"
+        )
+        assert sequences == sorted(set(sequences)), "no gap and no repeat in the delivered order"

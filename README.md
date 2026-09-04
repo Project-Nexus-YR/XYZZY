@@ -50,8 +50,10 @@ effect immediately, mid-task.
 
 **Provable.** Every room's event log is hash-chained: each event is hashed against the one
 before it, so altering or deleting a row breaks every hash after it: tamper-evident by
-construction, checkable with the audit CLI. Each Decision links to the Claims and AgentOutputs
-behind it, so a synthesis is inspectable down to the run that produced it.
+construction, checkable with the audit CLI. This proves the log is internally consistent with
+itself, and no more: it cannot tell an honest history from a wholesale rewrite by whoever holds
+the database file. Each Decision links to the Claims and AgentOutputs behind it, so a synthesis is
+inspectable down to the run that produced it.
 
 **Yours.** One Python process and a SQLite file, self-hosted. Point specialists at Ollama, LM
 Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 licensed, source included.
@@ -113,13 +115,16 @@ Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 lice
 
 ```
 src/multiplayer/
-├── domain/          # models.py, events.py: frozen dataclasses, RoomEvent
+├── domain/          # models.py, events.py, agent_card.py, agent_tasks.py, meta.py, provenance.py,
+│                  #   synthesis.py: frozen dataclasses, RoomEvent
 ├── db/              # connection.py, repositories.py: 44 typed repository classes
 ├── migrations/      # numbered *.sql, applied in order at startup
 ├── services/        # service.py composes thirteen domain mixins (rooms, conversation, agents, runs, steps,
 │                  #   agent_tasks, branches, ontology, meta, audit, erasure, organizations, records, bootstrap)
 │                  #   over _shared.py; presence.py tracks who is online
-├── security/        # capabilities.py, boundary.py, audit.py, oidc.py, sessions.py: capability gate, governance boundary, hash chain, OIDC, screening
+├── security/        # capabilities.py, authorization.py, boundary.py, audit.py, oidc.py, sessions.py, auth.py,
+│                  #   identity.py, screening.py: capability gate, RoomCapability vocabulary, governance
+│                  #   boundary, hash chain, OIDC, screening
 ├── harness/         # protocol.py, adapters.py: agent harness protocol
 ├── model_providers/ # openai_responses.py, openai_chat_completions.py: model provider adapters
 ├── nexus_bridge/    # agent_bridge.py: NEXUS runtime adapter
@@ -131,6 +136,11 @@ src/multiplayer/
 web/
 └── index.html       # Single-page workspace UI
 tests/               # unit, integration, concurrency, security, failure, regression, e2e, model_providers, performance
+scripts/             # producer scripts CI and the landing page depend on: check_anchors.py, capture_hero.py,
+                     #   capture_scenes.py, build_demo_gif.py, build_og.py, dev_idp.py
+docs/                # BACKLOG.md, EVALUATION.md, SSO.md, readme-trace.md, and the rest of the written record
+site/                # the public landing page (index.html) and its proof trace (trace.md)
+constraints.txt      # pinned dependency closure installed in CI and the image
 ```
 
 ## How It Uses NEXUS
@@ -387,8 +397,8 @@ python -m pytest tests/regression/ -v
 
 ## Current Status
 
-The current repository gate is 1063 tests (1062 passing, 1 skipped without `OPENAI_API_KEY`) plus Ruff format/check and strict `mypy src`,
-run on every push and pull request by `.github/workflows/ci.yml`.
+The current repository gate is 1092 tests (1091 passing, 1 skipped without `OPENAI_API_KEY`) plus Ruff format/check and strict `mypy src`,
+run on every push to `main` and every pull request by `.github/workflows/ci.yml`.
 The suite covers:
 - Unit tests for domain models
 - Integration tests for repositories, services, and API endpoints
@@ -409,6 +419,15 @@ cluster-wide through keys that expire on silence. Redis carries no state
 worth backing up. If it goes down, each process degrades to single-process
 behavior and clients recover anything missed through the reconnect replay
 path, because the event log stays the single source of truth.
+
+Concurrent processes can race startup migrations: a second process waits for
+the first to finish migrating, not for a lock that removes the race outright
+today. Bring replicas up one at a time after an upgrade, the way a rolling
+deploy already does; a replica that starts mid-migration finds the rows
+already applied on its next boot and comes up clean. NEXUS runs stay on the
+process that started them, so a run in flight does not migrate to another
+replica on failover. See `docs/BACKLOG.md` for the migration-lock epic that
+removes this caveat.
 
 Two boundaries to respect: all processes must share one real local
 filesystem for the database (network filesystems such as NFS or SMB are

@@ -113,9 +113,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commit whose gates passed.
 - `scripts/check_anchors.py` verifies every line-anchored proof link on the
   landing page and in the README trace, and runs in CI.
+- `python -m multiplayer.manage <db> user erase <id>` (migrations 045 to 049)
+  tombstones the user, chains a redaction record to every room event that
+  named them, and appends an `event.redacted` entry to the log rather than
+  editing history in place. Token usage per execution and per branch
+  synthesis is persisted (`executions.token_usage`,
+  `branch_syntheses.token_usage`, migration 044), not only counted in
+  `/metrics`.
+- The `image` workflow only refreshes `:latest` once the `gates` workflow
+  has finished green on `main`, so a red commit never publishes a new
+  image; a version tag still publishes directly as a maintainer's own act.
 
 ### Changed
 
+- `service.py` is now composition only: its former 9,700 lines are split
+  into thirteen mixins, one module per domain cluster (organizations,
+  rooms, agents, runs, agent turns, branches and synthesis, conversation,
+  room records, ontology, Meta, audit, agent tasks, erasure, bootstrap)
+  over a shared `_shared.py` base, so `mypy --strict` can check each one on
+  its own.
 - The demo starts with `docker compose run --rm --service-ports demo`, which
   cannot collide with the always-on service on port 8000.
 - The provider identity is read from one shared step decoder instead of two
