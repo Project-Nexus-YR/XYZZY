@@ -83,7 +83,6 @@ from ..domain.models import (
     OutputDisposition,
     OutputSelection,
     ParticipantType,
-    Presence,
     ProofMode,
     ReadCursor,
     Room,
@@ -169,7 +168,6 @@ class Repos:
         self.memories = MemoryRepo(db)
         self.approvals = ApprovalRepo(db)
         self.notifications = NotificationRepo(db)
-        self.presence = PresenceRepo(db)
         self.tool_permissions = ToolPermissionRepo(db)
         self.tool_requests = ToolRequestRepo(db)
         self.idempotency = IdempotencyRepo(db)
@@ -609,11 +607,17 @@ class UserSessionRepo:
         first and comparing afterwards lets anyone holding a state value burn a
         victim's pending login: the attacker fails, but so does the victim, who
         now has to start again for reasons nothing explains.
+
+        The comparison is exact: an empty stored binding is not a wildcard that
+        matches any caller. Only ``begin_login`` writes this column today and it
+        always hashes a real binding, so an empty stored value never happens in
+        practice, but a comparison that treats one as "anybody" would silently
+        disable the protection the moment a second writer, a migration default,
+        or a fixture ever left one empty.
         """
         cursor = await self.db.execute(
             "UPDATE oidc_authorizations SET consumed_at = ? "
-            "WHERE state = ? AND consumed_at IS NULL "
-            "AND (browser_binding_hash = '' OR browser_binding_hash = ?)",
+            "WHERE state = ? AND consumed_at IS NULL AND browser_binding_hash = ?",
             (serialize_datetime(moment), state, binding_hash),
         )
         if not cursor.rowcount:
@@ -1738,19 +1742,38 @@ class AgentRunRepo:
         state: HarnessState,
         lease_expires_at: datetime,
         acting_user_id: str,
+        expected: HarnessState | None = None,
     ) -> bool:
-        """Move an open run and renew its lease. A settled run never moves."""
-        cursor = await self.db.execute(
-            "UPDATE agent_runs SET harness_state = ?, lease_expires_at = ?, acting_user_id = ? "
-            "WHERE run_id = ? AND harness_state <> ?",
-            (
-                state.value,
-                serialize_datetime(lease_expires_at),
-                acting_user_id,
-                run_id,
-                HarnessState.SETTLED.value,
-            ),
-        )
+        """Move an open run and renew its lease. A settled run never moves.
+
+        ``expected``, when given, makes the move a compare and swap: it only
+        lands from that exact state, so a caller entering a turn from a stale
+        read cannot advance a run somebody else already moved on.
+        """
+        if expected is not None:
+            cursor = await self.db.execute(
+                "UPDATE agent_runs SET harness_state = ?, lease_expires_at = ?, "
+                "acting_user_id = ? WHERE run_id = ? AND harness_state = ?",
+                (
+                    state.value,
+                    serialize_datetime(lease_expires_at),
+                    acting_user_id,
+                    run_id,
+                    expected.value,
+                ),
+            )
+        else:
+            cursor = await self.db.execute(
+                "UPDATE agent_runs SET harness_state = ?, lease_expires_at = ?, "
+                "acting_user_id = ? WHERE run_id = ? AND harness_state <> ?",
+                (
+                    state.value,
+                    serialize_datetime(lease_expires_at),
+                    acting_user_id,
+                    run_id,
+                    HarnessState.SETTLED.value,
+                ),
+            )
         await self.db.commit()
         return cursor.rowcount == 1
 
@@ -3102,6 +3125,27 @@ class AgentTaskRepo:
         )
         return [self._from_row(r) for r in rows]
 
+    async def list_working_with_settled_run(self, limit: int = 25) -> list[AgentTask]:
+        """Tasks WORKING behind a run that has already settled, oldest first.
+
+        ``execution_id`` always names the run currently driving a task; a task
+        stays WORKING only for as long as something is still driving it. A run
+        reaching SETTLED (however it got there: a natural end, an expired
+        lease turned ORPHANED or PARKED, authority revoked) with the task
+        still WORKING is the same defect a hard kill produces: whatever was
+        going to move this task on already ran its course, or never will,
+        and the task's own row is the only place left where that is not
+        written down yet.
+        """
+        rows = await self.db.fetch_all(
+            "SELECT t.* FROM agent_tasks t "
+            "JOIN agent_runs r ON r.execution_id = t.execution_id "
+            "WHERE t.state = ? AND r.harness_state = ? "
+            "ORDER BY t.updated_at, t.task_id LIMIT ?",
+            (AgentTaskState.WORKING.value, HarnessState.SETTLED.value, limit),
+        )
+        return [self._from_row(r) for r in rows]
+
     async def list_open_for_agent(self, agent_id: str) -> list[AgentTask]:
         placeholders = ", ".join("?" for _ in TERMINAL_STATES)
         rows = await self.db.fetch_all(
@@ -4011,27 +4055,31 @@ class EventRepo:
         seq = int(row["seq"]) if row else 1
         return await self._insert_chained(replace(event, sequence=seq))
 
-    async def append_batch(self, events: list[RoomEvent]) -> None:
-        """Insert multiple events in a single transaction."""
-        for event in events:
-            await self._insert_chained(event)
-        await self.db.commit()
-
     async def get_next_sequence(self, room_id: str) -> int:
-        """Atomically increment and return the next sequence for a room.
+        """Atomically increment and return the sequence this call allocated.
 
-        Uses INSERT ON CONFLICT DO UPDATE which is atomic in SQLite.
-        The sequence counter table (room_sequences) guarantees strictly
-        monotonically increasing sequences even under concurrent access.
+        The increment and the read are one statement, via RETURNING, so the
+        value handed back is provably the one this call wrote: two callers
+        racing here each get their own distinct number, never a value read
+        back after a second caller's increment had already moved it on. An
+        earlier version split the write and the read into two statements,
+        which let exactly that interleaving hand two racing callers the same
+        number back.
+
+        Nothing in this module preallocates a sequence and inserts the event
+        under it later: every append computes and inserts in the same
+        breath, so a caller reaching for this method is choosing the two
+        step pattern this repository does not otherwise use.
         """
-        await self.db.execute(
+        cursor = await self.db.execute(
             "INSERT INTO room_sequences(room_id, seq) VALUES (?, 1) "
-            "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1",
+            "ON CONFLICT(room_id) DO UPDATE SET seq = seq + 1 "
+            "RETURNING seq",
             (room_id,),
         )
-        row = await self.db.fetch_one(
-            "SELECT seq FROM room_sequences WHERE room_id = ?", (room_id,)
-        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        await self.db.commit()
         return int(row["seq"]) if row else 1
 
     async def list_since(
@@ -5653,17 +5701,6 @@ class NotificationRepo:
             (notification_id,),
         )
         await self.db.commit()
-
-
-class PresenceRepo:
-    def __init__(self, db: Database) -> None:
-        pass  # Presence is ephemeral, stored in-memory via PresenceService
-
-    async def set(self, presence: Presence) -> None:
-        pass  # Handled by in-memory presence service
-
-    async def get_room_presence(self, room_id: str) -> list[Presence]:
-        return []
 
 
 class IdempotencyRepo:

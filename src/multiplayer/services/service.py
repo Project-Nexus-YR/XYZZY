@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import logging
@@ -230,6 +231,23 @@ _APPROVAL_LEASE = timedelta(hours=12)
 # Without it a run whose dispatcher keeps dying is re-orphaned forever and never
 # reaches a state a reader can describe.
 _RUN_MAX_ATTEMPTS = 3
+# Set around the one call to _execute_one_agent_step_inner that is an actual turn
+# entrance, read inside it rather than passed as a parameter, so that a caller
+# substituting the inner step (as several tests do) keeps its own two argument
+# shape and this claim stays invisible to it rather than becoming its problem.
+_require_idle_entrance: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_require_idle_entrance", default=False
+)
+
+# get_room_events' own default and its hard ceiling. Reconnect wants
+# everything missed since a given sequence, and a room's history is bounded
+# by practice at far fewer than this many events, so the default is really
+# the ceiling: high enough that no legitimate reconnect ever meets it, low
+# enough that a room with an unbounded number of events cannot make this
+# method build an unbounded list in memory before anything gets to truncate
+# it. A caller past this cap is the one that needs to paginate.
+_ROOM_EVENTS_DEFAULT_LIMIT = 5000
+_ROOM_EVENTS_MAX_LIMIT = 5000
 
 # ── State machine transition tables ──────────────────────────────────────────
 
@@ -420,12 +438,13 @@ class MultiplayerService:
         hub: RealtimeHub,
         known_users: frozenset[str] | None = None,
         presence_redis: Any | None = None,
+        nexus: NexusAgentBridge | None = None,
     ) -> None:
         self.db = db
         self.repos = Repos(db)
         self.hub = hub
         self.presence = PresenceService(redis_client=presence_redis)
-        self.nexus = NexusAgentBridge(db_path=":memory:")
+        self.nexus = nexus if nexus is not None else NexusAgentBridge(db_path=":memory:")
         self.authorization = RoomPolicy(self.repos)
         # Principals the server authenticates; an invitation must name one of them
         # or a user row that bootstrapping already created.
@@ -445,6 +464,10 @@ class MultiplayerService:
         # awaiting out from under it mid-flight; the done callback below is what
         # lets each one go once it finishes.
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # Set for real by _apply_migrations, before _backfill_event_chain ever
+        # reads it. False here is the safe default: a backfill that has not
+        # been told this is the migration's first boot must not touch anything.
+        self._event_chain_migration_is_new = False
 
     async def initialize(self) -> None:
         await self._apply_migrations(Path(__file__).parent.parent / "migrations")
@@ -461,13 +484,31 @@ class MultiplayerService:
         # the only way a task sits SUBMITTED past the staleness threshold, so
         # a restart heals it here rather than leaving it stranded forever.
         await self.sweep_stale_submitted_agent_tasks()
+        # The other half of that recovery: a task a harder kill left WORKING
+        # behind a run that sweep_expired_run_leases just settled (or that
+        # settled some other way) is failed here too, so a restart is enough
+        # even when nothing this process runs afterward will ever revisit it.
+        await self.sweep_stranded_working_agent_tasks()
+
+    # The migration that added prev_hash/event_hash. Rows written before it ran
+    # are the only ones a startup backfill has any business filling in; whether
+    # this boot is the one that just applied it (read from schema_migrations
+    # before this boot touched that table) is what tells a legacy row, never
+    # hashed, from a tampered one, hashed once and since cleared.
+    _EVENT_CHAIN_MIGRATION_NAME = "033_the_log_commits_to_its_past.sql"
 
     async def _backfill_event_chain(self) -> None:
         """Hash events written before the chain existed, room by room, in order.
 
         Only rows whose event_hash is NULL are touched, so a tampered stored
-        hash is never papered over by a fresh recomputation.
+        hash is never papered over by a fresh recomputation. Runs only on the
+        boot that applies the migration adding these columns: on every later
+        boot, that migration is already on record, so a NULL event_hash found
+        then is not a legacy row waiting on this method, it is tampering, and
+        this method is not the one that gets to decide that quietly.
         """
+        if not self._event_chain_migration_is_new:
+            return
         rooms = await self.db.fetch_all(
             "SELECT DISTINCT room_id FROM room_events WHERE event_hash IS NULL"
         )
@@ -520,6 +561,9 @@ class MultiplayerService:
         )
         applied_rows = await self.db.fetch_all("SELECT name FROM schema_migrations")
         applied = {str(row["name"]) for row in applied_rows}
+        # Read before this boot applies anything: true only for the one boot
+        # that is about to apply the event chain migration for the first time.
+        self._event_chain_migration_is_new = self._EVENT_CHAIN_MIGRATION_NAME not in applied
         for migration_file in sorted(migrations_dir.glob("*.sql")):
             if migration_file.name in applied:
                 continue
@@ -530,7 +574,17 @@ class MultiplayerService:
             # and rolls back cleanly.)
             if re.search(r"(?im)(?:^|;)\s*(COMMIT|ROLLBACK)\b", body):
                 raise RuntimeError(f"migration {migration_file.name} manages its own transaction")
-            wants_foreign_keys_off = "foreign_keys=OFF" in body
+            # Case and whitespace insensitive, and blind to a comment mentioning the
+            # pragma rather than issuing it: a substring match on the raw body would
+            # miss a respelled pragma (extra spaces, lower case) and would also fire
+            # on a comment that merely names the literal, disabling FK enforcement
+            # for a migration that never asked for that.
+            body_without_comments = re.sub(r"--[^\n]*", "", body)
+            wants_foreign_keys_off = bool(
+                re.search(
+                    r"(?i)\bPRAGMA\s+foreign_keys\s*=\s*(OFF|0|false)\b", body_without_comments
+                )
+            )
             record = (
                 "INSERT INTO schema_migrations(name, applied_at) VALUES "
                 f"('{migration_file.name.replace(chr(39), chr(39) * 2)}', "
@@ -944,10 +998,14 @@ class MultiplayerService:
         if slug.casefold().startswith("bootstrap-"):
             raise DomainError("organization slug namespace is reserved")
         org = Organization(org_id=new_id("org"), name=name, slug=slug)
-        await self.repos.orgs.create(org)
-        await self.repos.orgs.add_member(
-            OrgMember(org_id=org.org_id, user_id=creator_id, role="admin")
-        )
+        # One transaction, like create_room: a failure between the two writes
+        # would otherwise leave a memberless org, invisible to list_for_user,
+        # unadministrable, and holding its globally unique slug forever.
+        async with self.db.transaction():
+            await self.repos.orgs.create(org)
+            await self.repos.orgs.add_member(
+                OrgMember(org_id=org.org_id, user_id=creator_id, role="admin")
+            )
         return org
 
     async def get_user_context(
@@ -1096,10 +1154,13 @@ class MultiplayerService:
         name = self._validate_non_empty(name, "workspace name")
         slug = self._validate_non_empty(slug, "workspace slug")
         ws = Workspace(workspace_id=new_id("ws"), org_id=org_id, name=name, slug=slug)
-        await self.repos.workspaces.create(ws)
-        await self.repos.workspaces.add_member(
-            WorkspaceMember(workspace_id=ws.workspace_id, user_id=creator_id, role="admin")
-        )
+        # Same guarantee as create_organization, for the same reason: a memberless
+        # workspace is invisible, unadministrable, and undeletable through the API.
+        async with self.db.transaction():
+            await self.repos.workspaces.create(ws)
+            await self.repos.workspaces.add_member(
+                WorkspaceMember(workspace_id=ws.workspace_id, user_id=creator_id, role="admin")
+            )
         return ws
 
     async def list_workspaces(self, org_id: str) -> list[Workspace]:
@@ -2180,14 +2241,30 @@ class MultiplayerService:
         )
 
     async def _advance_run_for_execution(
-        self, execution_id: str, state: HarnessState, acting_user_id: str, lease: timedelta
-    ) -> None:
-        """Move the envelope and renew its lease. A settled run never moves."""
+        self,
+        execution_id: str,
+        state: HarnessState,
+        acting_user_id: str,
+        lease: timedelta,
+        expected: HarnessState | None = None,
+    ) -> bool:
+        """Move the envelope and renew its lease. A settled run never moves.
+
+        ``expected``, when given, refuses the move unless the run is still in
+        that state, so a caller can tell a genuine advance from a race that
+        already moved the run somewhere else.
+        """
         run = await self.repos.agent_runs.get_by_execution(execution_id)
         if run is None or run.harness_state is HarnessState.SETTLED:
-            return
-        await self.repos.agent_runs.advance(
-            run.run_id, state, utcnow() + lease, acting_user_id or run.acting_user_id
+            return False
+        if expected is not None and run.harness_state is not expected:
+            return False
+        return await self.repos.agent_runs.advance(
+            run.run_id,
+            state,
+            utcnow() + lease,
+            acting_user_id or run.acting_user_id,
+            expected=expected,
         )
 
     async def _settle_run(
@@ -2276,6 +2353,11 @@ class MultiplayerService:
                 error = f"lease expired after {run.attempts} attempt(s)"
             if await self._settle_run(run, settlement, "system", error):
                 settled += 1
+        # The periodic caller of this method (server.py's lease-sweep loop) is
+        # the only thing that revisits a long-lived process's runs at all, so
+        # it is also the thing that has to notice a task stranded WORKING
+        # behind one of the runs just settled above, or by anything else.
+        await self.sweep_stranded_working_agent_tasks()
         return settled
 
     async def _expire_undecided_approvals(self, execution_id: str, reason: str) -> None:
@@ -3481,14 +3563,21 @@ class MultiplayerService:
         its lease in silence, no agent message reached the thread, and the sweep
         eventually stamped it ORPHANED — a false account of a dispatcher that had
         returned normally. The tool result is fed back here instead.
+
+        A turn started from outside enters from idle, and only from idle. A second
+        step reaching an execution already streaming or already parked at a reviewer
+        finds the entrance closed, rather than prompting the model again on top of a
+        turn already in flight; a step that resumes one after an approval decision
+        is not this entrance, so it is not gated here.
         """
         return await self._continue_agent_turn(
             execution_id,
             _TurnContinuation(self._validate_non_empty(prompt, "agent prompt"), acting_as),
+            require_idle=True,
         )
 
     async def _continue_agent_turn(
-        self, execution_id: str, turn: _TurnContinuation
+        self, execution_id: str, turn: _TurnContinuation, *, require_idle: bool = False
     ) -> dict[str, Any]:
         """Prompt, feed the tool result back, prompt again, until something ends it.
 
@@ -3498,9 +3587,15 @@ class MultiplayerService:
         which settles it CANCELLED, and a step that neither answered nor called a
         tool, which settles it FAILED. None of them leaves the run RUNNING with
         nobody about to prompt it.
+
+        ``require_idle`` gates only the first prompt of this call: entering the loop
+        is claiming the run for the whole turn, so every prompt after this one is the
+        loop's own, not a second entrance to check.
         """
+        first = require_idle
         while True:
-            result = await self._execute_one_agent_step(execution_id, turn)
+            result = await self._execute_one_agent_step(execution_id, turn, require_idle=first)
+            first = False
             request = result.get("tool_request")
             if not isinstance(request, dict):
                 return result
@@ -3611,11 +3706,21 @@ class MultiplayerService:
         return {**result, "error": error, "settlement": settlement.value}
 
     async def _execute_one_agent_step(
-        self, execution_id: str, continuation: _TurnContinuation
+        self, execution_id: str, continuation: _TurnContinuation, *, require_idle: bool = False
     ) -> dict[str, Any]:
-        """Everything below runs inside the agent-turn boundary."""
-        with agent_turn(execution_id):
-            return await self._execute_one_agent_step_inner(execution_id, continuation)
+        """Everything below runs inside the agent-turn boundary.
+
+        ``require_idle`` rides a contextvar rather than a parameter to the inner
+        step, because several tests substitute that inner step outright and are
+        entitled to keep its original two argument shape; a caller replacing it
+        never sees this claim, and does not need to.
+        """
+        token = _require_idle_entrance.set(require_idle)
+        try:
+            with agent_turn(execution_id):
+                return await self._execute_one_agent_step_inner(execution_id, continuation)
+        finally:
+            _require_idle_entrance.reset(token)
 
     async def _execute_one_agent_step_inner(
         self, execution_id: str, continuation: _TurnContinuation
@@ -3713,10 +3818,22 @@ class MultiplayerService:
             harness_session_id=execution_id,
         )
         # The turn is in flight from here, on a lease the sweep can expire if the
-        # process driving it dies.
-        await self._advance_run_for_execution(
-            execution_id, HarnessState.STREAMING, acting_as, _STREAMING_LEASE
+        # process driving it dies. The entrance prompt of a call from outside makes
+        # this a claim rather than an unconditional advance: a run already
+        # streaming or already parked at a reviewer refuses instead of being
+        # prompted again on top of a turn already in flight.
+        require_idle = _require_idle_entrance.get()
+        claimed = await self._advance_run_for_execution(
+            execution_id,
+            HarnessState.STREAMING,
+            acting_as,
+            _STREAMING_LEASE,
+            expected=HarnessState.STARTING if require_idle else None,
         )
+        if require_idle and not claimed:
+            raise DomainError(
+                f"execution {execution_id} is not awaiting a fresh turn, so this step is refused"
+            )
         if not execution.run_id:
             if agent_run is not None:
                 await harness.session_new(
@@ -8485,17 +8602,22 @@ class MultiplayerService:
             "created_at": review.created_at.isoformat(),
         }
 
-    async def get_room_events(self, room_id: str, after_sequence: int = 0) -> list[RoomEvent]:
-        """Every event past after_sequence, not just list_since's first 500-row page.
+    async def get_room_events(
+        self, room_id: str, after_sequence: int = 0, limit: int = _ROOM_EVENTS_DEFAULT_LIMIT
+    ) -> list[RoomEvent]:
+        """Up to ``limit`` events past after_sequence, paging list_since itself.
 
-        A reconnecting client asked for everything it missed; a single list_since
-        call silently truncates at its page cap, the same defect class already
-        fixed once for the audit export. Rooms are bounded by practice, so holding
-        the full list in memory here is acceptable.
+        A reconnecting client asked for everything it missed, and a single
+        list_since call silently truncates at its own page cap, the same defect
+        class already fixed once for the audit export - but "everything" is not
+        unbounded either: a room's history is bounded by practice, not by
+        anything this method enforces, so a caller past the cap gets the cap,
+        never the whole table built in memory first and trimmed after.
         """
+        capped_limit = max(1, min(limit, _ROOM_EVENTS_MAX_LIMIT))
         after = max(0, after_sequence)
         events: list[RoomEvent] = []
-        while True:
+        while len(events) < capped_limit:
             page = await self.repos.events.list_since(room_id, after)
             if not page:
                 break
@@ -8503,7 +8625,7 @@ class MultiplayerService:
             after = page[-1].sequence
             if len(page) < 500:
                 break
-        return events
+        return events[:capped_limit]
 
     async def export_room_audit(self, room_id: str) -> AsyncIterator[str]:
         """Every event this room ever recorded, one JSON line each, then a summary.
@@ -8595,10 +8717,14 @@ class MultiplayerService:
         }
 
     async def get_room_state(
-        self, room_id: str, last_sequence: int = 0, user_id: str = ""
+        self,
+        room_id: str,
+        last_sequence: int = 0,
+        user_id: str = "",
+        event_limit: int = _ROOM_EVENTS_DEFAULT_LIMIT,
     ) -> dict[str, Any]:
         room = await self.get_room(room_id)
-        events = await self.get_room_events(room_id, last_sequence)
+        events = await self.get_room_events(room_id, last_sequence, limit=event_limit)
         members = await self.get_room_members(room_id)
         member_display_names = await self.repos.room_members.display_names(room_id)
         agents = await self.list_room_agents(room_id)
@@ -8920,11 +9046,23 @@ class MultiplayerService:
             raise TaskNotFoundError(_NO_SUCH_AGENT_TASK)
 
     async def _asker_task(self, task_id: str, requested_by: str) -> AgentTask:
-        """The task, if this caller is the one that asked for it. One answer if not."""
+        """The task, if this caller is the one that asked for it. One answer if not.
+
+        Asking is authorized once, at task creation, and never rechecked here for
+        the agent case, because an agent holds no room membership to recheck. A
+        human asker does hold membership, and it can change after the task opened
+        (removal, demotion), so a human's continued standing is reread against the
+        room every time, not trusted from the original ask.
+        """
         task = await self.repos.agent_tasks.get(task_id)
         if task is None:
             raise TaskNotFoundError(_NO_SUCH_AGENT_TASK)
         self._require_asker(task, requested_by)
+        if requested_by != task.delegating_agent_id:
+            try:
+                await self.authorization.require(task.room_id, requested_by, RoomCapability.MUTATE)
+            except AuthorizationError as exc:
+                raise TaskNotFoundError(_NO_SUCH_AGENT_TASK) from exc
         return task
 
     async def _visible_agent_task(
@@ -9201,10 +9339,11 @@ class MultiplayerService:
 
         A2A's message/send is non-blocking by contract (see `_accept_message`
         in a2a.py): the caller is owed a SUBMITTED task back immediately, not
-        the wall time of a provider call. `_dispatch_agent_task_run` already
-        never raises — every exit resolves the task or logs — so this only
-        needs to keep the asyncio.Task alive until it finishes; without that
-        reference the loop is free to garbage-collect it mid-flight.
+        the wall time of a provider call. `_dispatch_agent_task_run` never
+        raises anything but its own cancellation, propagated rather than
+        swallowed, and every other exit resolves the task or logs, so this
+        only needs to keep the asyncio.Task alive until it finishes; without
+        that reference the loop is free to garbage-collect it mid-flight.
         """
         running = asyncio.create_task(self._dispatch_agent_task_run(task))
         self._background_tasks.add(running)
@@ -9235,6 +9374,40 @@ class MultiplayerService:
                 attempted.add(task.task_id)
                 await self._dispatch_agent_task_run(task)
                 drained += 1
+
+    async def sweep_stranded_working_agent_tasks(self) -> int:
+        """Fail every task WORKING behind a run that has already settled.
+
+        ``_dispatch_agent_task_run`` fails a task itself when its own turn
+        ends badly or is cancelled, but a harder kill (SIGKILL, an OOM, the
+        process dying) leaves no handler running to catch anything: the run
+        it was driving is later settled by ``sweep_expired_run_leases``,
+        ORPHANED or otherwise, and nothing else ever revisits the task,
+        because ``sweep_stale_submitted_agent_tasks`` only looks at
+        SUBMITTED. A task WORKING behind a settled run is a delegator waiting
+        on an answer that will never come, which is exactly the failure mode
+        the docstring on ``_dispatch_agent_task_run`` says a state machine
+        exists to prevent; this is what makes that true after a restart too,
+        not only while the same process is still running.
+        """
+        failed = 0
+        for task in await self.repos.agent_tasks.list_working_with_settled_run():
+            run = await self.repos.agent_runs.get_by_execution(task.execution_id or "")
+            settlement = run.settlement.value if run is not None and run.settlement else "unknown"
+            try:
+                await self.fail_agent_task(
+                    task.task_id,
+                    f"the run driving this task settled ({settlement}) with nothing "
+                    "left to carry it further",
+                    by_agent_id=task.target_agent_id,
+                )
+                failed += 1
+            except DomainError:
+                # Something else moved the task on since the list was read; the
+                # sweep's own compare-and-swap (inside transition()) is what
+                # makes that race land on whoever actually won it, not on this.
+                log.info("Agent task %s moved before the stranded sweep reached it", task.task_id)
+        return failed
 
     async def _dispatch_agent_task_run(self, task: AgentTask) -> None:
         """Drive a submitted task to a terminal state, or say on the row why not.
@@ -9277,6 +9450,21 @@ class MultiplayerService:
                 (Part(kind=PartKind.TEXT, content=output.content),),
                 by_agent_id=task.target_agent_id,
             )
+        except asyncio.CancelledError:
+            # A shutdown cancels every fire-and-forget dispatch (server.py), and
+            # CancelledError derives from BaseException, so it would otherwise
+            # escape the Exception handler below and leave this task claiming to
+            # be working forever, with nothing left running that could ever move
+            # it. Failed here instead, then re-raised, so the cancellation still
+            # propagates the way the rest of this process's shutdown expects.
+            log.info("Agent task %s dispatch was cancelled", task.task_id)
+            try:
+                await self.fail_agent_task(
+                    task.task_id, "dispatch was cancelled", by_agent_id=task.target_agent_id
+                )
+            except Exception:
+                log.exception("Failed to fail agent task %s after cancellation", task.task_id)
+            raise
         except Exception as exc:
             log.exception("Agent task %s did not complete", task.task_id)
             try:
@@ -9368,11 +9556,17 @@ class MultiplayerService:
         # is checked before it, or a refused transition would leave its message
         # standing in the task's log as a turn that never happened. Every method
         # here that writes before it transitions asks in this order for that reason.
+        # Both writes are one transaction, so the loser of a race against another
+        # caller of this same method never leaves its message standing without the
+        # move it was written for.
         require_transition(task.state, AgentTaskState.WORKING)
-        await self.repos.agent_tasks.append_message_with_next_sequence(
-            task_id, TaskMessageRole.ASKER, parts
-        )
-        moved = await self.repos.agent_tasks.transition(task_id, task.state, AgentTaskState.WORKING)
+        async with self.db.transaction():
+            await self.repos.agent_tasks.append_message_with_next_sequence_in_transaction(
+                task_id, TaskMessageRole.ASKER, parts
+            )
+            moved = await self.repos.agent_tasks.transition_in_transaction(
+                task_id, task.state, AgentTaskState.WORKING
+            )
         await self._append_agent_task_event(
             moved,
             requested_by,
@@ -9401,12 +9595,13 @@ class MultiplayerService:
         """The delegate needs more from whoever asked, and stops until it arrives."""
         task = await self._delegate_task(task_id, by_agent_id)
         require_transition(task.state, AgentTaskState.INPUT_REQUIRED)
-        await self.repos.agent_tasks.append_message_with_next_sequence(
-            task_id, TaskMessageRole.DELEGATE, parts
-        )
-        moved = await self.repos.agent_tasks.transition(
-            task_id, task.state, AgentTaskState.INPUT_REQUIRED
-        )
+        async with self.db.transaction():
+            await self.repos.agent_tasks.append_message_with_next_sequence_in_transaction(
+                task_id, TaskMessageRole.DELEGATE, parts
+            )
+            moved = await self.repos.agent_tasks.transition_in_transaction(
+                task_id, task.state, AgentTaskState.INPUT_REQUIRED
+            )
         await self._append_agent_task_event(moved, moved.target_agent_id, "agent")
         return moved
 
@@ -9453,12 +9648,13 @@ class MultiplayerService:
         """The delegate answers, and the task ends where it was asked to end."""
         task = await self._delegate_task(task_id, by_agent_id)
         require_transition(task.state, AgentTaskState.COMPLETED)
-        await self.repos.agent_tasks.append_message_with_next_sequence(
-            task_id, TaskMessageRole.DELEGATE, parts
-        )
-        moved = await self.repos.agent_tasks.transition(
-            task_id, task.state, AgentTaskState.COMPLETED
-        )
+        async with self.db.transaction():
+            await self.repos.agent_tasks.append_message_with_next_sequence_in_transaction(
+                task_id, TaskMessageRole.DELEGATE, parts
+            )
+            moved = await self.repos.agent_tasks.transition_in_transaction(
+                task_id, task.state, AgentTaskState.COMPLETED
+            )
         await self._append_agent_task_event(moved, moved.target_agent_id, "agent")
         return moved
 
