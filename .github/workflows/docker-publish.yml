@@ -11,6 +11,13 @@ on:
   push:
     tags: ["v*"]
 
+# Never cancel a publish in progress for an older commit: :latest must land
+# in the order runs finish queuing, not race a newer push's cancellation
+# against an in-flight registry push.
+concurrency:
+  group: image-latest
+  cancel-in-progress: false
+
 # The quickstart everywhere - README, landing page - promises
 # `docker run ... ghcr.io/project-nexus-yr/xyzzy`. This workflow is what makes
 # that one-liner true: every green push to main refreshes :latest, every
@@ -31,6 +38,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # For actions/attest-build-provenance: id-token mints the Sigstore
+      # certificate, attestations persists the resulting attestation.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -41,6 +52,12 @@ jobs:
           # trigger exists to enforce. The push (tag) trigger has no
           # workflow_run event, so it falls back to the normal checkout ref.
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      # A tag push is the one path with no gates job upstream: a mistagged
+      # commit would otherwise publish a version the code does not match.
+      - if: github.event_name == 'push'
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          test "v$version" = "${GITHUB_REF_NAME}"
       - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
@@ -56,11 +73,21 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        id: build
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          provenance: true
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      # A signed, verifiable statement that this repository's workflow built
+      # this digest, in place of BuildKit's own unsigned provenance metadata:
+      # anyone with packages: write could otherwise write metadata just as
+      # official-looking. Verify with:
+      #   gh attestation verify oci://ghcr.io/project-nexus-yr/xyzzy:latest --owner project-nexus-yr
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ghcr.io/project-nexus-yr/xyzzy
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

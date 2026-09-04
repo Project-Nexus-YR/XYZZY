@@ -22,7 +22,9 @@ VOLUME ["/data"]
 ENV XYZZY_HOST=0.0.0.0
 EXPOSE 8000
 
+# Reads XYZZY_PORT itself (default 8000) so the check still hits the right
+# port when a deployment overrides it.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('XYZZY_PORT', '8000') + '/api/v1/health')"
 
 CMD ["python", "-m", "multiplayer.server", "/data/multiplayer.db"]

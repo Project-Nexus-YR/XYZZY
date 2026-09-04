@@ -16,6 +16,10 @@
 # on the Linux runners CI and the image actually use. Pinned by hand below
 # from PyPI's latest release, with the same platform marker uvicorn uses, so
 # `pip install -c constraints.txt` still resolves cleanly on Windows.
+#
+# playwright, pyee and greenlet pin the e2e extra; pillow pins the capture
+# extra. `pip install -e ".[dev,e2e,capture]" -c constraints.txt --dry-run`
+# is the check that these four never drift back to an unpinned resolution.
 aiosqlite==0.22.1
 annotated-doc==0.0.5
 annotated-types==0.8.0
@@ -27,6 +31,7 @@ colorama==0.4.6
 cryptography==50.0.1
 fakeredis==2.37.1
 fastapi==0.141.1
+greenlet==3.5.5
 h11==0.16.0
 httpcore==1.0.9
 httptools==0.8.0
@@ -38,10 +43,13 @@ mypy==2.3.1
 mypy_extensions==1.1.0
 packaging==26.3
 pathspec==1.1.1
+pillow==12.3.0
+playwright==1.62.0
 pluggy==1.6.0
 pycparser==3.0
 pydantic==2.13.5
 pydantic_core==2.46.5
+pyee==13.0.1
 Pygments==2.21.0
 PyJWT==2.13.0
 pytest==9.1.1

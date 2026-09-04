@@ -13,3 +13,9 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  # Bumps the digest pin in Dockerfile's FROM line, so OS-level CVEs in the
+  # base image get a PR the same way action and pip pins do.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

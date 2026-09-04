@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# A push while an earlier run on the same ref is still going supersedes it:
+# only the newest commit's result matters, so cancel the stale one instead of
+# letting it finish and burn runner time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gates:
     runs-on: ubuntu-latest
@@ -22,7 +29,9 @@ jobs:
       - run: ruff format --check .
       - run: mypy src
       - run: python scripts/check_anchors.py
-      - run: pip install pip-audit && pip-audit -r constraints.txt
+      # pipx runs pip-audit in its own isolated environment, so the audit
+      # never adds a package to the gate interpreter pytest then runs in.
+      - run: pipx run pip-audit -r constraints.txt
       - run: pytest
 
   docker-build:
@@ -36,6 +45,14 @@ jobs:
           push: false
           load: true
           tags: xyzzy:ci
+      # Fails the merge on a CRITICAL or HIGH CVE in the base image or the
+      # installed packages, the one layer no other gate looks inside.
+      - uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: xyzzy:ci
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
       # Proves the built image actually serves the app, not just that it
       # builds: a broken Dockerfile or entrypoint must fail this job before
       # anything can merge.
