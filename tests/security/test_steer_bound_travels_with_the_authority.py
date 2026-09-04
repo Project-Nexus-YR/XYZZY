@@ -281,9 +281,20 @@ async def test_a_mention_run_carries_the_bound_through_the_approval_door(
 
 
 def _service_ast() -> ast.Module:
+    """Every function the service defines, across the package the service split into.
+
+    The service used to be one file, so parsing it was enough to see every function
+    a guard below might need to check. It is now one composition file plus its mixin
+    modules under the same package, so the merged body of all of them is what "the
+    service" means here; nothing below reasons about which file a function lives in.
+    """
     source = inspect.getsourcefile(service_module)
     assert source is not None
-    return ast.parse(Path(source).read_text(encoding="utf-8"))
+    package_dir = Path(source).parent
+    body: list[ast.stmt] = []
+    for module_path in sorted(package_dir.glob("*.py")):
+        body.extend(ast.parse(module_path.read_text(encoding="utf-8")).body)
+    return ast.Module(body=body, type_ignores=[])
 
 
 def _callers_of(name: str) -> set[str]:

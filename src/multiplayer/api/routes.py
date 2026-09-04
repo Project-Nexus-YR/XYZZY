@@ -1295,7 +1295,7 @@ async def remove_room_member(
 # ── Branches ────────────────────────────────────────────────────────────────
 
 
-def _branch_record(branch: Branch) -> dict[str, Any]:
+def _branch_record(branch: Branch, *, token_usage_total: int = 0) -> dict[str, Any]:
     return {
         "branch_id": branch.branch_id,
         "room_id": branch.room_id,
@@ -1311,7 +1311,35 @@ def _branch_record(branch: Branch) -> dict[str, Any]:
         "created_at": branch.created_at.isoformat(),
         "updated_at": branch.updated_at.isoformat(),
         "completed_at": branch.completed_at.isoformat() if branch.completed_at else None,
+        # What every included output plus the branch's own synthesis spent, so a
+        # reader can answer "what did this branch cost" without adding it up by hand.
+        "token_usage_total": token_usage_total,
     }
+
+
+async def _branch_token_usage_total(svc: MultiplayerService, branch: Branch) -> int:
+    """Sum the token usage of the branch's included outputs and its synthesis.
+
+    An excluded output's run still ran, but what a branch cost is asked about the
+    answer it kept, so only the outputs the branch actually included are counted,
+    the same set ``synthesize_branch`` itself requires before it will run.
+    """
+    outputs = await svc.list_room_outputs(branch.room_id)
+    selections = await svc.list_output_selections(branch.room_id)
+    included_output_ids = {
+        selection.output_id
+        for selection in selections
+        if selection.branch_id == branch.branch_id
+        and selection.disposition == OutputDisposition.INCLUDED
+    }
+    included_execution_ids = {
+        output.execution_id for output in outputs if output.output_id in included_output_ids
+    }
+    runs = await svc.list_branch_runs(branch.branch_id)
+    total = sum(run.token_usage for run in runs if run.execution_id in included_execution_ids)
+    syntheses = await svc.repos.branch_syntheses.list_by_branch(branch.branch_id)
+    total += sum(synthesis.token_usage for synthesis in syntheses)
+    return total
 
 
 def _run_record(run: Execution) -> dict[str, Any]:
@@ -1327,6 +1355,7 @@ def _run_record(run: Execution) -> dict[str, Any]:
         "started_at": run.started_at.isoformat(),
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
         "error": run.error,
+        "token_usage": run.token_usage,
     }
 
 
@@ -1362,9 +1391,13 @@ async def list_room_branches(
     room_id: str,
     principal: CurrentUser,
 ) -> list[dict[str, Any]]:
+    svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    branches = await _svc_or_404().list_room_branches(room_id)
-    return [_branch_record(branch) for branch in branches]
+    branches = await svc.list_room_branches(room_id)
+    return [
+        _branch_record(branch, token_usage_total=await _branch_token_usage_total(svc, branch))
+        for branch in branches
+    ]
 
 
 @router.get("/branches/{branch_id}")
@@ -1372,9 +1405,14 @@ async def get_branch(
     branch_id: str,
     principal: CurrentUser,
 ) -> dict[str, Any]:
+    svc = _svc_or_404()
     branch = await _authorized_branch(branch_id, principal, RoomCapability.READ)
-    runs = await _svc_or_404().list_branch_runs(branch_id)
-    return {"branch": _branch_record(branch), "runs": [_run_record(run) for run in runs]}
+    runs = await svc.list_branch_runs(branch_id)
+    token_usage_total = await _branch_token_usage_total(svc, branch)
+    return {
+        "branch": _branch_record(branch, token_usage_total=token_usage_total),
+        "runs": [_run_record(run) for run in runs],
+    }
 
 
 @router.post("/branches/{branch_id}/runs/{execution_id}/execute")

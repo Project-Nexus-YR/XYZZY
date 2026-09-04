@@ -2358,6 +2358,7 @@ class ExecutionRepo:
             completed_at=datetime.fromisoformat(row["completed_at"])
             if row.get("completed_at")
             else None,
+            token_usage=row.get("token_usage") or 0,
         )
 
 
@@ -2527,6 +2528,7 @@ class AgentOutputRepo:
         expected: ExecutionStatus,
         message: Message | None = None,
         message_event: RoomEvent | None = None,
+        token_usage: int = 0,
     ) -> list[RoomEvent]:
         """Persist output, terminal state, and canonical events in one transaction.
 
@@ -2582,12 +2584,13 @@ class AgentOutputRepo:
             )
             completed_at = serialize_datetime(utcnow())
             cursor = await self.db.execute(
-                "UPDATE executions SET status = ?, output_data = ?, completed_at = ? "
-                "WHERE execution_id = ? AND status = ?",
+                "UPDATE executions SET status = ?, output_data = ?, completed_at = ?, "
+                "token_usage = ? WHERE execution_id = ? AND status = ?",
                 (
                     ExecutionStatus.COMPLETED.value,
                     json.dumps(output.output_data, sort_keys=True, default=str),
                     completed_at,
+                    token_usage,
                     output.execution_id,
                     expected.value,
                 ),
@@ -2835,6 +2838,7 @@ class BranchSynthesisRepo:
             completed_at=(
                 datetime.fromisoformat(row["completed_at"]) if row.get("completed_at") else None
             ),
+            token_usage=row.get("token_usage") or 0,
         )
 
 
@@ -4436,7 +4440,7 @@ class ArtifactRepo:
                 "UPDATE branch_syntheses SET status = ?, provider_input = ?, "
                 "provider_name = ?, provider_model = ?, provider_response_id = ?, "
                 "provider_evidence = ?, simulated = ?, content = ?, "
-                "artifact_version_id = ?, completed_at = ? WHERE synthesis_id = ?",
+                "artifact_version_id = ?, completed_at = ?, token_usage = ? WHERE synthesis_id = ?",
                 (
                     BranchSynthesisStatus.COMPLETED.value,
                     synthesis.provider_input,
@@ -4448,6 +4452,7 @@ class ArtifactRepo:
                     synthesis.content,
                     version.version_id,
                     serialize_datetime(synthesis.completed_at or utcnow()),
+                    synthesis.token_usage,
                     synthesis.synthesis_id,
                 ),
             )

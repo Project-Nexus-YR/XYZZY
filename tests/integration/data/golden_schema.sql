@@ -511,7 +511,7 @@ CREATE TABLE "branch_syntheses" (
     artifact_version_id TEXT UNIQUE,
     created_at TEXT NOT NULL,
     completed_at TEXT
-)
+, token_usage INTEGER NOT NULL DEFAULT 0)
 
 -- table branch_synthesis_inputs
 CREATE TABLE branch_synthesis_inputs (
@@ -598,7 +598,7 @@ CREATE TABLE executions (
     started_at TEXT NOT NULL,
     completed_at TEXT
 , branch_id TEXT REFERENCES branches(branch_id), triggered_by TEXT NOT NULL DEFAULT 'DIRECT'
-    CHECK(triggered_by IN ('MENTION', 'DIRECT', 'SCHEDULE')), authorized_by TEXT NOT NULL DEFAULT '', dispatch_claim TEXT, agent_task_id TEXT REFERENCES agent_tasks(task_id))
+    CHECK(triggered_by IN ('MENTION', 'DIRECT', 'SCHEDULE')), authorized_by TEXT NOT NULL DEFAULT '', dispatch_claim TEXT, agent_task_id TEXT REFERENCES agent_tasks(task_id), token_usage INTEGER NOT NULL DEFAULT 0)
 
 -- table idempotency_keys
 CREATE TABLE idempotency_keys (

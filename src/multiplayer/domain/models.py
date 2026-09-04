@@ -520,6 +520,9 @@ class Execution:
     error: str = ""
     started_at: datetime = field(default_factory=utcnow)
     completed_at: datetime | None = None
+    # What the provider reported spent on the turn this run settled with, 0 for
+    # a run from before this column existed or one a provider never reported for.
+    token_usage: int = 0
 
     def __post_init__(self) -> None:
         """Carry the task link on every clone, rather than trusting five writers to.
@@ -629,6 +632,9 @@ class BranchSynthesis:
     artifact_version_id: str | None = None
     created_at: datetime = field(default_factory=utcnow)
     completed_at: datetime | None = None
+    # What the provider reported spent producing this synthesis, 0 for a row
+    # from before this column existed or one that never completed.
+    token_usage: int = 0
 
 
 @dataclass(frozen=True, slots=True)
