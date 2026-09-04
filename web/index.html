@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" dir="ltr">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -16,7 +16,11 @@
    per rule. Light and dark are the same system with the ramp
    inverted, not two stylesheets.
    ============================================================ */
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/IBMPlexMono-400.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:500;font-display:swap;src:url('/static/fonts/IBMPlexMono-500.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:400;font-display:swap;src:url('/static/fonts/IBMPlexSans-400.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:500;font-display:swap;src:url('/static/fonts/IBMPlexSans-500.woff2') format('woff2')}
+@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:600;font-display:swap;src:url('/static/fonts/IBMPlexSans-600.woff2') format('woff2')}
 
 *{margin:0;padding:0;box-sizing:border-box}
 
@@ -237,7 +241,7 @@ a,.output-link{text-underline-offset:2px}
 }
 .popover-menu.hidden{display:none}
 .popover-menu button{
-  text-align:left;padding:var(--s-2) var(--s-3);border-radius:var(--r-2);
+  text-align:start;padding:var(--s-2) var(--s-3);border-radius:var(--r-2);
   font-size:var(--t-ui);letter-spacing:var(--k-ui);color:var(--text);
   /* These sit edge to edge with zero gap, so a hit-area extension would always
      cover part of the next item - the real box grows instead. */
@@ -247,7 +251,7 @@ a,.output-link{text-underline-offset:2px}
 .popover-menu button.danger{color:var(--danger)}
 
 .notif-dot{
-  position:absolute;top:4px;right:4px;width:6px;height:6px;border-radius:50%;background:var(--accent);
+  position:absolute;top:4px;inset-inline-end:4px;width:6px;height:6px;border-radius:50%;background:var(--accent);
 }
 .icon-button{position:relative}
 /* A ::after hit-area extension is only safe when it stays strictly under half
@@ -263,7 +267,7 @@ a,.output-link{text-underline-offset:2px}
 .btn-sm,.ontology-actions button{position:relative}
 .browse-room-row{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-2) var(--s-3);border-bottom:1px solid var(--line)}
 .browse-room-row .detail{font-size:var(--t-small);color:var(--text-3)}
-.browse-room-row .btn-sm{margin-left:auto;flex-shrink:0}
+.browse-room-row .btn-sm{margin-inline-start:auto;flex-shrink:0}
 .notif-row{display:flex;flex-direction:column;gap:2px;padding:var(--s-2) var(--s-3);border-bottom:1px solid var(--line);cursor:pointer}
 .notif-row:hover{background:var(--line)}
 .notif-row .title{font-size:var(--t-ui);font-weight:var(--w-medium)}
@@ -345,16 +349,16 @@ a,.output-link{text-underline-offset:2px}
 
 /* ---------- rail ---------- */
 .sidebar{
-  background:var(--surface);border-right:1px solid var(--line);
+  background:var(--surface);border-inline-end:1px solid var(--line);
   display:flex;flex-direction:column;min-height:0;
 }
 .workspace-head{
   display:flex;align-items:center;gap:var(--s-2);height:48px;flex-shrink:0;
-  padding:0 var(--s-2) 0 var(--s-4);border-bottom:1px solid var(--line);
+  padding-block:0;padding-inline-start:var(--s-4);padding-inline-end:var(--s-2);border-bottom:1px solid var(--line);
 }
 .workspace-name{font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui)}
 .workspace-sub{font-size:var(--t-meta);color:var(--text-3);margin-top:1px;letter-spacing:.04em}
-.workspace-head .icon-button{margin-left:auto}
+.workspace-head .icon-button{margin-inline-start:auto}
 .sidebar-scroll{flex:1;overflow-y:auto;padding:var(--s-2);min-height:0}
 .nav-label{
   display:flex;align-items:center;justify-content:space-between;
@@ -363,7 +367,7 @@ a,.output-link{text-underline-offset:2px}
 }
 .sidebar-scroll > .nav-label:first-child{padding-top:var(--s-1)}
 .nav-item{
-  width:100%;display:flex;align-items:center;gap:var(--s-2);text-align:left;
+  width:100%;display:flex;align-items:center;gap:var(--s-2);text-align:start;
   padding:var(--s-1) var(--s-2);border-radius:var(--r-2);
   font-size:var(--t-ui);letter-spacing:var(--k-ui);color:var(--text-2);
   min-height:28px;transition:background var(--t-fast),color var(--t-fast);
@@ -386,7 +390,7 @@ a,.output-link{text-underline-offset:2px}
 .branch-nav .nav-name > span:first-child{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .member-row{display:flex;align-items:center;gap:var(--s-2);padding:var(--s-1) var(--s-2);font-size:var(--t-ui);color:var(--text-2);letter-spacing:var(--k-ui)}
 .member-row .handle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--t-meta);color:var(--text-3)}
-.member-row .badge{margin-left:auto}
+.member-row .badge{margin-inline-start:auto}
 .sidebar-scroll details > summary{list-style:none;cursor:pointer}
 .sidebar-scroll details > summary::-webkit-details-marker{display:none}
 .sidebar-scroll details > summary:hover{color:var(--text-2)}
@@ -409,7 +413,7 @@ a,.output-link{text-underline-offset:2px}
 }
 .identity-name{font-size:var(--t-ui);font-weight:var(--w-medium);letter-spacing:var(--k-ui)}
 .identity-role{font-size:var(--t-meta);color:var(--text-3);letter-spacing:.06em;text-transform:uppercase;margin-top:1px}
-.sidebar-footer .icon-button{margin-left:auto}
+.sidebar-footer .icon-button{margin-inline-start:auto}
 /* one glyph per theme; the other is not rendered */
 :root[data-theme="dark"] .theme-sun,.theme-moon{display:none}
 :root[data-theme="dark"] .theme-moon{display:block}
@@ -425,7 +429,7 @@ a,.output-link{text-underline-offset:2px}
 .center{min-width:0;display:flex;flex-direction:column;background:var(--bg);min-height:0;position:relative}
 .room-header{
   display:flex;align-items:center;gap:var(--s-3);min-height:48px;flex-shrink:0;
-  padding:0 var(--s-2) 0 var(--s-5);border-bottom:1px solid var(--line);
+  padding-block:0;padding-inline-start:var(--s-5);padding-inline-end:var(--s-2);border-bottom:1px solid var(--line);
 }
 .room-header > div{min-width:0}
 /* text-overflow does nothing on the flex container itself - it has to sit on
@@ -436,7 +440,7 @@ a,.output-link{text-underline-offset:2px}
 }
 #room-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .room-header .meta{font-size:var(--t-small);color:var(--text-3);letter-spacing:var(--k-small);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.header-actions{margin-left:auto;display:flex;align-items:center;gap:var(--s-1);flex-shrink:0}
+.header-actions{margin-inline-start:auto;display:flex;align-items:center;gap:var(--s-1);flex-shrink:0}
 .unread-pill{
   font-size:var(--t-meta);font-weight:var(--w-medium);
   background:var(--accent);color:var(--accent-ink);padding:1px var(--s-1);border-radius:var(--r-1);
@@ -454,7 +458,7 @@ a,.output-link{text-underline-offset:2px}
 .msg{
   max-width:var(--content);width:100%;position:relative;
   display:grid;grid-template-columns:22px auto minmax(0,1fr);column-gap:var(--s-3);
-  padding:var(--s-1) var(--s-2) var(--s-1) 0;
+  padding-block:var(--s-1);padding-inline-start:0;padding-inline-end:var(--s-2);
 }
 .msg::before{
   content:attr(data-initial);grid-row:1/6;grid-column:1;
@@ -543,8 +547,8 @@ a,.output-link{text-underline-offset:2px}
 }
 .branch-activity button{
   width:100%;display:grid;grid-template-columns:22px minmax(0,1fr) auto;
-  gap:var(--s-3);align-items:center;text-align:left;
-  padding:var(--s-3) var(--s-2) var(--s-3) 0;transition:background var(--t-fast);
+  gap:var(--s-3);align-items:center;text-align:start;
+  padding-block:var(--s-3);padding-inline-start:0;padding-inline-end:var(--s-2);transition:background var(--t-fast);
 }
 .branch-activity button:hover{background:var(--line)}
 .branch-symbol{
@@ -583,8 +587,8 @@ a,.output-link{text-underline-offset:2px}
 }
 .composer textarea{caret-color:var(--accent)}
 .composer textarea::placeholder{color:var(--text-3)}
-.composer-tools{display:flex;align-items:center;gap:var(--s-1);padding:var(--s-1) var(--s-2) var(--s-2) var(--s-3);border-top:1px solid var(--line)}
-.composer-tools .send{margin-left:auto}
+.composer-tools{display:flex;align-items:center;gap:var(--s-1);padding-block:var(--s-1) var(--s-2);padding-inline-start:var(--s-3);padding-inline-end:var(--s-2);border-top:1px solid var(--line)}
+.composer-tools .send{margin-inline-start:auto}
 .composer-hint{font-size:var(--t-meta);color:var(--text-3);letter-spacing:.05em;text-transform:uppercase}
 .mention-toggle{
   display:inline-flex;align-items:center;gap:var(--s-2);
@@ -607,7 +611,7 @@ a,.output-link{text-underline-offset:2px}
 /* ---------- branch launcher ---------- */
 .ai-tray{
   display:none;position:absolute;bottom:84px;z-index:20;
-  left:max(var(--s-5),3vw);right:max(var(--s-5),3vw);max-width:var(--content);max-height:62vh;
+  inset-inline-start:max(var(--s-5),3vw);inset-inline-end:max(var(--s-5),3vw);max-width:var(--content);max-height:62vh;
   background:var(--raised);border:1px solid var(--line-2);border-radius:var(--r-3);
   box-shadow:var(--shadow-2);overflow:hidden;
 }
@@ -627,7 +631,7 @@ a,.output-link{text-underline-offset:2px}
 .studio-label{display:block;font-size:var(--t-small);font-weight:var(--w-medium);color:var(--text-2);margin-bottom:var(--s-2);letter-spacing:var(--k-small)}
 .strategy-toggle{display:grid;grid-template-columns:1fr 1fr;gap:var(--s-2);margin-bottom:var(--s-3)}
 .strategy-toggle button{
-  border:1px solid var(--line-2);border-radius:var(--r-2);padding:var(--s-2) var(--s-3);text-align:left;
+  border:1px solid var(--line-2);border-radius:var(--r-2);padding:var(--s-2) var(--s-3);text-align:start;
   transition:border-color var(--t-fast),background var(--t-fast);
 }
 .strategy-toggle button:hover{background:var(--line)}
@@ -697,16 +701,16 @@ a,.output-link{text-underline-offset:2px}
 /* ---------- context panel (Thread / Search / People only) ---------- */
 .right-panel{
   display:none;width:min(392px,36vw);min-width:340px;
-  background:var(--surface);border-left:1px solid var(--line);
+  background:var(--surface);border-inline-start:1px solid var(--line);
   flex-direction:column;min-height:0;
 }
 .right-panel.open{display:flex}
 .context-head{
   display:flex;align-items:center;gap:var(--s-2);height:48px;flex-shrink:0;
-  padding:0 var(--s-2) 0 var(--s-4);border-bottom:1px solid var(--line);
+  padding-block:0;padding-inline-start:var(--s-4);padding-inline-end:var(--s-2);border-bottom:1px solid var(--line);
 }
 .context-head h2{font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui)}
-.context-head .icon-button{margin-left:auto}
+.context-head .icon-button{margin-inline-start:auto}
 .context-scroll{flex:1;overflow-y:auto;min-height:0}
 .context-view{display:none}
 .context-view.active{display:block}
@@ -751,7 +755,7 @@ a,.output-link{text-underline-offset:2px}
 .artifact-doc-content h3,.artifact-doc-content h4,.artifact-doc-content h5,
 .meta-answer h3,.meta-answer h4,.meta-answer h5{margin:var(--s-3) 0 var(--s-1);font-weight:var(--w-strong);color:var(--text)}
 .output-content p,.artifact-doc-content p,.meta-answer p{margin:var(--s-2) 0}
-.output-content ul,.artifact-doc-content ul,.meta-answer ul{margin:var(--s-2) 0;padding-left:1.2em}
+.output-content ul,.artifact-doc-content ul,.meta-answer ul{margin:var(--s-2) 0;padding-inline-start:1.2em}
 .output-content pre,.artifact-doc-content pre,.meta-answer pre{
   background:var(--sunken);border-radius:var(--r-2);padding:var(--s-2);overflow:auto;
   font-family:var(--mono);font-size:var(--t-small);margin:var(--s-2) 0;
@@ -785,7 +789,7 @@ a,.output-link{text-underline-offset:2px}
 .synthesis-row{display:flex;align-items:flex-end;gap:var(--s-3);flex-wrap:wrap}
 .synthesis-title{font-size:var(--t-small);font-weight:var(--w-medium);letter-spacing:var(--k-small)}
 .synthesis-meta{font-size:var(--t-small);color:var(--text-3);margin-top:var(--s-half);line-height:1.45;max-width:34ch;letter-spacing:var(--k-small)}
-.synthesis-actions{display:flex;flex-wrap:wrap;gap:var(--s-2);align-items:center;margin-left:auto}
+.synthesis-actions{display:flex;flex-wrap:wrap;gap:var(--s-2);align-items:center;margin-inline-start:auto}
 .synthesis-actions select,.synthesis-actions input{
   background:var(--bg);border:1px solid var(--edge);border-radius:var(--r-2);
   padding:var(--s-1) var(--s-2);font-size:var(--t-small);
@@ -822,7 +826,7 @@ a,.output-link{text-underline-offset:2px}
 }
 .meta-evidence{padding:var(--s-3) max(var(--s-5),3vw);display:grid;gap:var(--s-2);max-width:68ch}
 .meta-chain{
-  border-left:1px solid var(--line-2);padding:var(--s-half) 0 var(--s-half) var(--s-3);
+  border-inline-start:1px solid var(--line-2);padding-block:var(--s-half);padding-inline-start:var(--s-3);padding-inline-end:0;
   font-size:var(--t-small);color:var(--text-3);line-height:1.5;letter-spacing:var(--k-small);
 }
 .meta-chain pre{font-size:var(--t-meta);white-space:pre-wrap;color:var(--text-2);margin-top:var(--s-1)}
@@ -851,7 +855,7 @@ a,.output-link{text-underline-offset:2px}
 .ontology-head p{font-size:var(--t-small);color:var(--text-3);line-height:1.5;margin-top:var(--s-1);letter-spacing:var(--k-small)}
 .ontology-mode{font-size:var(--t-meta);color:var(--text-3);border:1px solid var(--line-2);border-radius:var(--r-1);padding:1px var(--s-2);white-space:nowrap;text-transform:uppercase;letter-spacing:.05em}
 .ontology-tree{padding:0 max(var(--s-5),3vw) var(--s-3);display:grid;gap:var(--s-2);max-width:68ch}
-.ontology-node{border-left:1px solid var(--line-2);padding:var(--s-half) 0 var(--s-half) var(--s-3)}
+.ontology-node{border-inline-start:1px solid var(--line-2);padding-block:var(--s-half);padding-inline-start:var(--s-3);padding-inline-end:0}
 .ontology-node-head{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap}
 .ontology-label{font-size:var(--t-small);font-weight:var(--w-medium);letter-spacing:var(--k-small)}
 .ontology-meta{font-size:var(--t-meta);color:var(--text-3);margin-top:var(--s-half);line-height:1.5}
@@ -862,7 +866,7 @@ a,.output-link{text-underline-offset:2px}
 .ontology-empty{font-size:var(--t-small);color:var(--text-3);padding:var(--s-2) 0;letter-spacing:var(--k-small)}
 .ontology-history{padding:0 max(var(--s-5),3vw) var(--s-4);font-size:var(--t-small);color:var(--text-2);max-width:68ch}
 .ontology-history summary{cursor:pointer;color:var(--text-3);font-size:var(--t-small);padding:var(--s-1) 0}
-.history-item{border-left:1px solid var(--line-2);padding:var(--s-1) 0 var(--s-1) var(--s-3);margin-top:var(--s-2);font-size:var(--t-meta);color:var(--text-3)}
+.history-item{border-inline-start:1px solid var(--line-2);padding-block:var(--s-1);padding-inline-start:var(--s-3);padding-inline-end:0;margin-top:var(--s-2);font-size:var(--t-meta);color:var(--text-3)}
 .history-values{font-size:var(--t-small);color:var(--text-2);margin-top:var(--s-half);letter-spacing:var(--k-small)}
 .edge-review{display:flex;gap:var(--s-2);margin-top:var(--s-1);flex-wrap:wrap}
 
@@ -918,7 +922,7 @@ a,.output-link{text-underline-offset:2px}
 .btn-reject{color:var(--danger)}
 
 /* toasts */
-.toast-region{position:fixed;right:var(--s-4);bottom:var(--s-4);z-index:200;display:grid;gap:var(--s-2)}
+.toast-region{position:fixed;inset-inline-end:var(--s-4);bottom:var(--s-4);z-index:200;display:grid;gap:var(--s-2)}
 .toast{
   background:var(--raised);color:var(--text);border:1px solid var(--line-2);
   padding:var(--s-2) var(--s-3);border-radius:var(--r-3);box-shadow:var(--shadow-2);
@@ -928,11 +932,11 @@ a,.output-link{text-underline-offset:2px}
 /* ---------- responsive ---------- */
 @media(max-width:1120px){
   .main{grid-template-columns:248px minmax(0,1fr)}
-  .right-panel{position:fixed;z-index:60;top:0;right:0;bottom:0;width:min(392px,92vw);box-shadow:var(--shadow-2)}
+  .right-panel{position:fixed;z-index:60;top:0;inset-inline-end:0;bottom:0;width:min(392px,92vw);box-shadow:var(--shadow-2)}
 }
 @media(max-width:860px){
   .main{grid-template-columns:minmax(0,1fr)}
-  .room-header{padding-left:var(--s-2);gap:var(--s-1)}
+  .room-header{padding-inline-start:var(--s-2);gap:var(--s-1)}
   .room-header .meta{display:none}
   /* The dot alone carries the state at this width; the word stays for screen
      readers via aria-label instead of clipping mid-letter. */
@@ -941,14 +945,18 @@ a,.output-link{text-underline-offset:2px}
   }
   .composer-hint{display:none}
   .messages{padding:var(--s-3) var(--s-3) var(--s-1)}
-  .view-head,.view-empty,.outputs-head,.outputs-grid{padding-left:var(--s-3);padding-right:var(--s-3)}
+  .view-head,.view-empty,.outputs-head,.outputs-grid{padding-inline-start:var(--s-3);padding-inline-end:var(--s-3)}
   .outputs-grid{grid-template-columns:1fr}
   .input-bar{padding:var(--s-1) var(--s-3) var(--s-3)}
-  .ai-tray{left:var(--s-3);right:var(--s-3)}
+  .ai-tray{inset-inline-start:var(--s-3);inset-inline-end:var(--s-3)}
   .sidebar{
-    width:248px;position:fixed;z-index:70;top:0;bottom:0;left:0;
+    width:248px;position:fixed;z-index:70;top:0;bottom:0;inset-inline-start:0;
     transform:translateX(-102%);transition:transform 160ms cubic-bezier(.25,.46,.45,.94);
   }
+  /* inset-inline-start:0 sits the closed drawer at the START edge, the right
+     edge under rtl, so hiding it means translating further right, not left:
+     a fixed -102% would leave it sitting on screen at that edge instead. */
+  [dir="rtl"] .sidebar{transform:translateX(102%)}
   .sidebar.open{transform:none}
   .sidebar-backdrop{
     /* A dark tint alone reads fine over a light page but nearly vanishes over
@@ -965,9 +973,9 @@ a,.output-link{text-underline-offset:2px}
   .setup-intro h1{font-size:var(--t-head);letter-spacing:var(--k-head)}
   .strategy-toggle,.template-grid{grid-template-columns:1fr}
   /* Every synthesis control stacked and full-width rather than fighting a
-     margin-left:auto for a row too narrow to hold all three at once. */
+     margin-inline-start:auto for a row too narrow to hold all three at once. */
   .synthesis-row{flex-direction:column;align-items:stretch}
-  .synthesis-actions{margin-left:0;width:100%}
+  .synthesis-actions{margin-inline-start:0;width:100%}
   .synthesis-actions input{width:100%}
   .synthesis-actions select,.synthesis-actions button{flex:1}
 }
@@ -1617,7 +1625,13 @@ function toggleChannelMenu(event) {
   const btn = document.getElementById('channel-menu-button');
   const rect = btn.getBoundingClientRect();
   menu.style.top = `${rect.bottom + 4}px`;
-  menu.style.right = `${Math.max(8, window.innerWidth - rect.right)}px`;
+  // getBoundingClientRect is always physical (left/right from the viewport's
+  // own left edge), so the inline-end offset it feeds has to be picked per
+  // direction: under rtl the inline-end edge is the physical left edge, so
+  // the distance is rect.left itself, not window.innerWidth minus rect.right.
+  const rtl = getComputedStyle(document.documentElement).direction === 'rtl';
+  const insetInlineEnd = rtl ? rect.left : (window.innerWidth - rect.right);
+  menu.style.insetInlineEnd = `${Math.max(8, insetInlineEnd)}px`;
   menu.classList.remove('hidden');
 }
 function closeChannelMenu() { document.getElementById('channel-menu').classList.add('hidden'); }
@@ -1840,10 +1854,23 @@ async function switchRoom(targetRoomId) {
   closeSidebarDrawer();
   openCenterView('conversation');
   renderRoomsList();
-  if (ws) ws.close();
-  connectWS();
+  closeSocket(ws);
+  // The snapshot has to settle, and this tab's own lastSequence has to reach
+  // its final value from that snapshot, before the socket subscribes: opening
+  // both at once (the old order here) left a gap an event could land in and
+  // reach neither the snapshot nor the not-yet-subscribed socket. Fetching
+  // first means connectWS's own last_sequence cursor names exactly where this
+  // snapshot ended, matching the field the /state fetch already sends.
   try { await loadState(); }
   catch (err) { toast(`Could not open #${room.name}: ${errorMessage(err)}`, 'error'); }
+  // A second switchRoom called before this one's own await settled moved
+  // roomId on again; loadState() above resolved on this call's own (by then
+  // abandoned) fetch, not on a snapshot for whatever room is current now.
+  // The later call is the one whose own await will resolve on a real fetch
+  // for that room, and connect once it does — this one connecting instead
+  // would open the socket before that snapshot exists.
+  if (roomId !== targetRoomId) return;
+  connectWS();
 }
 
 function openCreateChannelModal() {
@@ -2335,10 +2362,43 @@ let wsReconnectDelay = 1000;
 const WS_MAX_DELAY = 30000;
 let wsReconnectAttempts = 0;
 let wsReconnectTimer = null;
+// Which room the current ws is subscribed to, so connectWS can tell "already
+// the live socket for this room" from "stale, close it first".
+let wsRoomId = null;
+
+// Nulling the handlers before close is what stops a deliberately-replaced
+// socket's own onclose from ever running: onclose used to still fire after
+// this tab had already moved on, see itself as an unexpected drop, and
+// schedule its own reconnect — which, once it eventually fired, opened a
+// second live socket nothing had asked to close, leaked on every rapid
+// re-switch back to a room whose earlier socket had not finished tearing
+// down yet. The `socket !== ws` guards on the remaining handlers stay as a
+// second line of defense, not the only one.
+function closeSocket(socket) {
+  if (!socket) return;
+  socket.onopen = null;
+  socket.onclose = null;
+  socket.onmessage = null;
+  socket.onerror = null;
+  socket.close();
+}
 
 function connectWS() {
+  // Already the one live socket for this exact room: reuse it rather than
+  // opening a second one alongside it.
+  if (ws && wsRoomId === roomId
+      && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+    return;
+  }
+  closeSocket(ws);
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const encRoomId = encodeURIComponent(roomId);
+  // The same last_sequence field the /state fetch already sends: whatever
+  // this tab's own snapshot most recently reached. The server replays every
+  // later room_event in order, deduped, before live delivery, so a subscribe
+  // that names where its snapshot ended cannot miss whatever landed between
+  // that snapshot and this socket going live.
+  const wsQuery = `room_id=${encRoomId}&last_sequence=${lastSequence}`;
   clearTimeout(wsReconnectTimer);
   // Cookie mode rides the cookie with no token subprotocol at all — the server
   // Origin-checks the upgrade instead, since a WS handshake can't carry the
@@ -2350,13 +2410,14 @@ function connectWS() {
   // will (not) select.
   let socket;
   if (sessionMode === 'cookie') {
-    socket = new WebSocket(`${proto}://${location.host}/ws?room_id=${encRoomId}`);
+    socket = new WebSocket(`${proto}://${location.host}/ws?${wsQuery}`);
   } else {
     const encodedToken = bytesToBase64Url(new TextEncoder().encode(accessToken));
-    socket = new WebSocket(`${proto}://${location.host}/ws?room_id=${encRoomId}`,
+    socket = new WebSocket(`${proto}://${location.host}/ws?${wsQuery}`,
       ['xyzzy.v1', `bearer.${encodedToken}`]);
   }
   ws = socket;
+  wsRoomId = roomId;
   socket.onopen = () => {
     if (socket !== ws) return;
     setWsStatus('Connected', true);
@@ -2392,14 +2453,70 @@ function connectWS() {
 // to race for the same room state, and the dev server 401'd whichever lost — this
 // collapses concurrent callers onto the one in-flight request instead of firing two.
 let loadStatePromise = null;
+// Which room loadStatePromise's fetch was actually issued for. A switchRoom
+// call resets roomId synchronously and immediately asks for a snapshot, so a
+// caller arriving while a DIFFERENT room's fetch is still in flight must not
+// dedupe onto it (that fetch can only ever answer for the room it was sent
+// for) — it has to wait that fetch out and then ask again for its own room.
+let loadStatePromiseRoom = null;
+// A caller that arrives while a fetch for its OWN room is already in flight
+// used to just await that fetch's promise, silently accepting data that
+// predates whatever asked for the refresh (a task created mid-fetch, say).
+// staleCallDuringLoad marks that a caller was shortchanged this way, and
+// once the in-flight fetch settles, one more real loadState() runs before
+// anyone else's await resolves, so the caller that lost the race still ends
+// up with fresh data.
+let staleCallDuringLoad = false;
+// Events that land while a snapshot fetch is in flight would otherwise be lost:
+// the switch below either handles them directly (fine) or calls loadState(),
+// which the staleCallDuringLoad follow-up above now covers. Buffer them here
+// and replay after the snapshot lands, so a direct handler (appendMessage,
+// appendSystemMessage) that ran against the DOM the rebuild below just wiped
+// gets to run again against the fresh one.
+let pendingEventsDuringLoad = [];
 function loadState() {
-  if (!loadStatePromise) {
-    loadStatePromise = loadStateImpl().finally(() => { loadStatePromise = null; });
+  if (loadStatePromise) {
+    if (loadStatePromiseRoom === roomId) {
+      staleCallDuringLoad = true;
+      return loadStatePromise;
+    }
+    // In flight for a room this tab has already left. Let it finish (its own
+    // forRoom check in loadStateImpl discards the response), then ask again
+    // for whichever room is current by then, rather than firing a second
+    // fetch concurrently with the first.
+    return loadStatePromise.catch(() => {}).then(loadState);
   }
+  loadStatePromiseRoom = roomId;
+  // The .finally() callback below has to hand its own follow-up loadState()
+  // call back to whoever is chaining onto this promise: returning it from
+  // finally is what makes the returned promise here wait for that follow-up
+  // too, instead of settling right after the first fetch and leaving a
+  // caller's await resolved on data that was already known stale.
+  loadStatePromise = loadStateImpl().finally(() => {
+    loadStatePromise = null;
+    loadStatePromiseRoom = null;
+    if (staleCallDuringLoad) {
+      staleCallDuringLoad = false;
+      return loadState();
+    }
+  });
   return loadStatePromise;
 }
 async function loadStateImpl() {
-  const state = await api('GET', `/rooms/${roomId}/state?last_sequence=0`);
+  // Frozen at call time: this fetch answers for whichever room asked for it,
+  // even if switchRoom moves the tab elsewhere before the response arrives.
+  const forRoom = roomId;
+  const state = await api('GET', `/rooms/${forRoom}/state?last_sequence=0`);
+  if (forRoom !== roomId) {
+    // The room changed while this was in flight. Applying this response now
+    // would overwrite the room the tab is actually looking at (messages,
+    // lastSequence, the read cursor it drives) with a different room's data.
+    // Whatever buffered mid-flight belonged to that abandoned room's socket
+    // too, so it goes with this response rather than getting replayed later
+    // against the room that is actually current now.
+    pendingEventsDuringLoad = [];
+    return;
+  }
   // Members are read early: message attribution below needs the name lookup, not
   // just the room-header title.
   roomMembers = state.members || [];
@@ -2526,9 +2643,16 @@ async function loadStateImpl() {
   eventsLog.innerHTML = state.events_since.length ? '' : '<div class="events-empty">Nothing yet.</div>';
   state.events_since.forEach(event => logEvent(event));
   updateActivityLogSummary();
-  lastSequence = state.events_since.length > 0
+  const snapshotSequence = state.events_since.length > 0
     ? Math.max(...state.events_since.map(event => event.sequence))
     : 0;
+  lastSequence = Math.max(lastSequence, snapshotSequence);
+  // Anything buffered while this fetch was in flight and not already covered
+  // by the snapshot itself gets replayed now, so it lands on the fresh state
+  // instead of vanishing into the rebuild above.
+  const replayEvents = pendingEventsDuringLoad.filter(event => (event.sequence || 0) > snapshotSequence);
+  pendingEventsDuringLoad = [];
+  replayEvents.forEach(event => handleRealtimeEvent(event));
 
   if (openThreadRootId) await refreshThread();
   updateRoomHeader();
@@ -2596,6 +2720,7 @@ function handleRealtimeEvent(msg) {
     return;
   }
   if (msg.type === 'room_event') {
+    if (loadStatePromise) pendingEventsDuringLoad.push(msg);
     lastSequence = Math.max(lastSequence, msg.sequence || 0);
     logEvent(msg);
     switch(msg.event_type) {
@@ -2888,7 +3013,7 @@ async function refreshThread() {
   document.getElementById('thread-title').textContent = `Thread · ${replies} ${replies === 1 ? 'reply' : 'replies'}`;
   document.getElementById('thread-copy').textContent = 'Replies stay attached to the message they answer.';
   list.innerHTML = thread.map(entry => `
-    <div class="thread-item" style="margin-left:${Math.min(entry.thread_depth, 4) * 12}px">
+    <div class="thread-item" style="margin-inline-start:${Math.min(entry.thread_depth, 4) * 12}px">
       ${attribution(entry,
         `<span class="time" title="${escHtml(entry.created_at || '')}">${formatTime(entry.created_at)}</span>` +
         (entry.reply_count ? `<span class="thread-counts">${entry.reply_count} ${entry.reply_count === 1 ? 'reply' : 'replies'}</span>` : ''))}
@@ -3024,7 +3149,7 @@ function renderAgents(agents) {
     <div class="card">
       <div class="title">${escHtml(a.name)} <span class="badge ${a.status.toLowerCase()}">${a.status}</span></div>
       <div class="detail">${escHtml(a.role)}${a.handle ? ` · <span class="handle">@${escHtml(a.handle)}</span>` : ''}</div>
-      ${canRemove ? `<button class="btn-sm" onclick="confirmRemoveAgent('${escHtml(a.agent_id)}','${escHtml(a.name).replace(/'/g, "\\'")}')">Remove</button>` : ''}
+      ${canRemove ? `<button class="btn-sm" data-agent-id="${escHtml(a.agent_id)}" data-agent-name="${escHtml(a.name)}" onclick="confirmRemoveAgent(this.dataset.agentId, this.dataset.agentName)">Remove</button>` : ''}
     </div>
   `).join('');
 }
@@ -3059,7 +3184,7 @@ function renderSidebarAgents(agents) {
   el.innerHTML = agents.map(a => `
     <div class="item">
       <span class="dot ${a.status === 'WORKING' ? 'working' : a.status === 'IDLE' ? 'idle' : 'online'}"></span>
-      ${escHtml(a.name)}${a.handle ? ` <span class="handle">@${escHtml(a.handle)}</span>` : ''} <span class="badge ${a.status.toLowerCase()}" style="margin-left:auto">${a.status}</span>
+      ${escHtml(a.name)}${a.handle ? ` <span class="handle">@${escHtml(a.handle)}</span>` : ''} <span class="badge ${a.status.toLowerCase()}" style="margin-inline-start:auto">${a.status}</span>
     </div>
   `).join('');
 }

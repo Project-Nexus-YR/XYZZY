@@ -106,7 +106,16 @@ def render_share_page(*, title: str, content: str, published_at: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{safe_title} · XYZZY</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+@font-face{{font-family:'IBM Plex Mono';font-style:normal;font-weight:400;
+  font-display:swap;src:url('/static/fonts/IBMPlexMono-400.woff2') format('woff2')}}
+@font-face{{font-family:'IBM Plex Mono';font-style:normal;font-weight:500;
+  font-display:swap;src:url('/static/fonts/IBMPlexMono-500.woff2') format('woff2')}}
+@font-face{{font-family:'IBM Plex Sans';font-style:normal;font-weight:400;
+  font-display:swap;src:url('/static/fonts/IBMPlexSans-400.woff2') format('woff2')}}
+@font-face{{font-family:'IBM Plex Sans';font-style:normal;font-weight:500;
+  font-display:swap;src:url('/static/fonts/IBMPlexSans-500.woff2') format('woff2')}}
+@font-face{{font-family:'IBM Plex Sans';font-style:normal;font-weight:600;
+  font-display:swap;src:url('/static/fonts/IBMPlexSans-600.woff2') format('woff2')}}
 *{{margin:0;padding:0;box-sizing:border-box}}
 :root{{
   --bg:#f7f6f4; --ink:#17181a; --ink-2:#55524b; --line:rgba(23,20,16,.12);
