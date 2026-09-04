@@ -116,14 +116,16 @@ src/multiplayer/
 ├── domain/          # models.py, events.py: frozen dataclasses, RoomEvent
 ├── db/              # connection.py, repositories.py: 44 typed repository classes
 ├── migrations/      # numbered *.sql, applied in order at startup
-├── services/        # service.py, presence.py: state machines, presence tracking
+├── services/        # service.py composes thirteen domain mixins (rooms, conversation, agents, runs, steps,
+│                  #   agent_tasks, branches, ontology, meta, audit, erasure, organizations, records, bootstrap)
+│                  #   over _shared.py; presence.py tracks who is online
 ├── security/        # capabilities.py, boundary.py, audit.py, oidc.py, sessions.py: capability gate, governance boundary, hash chain, OIDC, screening
 ├── harness/         # protocol.py, adapters.py: agent harness protocol
 ├── model_providers/ # openai_responses.py, openai_chat_completions.py: model provider adapters
 ├── nexus_bridge/    # agent_bridge.py: NEXUS runtime adapter
 ├── realtime/        # hub.py, websocket.py, fanout.py: pub/sub, WebSocket endpoint, cross-process fan-out
 ├── api/             # routes.py, a2a.py, share_page.py: REST endpoints, A2A wire surface, public share pages
-├── manage.py        # operator CLI: user/token management, audit verify
+├── manage.py        # operator CLI: user/token management, user erase, db backup, audit verify
 ├── metrics.py       # process counters and gauges served at GET /metrics
 └── server.py        # Uvicorn entry point with lifespan
 web/
