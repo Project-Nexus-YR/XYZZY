@@ -108,7 +108,7 @@ def _enter_demo_workspace(page: Page, base_url: str) -> None:
     # loadState() populates #agents-panel as part of entering the workspace;
     # wait for it rather than for a fixed delay.
     page.wait_for_function(
-        "document.getElementById('agents-panel').innerHTML.trim().length > 0",
+        "() => document.getElementById('agents-panel').innerHTML.trim().length > 0",
         timeout=10000,
     )
 
@@ -138,7 +138,7 @@ def test_ontology_panel_renders_seeded_nodes(live_server: _LiveServer) -> None:
         _enter_demo_workspace(page, live_server.base_url)
         page.click("[aria-label='Workspace details']")
         page.wait_for_function(
-            "document.getElementById('ontology-tree').children.length > 0",
+            "() => document.getElementById('ontology-tree').children.length > 0",
             timeout=10000,
         )
         node_count = page.eval_on_selector_all(".ontology-node", "els => els.length")
@@ -197,7 +197,7 @@ def test_malicious_agent_name_does_not_execute_when_agents_panel_renders(
         assert spawn_status == 200, f"planting the agent failed with status {spawn_status}"
         page.evaluate("loadState()")
         page.wait_for_function(
-            "document.querySelectorAll('#agents-panel .card').length > 0",
+            "() => document.querySelectorAll('#agents-panel .card').length > 0",
             timeout=10000,
         )
 
@@ -284,7 +284,7 @@ def test_task_created_during_in_flight_snapshot_fetch_is_not_lost(
                 # well under the suite's own budget: this either lands in
                 # under a second or the fix is absent and it never will.
                 page.wait_for_function(
-                    "typeof pendingEventsDuringLoad !== 'undefined' "
+                    "() => typeof pendingEventsDuringLoad !== 'undefined' "
                     "&& pendingEventsDuringLoad.some(e => e.event_type === 'task.created')",
                     timeout=3000,
                 )
@@ -298,7 +298,7 @@ def test_task_created_during_in_flight_snapshot_fetch_is_not_lost(
         sequence_before = page.evaluate("lastSequence")
         page.evaluate("loadState()")
         page.wait_for_function(
-            "document.querySelectorAll('#tasks-panel .card[data-task-id]').length > 0",
+            "() => document.querySelectorAll('#tasks-panel .card[data-task-id]').length > 0",
             timeout=10000,
         )
         task_titles = page.eval_on_selector_all(
@@ -436,7 +436,7 @@ def test_switch_room_delivers_a_message_posted_during_the_snapshot_fetch(
         page.route("**/api/v1/rooms/*/state*", hold_new_room_state)
         page.evaluate("(targetRoomId) => switchRoom(targetRoomId)", new_room_id)
         page.wait_for_function(
-            "Array.from(document.querySelectorAll('#messages .msg .bubble'))"
+            "() => Array.from(document.querySelectorAll('#messages .msg .bubble'))"
             ".some(el => el.textContent.includes('Round 2 switch-room message'))",
             timeout=10000,
         )

@@ -17,8 +17,13 @@ async def test_connect_against_non_database_file_names_the_path(tmp_path, caplog
     bad_path.write_text("this is a plain text file, not a sqlite database")
 
     db = Database(str(bad_path))
-    with caplog.at_level("ERROR"):
-        with pytest.raises(sqlite3.DatabaseError):
-            await db.connect()
+    try:
+        with caplog.at_level("ERROR"):
+            with pytest.raises(sqlite3.DatabaseError):
+                await db.connect()
+    finally:
+        # A failed connect still started aiosqlite's worker thread; leaving it
+        # open keeps the whole pytest process alive at exit.
+        await db.close()
 
     assert any(str(bad_path) in record.getMessage() for record in caplog.records)
