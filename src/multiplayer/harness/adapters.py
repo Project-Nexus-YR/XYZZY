@@ -171,6 +171,7 @@ class ModelProviderHarness:
                 ),
             )
         )
+        raw_token_usage = response.get("token_usage", 0)
         return TurnResult(
             StopReason.END_TURN,
             {
@@ -179,6 +180,7 @@ class ModelProviderHarness:
                 "tool": tool,
                 "input": dict(raw_input) if isinstance(raw_input, dict) else {},
                 "result": output,
+                "token_usage": raw_token_usage if isinstance(raw_token_usage, int) else 0,
             },
             {
                 "provider_input": request.prompt,

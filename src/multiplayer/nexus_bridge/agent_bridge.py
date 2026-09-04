@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from datetime import timedelta
@@ -24,33 +25,41 @@ from ..security.screening import fenced, screen
 
 log = logging.getLogger(__name__)
 
-# Add NEXUS to path
-_nexus_src = str(Path(__file__).resolve().parents[4] / "NEXUS" / "src")
-if _nexus_src not in sys.path:
-    sys.path.insert(0, _nexus_src)
+# NEXUS integration is opt-in: it is only reachable when the operator points
+# XYZZY_NEXUS_PATH at a real NEXUS checkout. Unset, the bridge runs the
+# configured model provider directly, which is today's behaviour in CI and in
+# any clone that has no NEXUS checkout at all.
+_nexus_path = os.environ.get("XYZZY_NEXUS_PATH")
+if _nexus_path:
+    if _nexus_path not in sys.path:
+        sys.path.insert(0, _nexus_path)
+    try:
+        from nexus_runtime.agent import AgentExecutor  # type: ignore[import-not-found]
+        from nexus_runtime.contracts import (  # type: ignore[import-not-found]
+            MemoryProvider,
+            ModelProvider,
+        )
+        from nexus_runtime.events import InMemoryEventBus  # type: ignore[import-not-found]
+        from nexus_runtime.models import (  # type: ignore[import-not-found]
+            Agent,
+            AgentRunState,
+            Budget,
+        )
+        from nexus_runtime.models import (
+            DomainError as NexusDomainError,
+        )
+        from nexus_runtime.persistence import SQLiteStateStore  # type: ignore[import-not-found]
+        from nexus_runtime.policy import PolicyEngine  # type: ignore[import-not-found]
+        from nexus_runtime.tools import ToolRegistry  # type: ignore[import-not-found]
 
-try:
-    from nexus_runtime.agent import AgentExecutor  # type: ignore[import-not-found]
-    from nexus_runtime.contracts import (  # type: ignore[import-not-found]
-        MemoryProvider,
-        ModelProvider,
-    )
-    from nexus_runtime.events import InMemoryEventBus  # type: ignore[import-not-found]
-    from nexus_runtime.models import (  # type: ignore[import-not-found]
-        Agent,
-        AgentRunState,
-        Budget,
-    )
-    from nexus_runtime.models import (
-        DomainError as NexusDomainError,
-    )
-    from nexus_runtime.persistence import SQLiteStateStore  # type: ignore[import-not-found]
-    from nexus_runtime.policy import PolicyEngine  # type: ignore[import-not-found]
-    from nexus_runtime.tools import ToolRegistry  # type: ignore[import-not-found]
-
-    _HAS_NEXUS = True
-except ImportError:
-    log.warning("NEXUS runtime not available; using bridge-native model execution")
+        _HAS_NEXUS = True
+    except ImportError:
+        log.warning(
+            "NEXUS runtime not available at XYZZY_NEXUS_PATH; using bridge-native model execution"
+        )
+        _HAS_NEXUS = False
+        NexusDomainError = Exception
+else:
     _HAS_NEXUS = False
     NexusDomainError = Exception
 
@@ -278,12 +287,14 @@ class NexusAgentBridge:
             async with self._lock:
                 self._fallback_states[run_id] = "COMPLETED" if action == "finish" else "RUNNING"
             raw_input = response.get("input", {})
+            raw_token_usage = response.get("token_usage", 0)
             return {
                 "status": "ok",
                 "result": output,
                 "action": action,
                 "tool": str(response.get("tool", "")),
                 "input": dict(raw_input) if isinstance(raw_input, dict) else {},
+                "token_usage": raw_token_usage if isinstance(raw_token_usage, int) else 0,
                 "provenance": self._provider_provenance(
                     response=response,
                     output=output,
@@ -481,24 +492,7 @@ class NexusAgentBridge:
             raw_content = output_data.get("content")
             if not isinstance(raw_content, str):
                 raise ModelProviderError("model provider returned no synthesis content")
-            try:
-                parsed = self._decode_synthesis_json(raw_content)
-            except ModelProviderError:
-                # Injected legacy transports may ignore the requested JSON schema.
-                # The provider response still supplies the synthesis narrative;
-                # deterministic source claims keep provenance complete.
-                parsed = {
-                    "summary": raw_content,
-                    "claims": [
-                        {
-                            "text": item["content"],
-                            "source_output_ids": [item["output_id"]],
-                            "confidence": 0.5,
-                        }
-                        for item in outputs
-                    ],
-                    **unavailable_sections(spec),
-                }
+            parsed = self._decode_synthesis_json(raw_content)
         allowed = {item["output_id"] for item in outputs}
         claims_value = parsed.get("claims")
         if not isinstance(claims_value, list) or not claims_value:
@@ -528,6 +522,7 @@ class NexusAgentBridge:
             )
         parsed["claims"] = normalized_claims
         evidence = response.get("provider_evidence")
+        raw_token_usage = response.get("token_usage", 0)
         return {
             "document": parsed,
             "provider_input": provider_input,
@@ -540,6 +535,7 @@ class NexusAgentBridge:
                 evidence if isinstance(evidence, str) else str(output_data.get("content", ""))
             ),
             "simulated": simulated,
+            "token_usage": raw_token_usage if isinstance(raw_token_usage, int) else 0,
         }
 
     @staticmethod

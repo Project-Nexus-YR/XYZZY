@@ -7,13 +7,12 @@ the caller's `/v1` root; this provider appends `/chat/completions` itself.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from typing import Any
 
 import httpx
 
-from .openai_responses import ModelProviderError, _Step, _step_content, _string_enum
+from ._decoding import ModelProviderError, _string_enum, decode_step
 
 _DEFAULT_TIMEOUT_SECONDS = 45.0
 
@@ -145,7 +144,7 @@ class OpenAIChatCompletionsProvider:
         content = self._extract_message_content(payload)
         if not content:
             raise ModelProviderError("model provider returned no text output")
-        step = self._decode_step(response_schema, content)
+        step = decode_step(response_schema, content)
         usage = payload.get("usage")
         token_usage = usage.get("total_tokens", 0) if isinstance(usage, Mapping) else 0
         return {
@@ -166,36 +165,6 @@ class OpenAIChatCompletionsProvider:
             ),
             "provider_evidence": step.content,
         }
-
-    @staticmethod
-    def _decode_step(response_schema: dict[str, Any], content: str) -> _Step:
-        """The action the model chose, refusing anything the run did not offer.
-
-        Same contract as the Responses provider's step decoder: a schema with no
-        action enum asked for no choice, so the text is the whole answer.
-        """
-        actions = _string_enum(response_schema, "action")
-        if not actions:
-            return _Step("finish", "", {}, content)
-        try:
-            decoded = json.loads(content)
-        except ValueError as exc:
-            raise ModelProviderError("model provider returned no decodable action") from exc
-        if not isinstance(decoded, Mapping):
-            raise ModelProviderError("model provider returned no decodable action")
-        action = decoded.get("action")
-        if not isinstance(action, str) or action not in actions:
-            raise ModelProviderError("model provider chose an action this run did not offer")
-        text = _step_content(decoded, content)
-        if action != "tool":
-            return _Step(action, "", {}, text)
-        tool = decoded.get("tool")
-        if not isinstance(tool, str) or tool not in _string_enum(response_schema, "tool"):
-            raise ModelProviderError("model provider requested a tool this run was not offered")
-        tool_input = decoded.get("input")
-        return _Step(
-            action, tool, dict(tool_input) if isinstance(tool_input, Mapping) else {}, text
-        )
 
     @staticmethod
     def _extract_message_content(payload: Mapping[str, Any]) -> str:

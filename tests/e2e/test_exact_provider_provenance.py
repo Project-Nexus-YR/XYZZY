@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -32,10 +33,27 @@ class _ProvenanceTransport(httpx.AsyncBaseTransport):
         self.requests.append(payload)
         index = len(self.requests)
         text = f"Evidence-backed specialist recommendation {index}"
+        fmt_name = payload.get("text", {}).get("format", {}).get("name")
         # A specialist step is asked for one of the actions the run offered, so it
-        # answers in that shape; synthesis is asked for prose and answers with prose.
-        if payload.get("text", {}).get("format", {}).get("name") == "xyzzy_step":
+        # answers in that shape; synthesis is asked for the document schema and
+        # answers with a claim citing the real selected outputs, never an
+        # invented id: the prompt itself names each one as "AgentOutput <id>".
+        if fmt_name == "xyzzy_step":
             text = json.dumps({"action": "finish", "output": {"content": text}})
+        elif fmt_name == "xyzzy_response":
+            source_output_ids = re.findall(r"AgentOutput (\S+) \(agent", str(payload["input"]))
+            text = json.dumps(
+                {
+                    "summary": text,
+                    "claims": [
+                        {
+                            "text": text,
+                            "source_output_ids": source_output_ids,
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
+            )
         return httpx.Response(
             200,
             request=request,
