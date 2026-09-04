@@ -163,18 +163,3 @@ class RoomEvent:
     event_id: str = field(default_factory=lambda: new_id("evt"))
     timestamp: datetime = field(default_factory=utcnow)
     schema_version: int = 1
-
-
-@dataclass(frozen=True, slots=True)
-class OrgEvent:
-    """A durable event within an organization."""
-
-    org_id: str
-    sequence: int
-    event_type: EventType
-    payload: dict[str, Any]
-    actor_id: str
-    actor_type: str
-    event_id: str = field(default_factory=lambda: new_id("evt"))
-    timestamp: datetime = field(default_factory=utcnow)
-    schema_version: int = 1

@@ -1,6 +1,6 @@
 """Public domain model and event API."""
 
-from .events import EventType, OrgEvent, RoomEvent
+from .events import EventType, RoomEvent
 from .models import (
     AddressingMode,
     AgentAddressing,
@@ -146,7 +146,6 @@ __all__ = [
     "OntologyReviewAction",
     "OntologyReviewStatus",
     "OntologyReviewTarget",
-    "OrgEvent",
     "OrgMember",
     "OidcAuthorization",
     "Organization",
