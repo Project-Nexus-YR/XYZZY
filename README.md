@@ -113,7 +113,7 @@ Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 lice
 
 ```
 src/multiplayer/
-├── domain/          # models.py, events.py: frozen dataclasses, RoomEvent/OrgEvent
+├── domain/          # models.py, events.py: frozen dataclasses, RoomEvent
 ├── db/              # connection.py, repositories.py: 44 typed repository classes
 ├── migrations/      # numbered *.sql, applied in order at startup
 ├── services/        # service.py, presence.py: state machines, presence tracking
@@ -332,6 +332,22 @@ with one click.
 The database is a file under `/data`. Without the volume the room history dies
 with the container.
 
+### Backing up
+
+The database runs in WAL mode, so a plain file copy taken while the server is
+writing can silently truncate the event log. Use the operator CLI instead: it
+asks SQLite itself for a consistent snapshot (`VACUUM INTO`), which is safe
+while the server keeps running.
+
+```bash
+python -m multiplayer.manage multiplayer.db db backup backup-$(date +%F).db
+```
+
+Verify a backup the same way you verify the live file, with `audit verify`
+against the copy. Restoring is copying the backup into place while the server
+is stopped; the `-wal` and `-shm` files belong to the live database and must
+not be copied alongside it.
+
 ## Running Tests
 
 ```bash
@@ -348,7 +364,7 @@ python -m pytest tests/regression/ -v
 
 ## Current Status
 
-The current repository gate is 979 tests (978 passing, 1 skipped without `OPENAI_API_KEY`) plus Ruff format/check and strict `mypy src`,
+The current repository gate is 1063 tests (1062 passing, 1 skipped without `OPENAI_API_KEY`) plus Ruff format/check and strict `mypy src`,
 run on every push and pull request by `.github/workflows/ci.yml`.
 The suite covers:
 - Unit tests for domain models

@@ -7,8 +7,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- A stored cross-site script in the Agents panel is closed. The Remove
+  button built its click handler as JavaScript inside an HTML attribute, and
+  the quote escape ran after the HTML escape, so an agent name chosen by an
+  editor executed in a room admin's session when the panel opened. The
+  handler now reads its arguments from data attributes, the way the rest of
+  the file already did, and a browser test drives the payload through a real
+  Chromium to prove it stays inert.
+- Continuing or cancelling an agent task re-reads the caller's room
+  membership at the moment it acts. A member removed from a channel, or
+  demoted to viewer, could previously resume a task they had opened and
+  author a room event in a room every other surface refused them.
+- The chain verifier enumerates rooms from their sequence counters instead
+  of from the event table itself, so deleting a room's whole log no longer
+  verifies clean, and a truncated tail is reported even when the counter row
+  is missing.
+- Session cookies refuse to be issued without the Secure flag and the
+  `__Host-` prefix when the configured OIDC redirect is not HTTPS on a
+  non-loopback host, and the SSO guide names the reverse proxy case.
+- Every response carries a Content-Security-Policy restricted to the origin,
+  with `frame-ancestors 'none'`, `object-src 'none'`, `base-uri 'self'`,
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and a
+  Referrer-Policy. The fonts are vendored under `web/fonts/`, so neither the
+  app shell nor the public share page fetches anything from Google.
+- The A2A status stream re-checks room membership on its heartbeat as well
+  as the credential, and re-reads the credential the stream was opened with
+  rather than the raw header, so a cookie-authenticated stream no longer
+  fails closed after thirty seconds.
+
+### Fixed
+
+- A second `POST /step` against a run already holding at a reviewer is
+  refused instead of re-prompting the model and settling the run behind the
+  pending approval. The turn entrance is a compare-and-swap on the run's
+  state.
+- The three A2A task verbs that append a message and transition the task
+  commit both writes in one transaction, as do creating an organization or a
+  workspace and its first admin membership. A fault-injecting database in
+  the test suite now proves that a failure between the two leaves neither
+  half behind.
+- An A2A task in WORKING is recovered after a shutdown and after a hard
+  kill. Cancellation is caught and fails the task, and a sweep on startup and
+  beside the lease sweep fails any WORKING task whose run has settled.
+- A provider answering a synthesis request with prose instead of the schema
+  produces a FAILED synthesis with its event, not a COMPLETED brief with
+  invented claims and confidence.
+- Attachments whose filename holds non-Latin characters or an emoji download
+  again. The Content-Disposition carries an ASCII fallback beside the RFC
+  5987 `filename*` form instead of raising on the header encoding.
+- Room state and room events are paged with a capped limit that reaches the
+  query, so a long-lived room no longer loads its whole log into memory on
+  every read.
+- A subscriber whose queue overflows is told so: the drop is counted in
+  `/metrics`, logged once, and the socket closes with code 4408 so the
+  client reconnects and reloads instead of silently missing events.
+- A socket opened with `last_sequence` replays every later room event, in
+  order and without duplicates, before live delivery, so the window between a
+  snapshot read and the socket subscribe can no longer lose an event. The
+  client sends its snapshot cursor when switching rooms, applies only the
+  snapshot for the room it is on, keeps at most one socket open, and no
+  longer drops a task created while a state fetch is in flight.
+- Redis fan-out backs off properly after a subscribe that was acknowledged
+  and then dropped, and an off-schema message on the shared channel is
+  discarded rather than tearing down the subscribe loop.
+- Unhandled route exceptions are counted as 500s in `/metrics`, and the
+  application lifespan tears down in a `finally`, so a failing test no
+  longer leaks the service globals and an open aiosqlite thread.
+- Startup no longer re-hashes a range whose `event_hash` was cleared as if
+  it were a legacy row, and the migration runner's `foreign_keys=OFF`
+  detection is case and whitespace insensitive.
+- An empty stored browser binding no longer lets a login claim succeed.
+- `GET /api/v1/auth/config` no longer extends the session idle clock as a
+  side effect of answering.
+- Starting against a file that is not a SQLite database names the path in
+  the error, which the handler meant to do and could not reach.
+- A layout under `dir="rtl"` mirrors: inline-axis properties and the drawer
+  and popover positioning are logical.
+
 ### Added
 
+- `python -m multiplayer.manage <db> db backup <dest>` writes a consistent
+  snapshot through `VACUUM INTO`, and the README explains why a file copy of
+  a WAL database is not a backup.
+- Indexes on `agent_tasks(state, created_at)`, `executions(agent_id, ...)`
+  and `ontology_reviews(room_id)` replace the full scans behind the startup
+  sweep, delegation lookups and every Meta answer.
+- `xyzzy_model_tokens_total` in `/metrics`, fed by the token usage both
+  providers already reported.
+- Presence expires: the socket heartbeats presence on every revalidation
+  tick, stale entries are hidden and swept, and the served roster no longer
+  shows a vanished member as online.
+- `XYZZY_NEXUS_PATH` is the one supported way to attach a NEXUS checkout;
+  the sibling-directory `sys.path` walk is gone.
+- A browser test suite (`tests/e2e/test_web_client.py`) drives the served
+  page through Playwright, a fault-injecting database under `tests/failure/`
+  exercises the atomic write paths, the migration suite asserts every
+  trigger survives a table rebuild, and the route authorization test derives
+  its coverage from the app's own routes.
+- `constraints.txt` pins the full dependency closure for CI and the image,
+  Dependabot watches pip and the actions, `pip-audit` runs in the gate, the
+  image is built in every pull request, and the published image is
+  multi-architecture with an SBOM and provenance and is only built for a
+  commit whose gates passed.
+- `scripts/check_anchors.py` verifies every line-anchored proof link on the
+  landing page and in the README trace, and runs in CI.
+
+### Changed
+
+- The demo starts with `docker compose run --rm --service-ports demo`, which
+  cannot collide with the always-on service on port 8000.
+- The provider identity is read from one shared step decoder instead of two
+  copies, `OrgEvent`, `PresenceRepo` and the unused sequence helpers are
+  deleted, and `NexusAgentBridge` is injectable through the service
+  constructor.
+- The README structure tree, environment table, auth boundary, supported
+  version policy and data lifecycle statement match the code, and
+  `skills-lock.json` is gone from the repository.
 - The web client's accent colour now matches the landing page's forest
   green, so the app and the site read as one product.
 - The public landing page grew a pinned scroll stage over the three product
@@ -90,7 +206,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - The realtime hub scales past one process: with `XYZZY_REDIS_URL` set
-  (install `xyzzy[redis]`), room events, session revocations, and user
+  (install with `pip install -e ".[redis]"`), room events, session revocations, and user
   notifications fan out across processes through Redis pub/sub, and presence
   stays correct cluster-wide through keys that expire on silence. Transport
   is deliberately best-effort: the sequence-numbered log with reconnect
