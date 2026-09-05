@@ -415,7 +415,7 @@ def test_notification_query_cannot_override_bearer_identity(client: TestClient) 
     service = routes._svc
     original = service.list_notifications
 
-    async def capture_user(user_id: str) -> list[Any]:
+    async def capture_user(user_id: str, *, limit: int | None = None) -> list[Any]:
         observed_user_ids.append(user_id)
         return []
 

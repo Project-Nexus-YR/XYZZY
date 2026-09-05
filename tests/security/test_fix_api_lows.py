@@ -242,8 +242,10 @@ async def test_branches_route_reads_room_outputs_and_selections_once_per_page(
 
             calls = {"outputs": 0, "selections": 0}
 
-            async def fake_list_room_branches(self: MultiplayerService, rid: str) -> list[Branch]:
-                return branches
+            async def fake_list_room_branches(
+                self: MultiplayerService, rid: str, *, limit: int | None = None
+            ) -> list[Branch]:
+                return branches[:limit]
 
             async def counted_outputs(self: MultiplayerService, rid: str) -> list[Any]:
                 calls["outputs"] += 1

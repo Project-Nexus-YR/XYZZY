@@ -285,9 +285,9 @@ class _BranchesMixin(_SharedMixin):
         await self._broadcast_persisted_events(persisted_events)
         return branch, executions
 
-    async def list_room_branches(self, room_id: str) -> list[Branch]:
+    async def list_room_branches(self, room_id: str, *, limit: int | None = None) -> list[Branch]:
         await self.get_room(room_id)
-        return await self.repos.branches.list_by_room(room_id)
+        return await self.repos.branches.list_by_room(room_id, limit=limit)
 
     async def list_branch_runs(self, branch_id: str) -> list[Execution]:
         await self.get_branch(branch_id)
@@ -348,9 +348,11 @@ class _BranchesMixin(_SharedMixin):
         await self._broadcast_persisted_events([event])
         return selection
 
-    async def list_output_selections(self, room_id: str) -> list[OutputSelection]:
+    async def list_output_selections(
+        self, room_id: str, *, limit: int | None = None
+    ) -> list[OutputSelection]:
         await self.get_room(room_id)
-        return await self.repos.output_selections.list_by_room(room_id)
+        return await self.repos.output_selections.list_by_room(room_id, limit=limit)
 
     async def select_branch_output(
         self,

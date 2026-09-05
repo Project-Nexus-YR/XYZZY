@@ -1474,18 +1474,10 @@ async def list_room_branches(
     principal: CurrentUser,
     limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
-    """One page of the room's branches (finding 10).
-
-    Needs lead wiring: repositories. ``svc.list_room_branches`` has no LIMIT of
-    its own, so the ideal fix is a repository signature of
-    ``list_room_branches(room_id: str, *, limit: int) -> list[Branch]`` pushed
-    into the SQL the way ``events.list_since`` already does; until that lands,
-    the interim below still reads every branch and slices in Python, which
-    only bounds the response, not the read.
-    """
+    """One page of the room's branches (finding 10)."""
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    branches = (await svc.list_room_branches(room_id))[:limit]
+    branches = await svc.list_room_branches(room_id, limit=limit)
     # Read once for the whole page rather than once per branch (finding 33).
     outputs = await svc.list_room_outputs(room_id)
     selections = await svc.list_output_selections(room_id)
@@ -1894,16 +1886,11 @@ async def list_room_outputs(
     principal: CurrentUser,
     limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
-    """List immutable agent outputs for inspection and later selection.
-
-    Needs lead wiring: repositories. Bounded here by slicing the full read
-    (finding 10); the SQL still returns every row. Ideal signature:
-    ``svc.list_room_outputs(room_id, *, limit: int) -> list[AgentOutput]``.
-    """
+    """List immutable agent outputs for inspection and later selection."""
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
     try:
-        outputs = (await svc.list_room_outputs(room_id))[:limit]
+        outputs = await svc.list_room_outputs(room_id, limit=limit)
     except DomainError as e:
         raise HTTPException(404, str(e)) from e
     return [
@@ -1957,13 +1944,9 @@ async def list_room_output_selections(
     principal: CurrentUser,
     limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
-    """Needs lead wiring: repositories. Ideal signature:
-    ``svc.list_output_selections(room_id, *, limit: int) -> list[OutputSelection]``;
-    the slice below (finding 10) bounds the response, not the read.
-    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    selections = (await svc.list_output_selections(room_id))[:limit]
+    selections = await svc.list_output_selections(room_id, limit=limit)
     return [
         {
             "output_id": selection.output_id,
@@ -2386,13 +2369,9 @@ async def list_tasks(
     principal: CurrentUser,
     limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
-    """Needs lead wiring: repositories. Ideal signature:
-    ``svc.list_room_tasks(room_id, *, limit: int) -> list[Task]``; the slice
-    below (finding 10) bounds the response, not the read.
-    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    tasks = (await svc.list_room_tasks(room_id))[:limit]
+    tasks = await svc.list_room_tasks(room_id, limit=limit)
     return [
         {
             "task_id": t.task_id,
@@ -2870,16 +2849,13 @@ async def list_artifact_versions(
     principal: CurrentUser,
     limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
-    """Needs lead wiring: repositories. Ideal signature:
-    ``svc.repos.artifacts.list_versions(artifact_id, *, limit: int) ->
-    list[ArtifactVersion]``; the slice below (finding 10) bounds the response,
-    not the read. ``content`` is dropped from each row (finding 10): an
-    artifact edited often used to return its whole history's content on one
-    call, and a version's content is one GET away at the provenance route.
+    """``content`` is dropped from each row (finding 10): an artifact edited
+    often used to return its whole history's content on one call, and a
+    version's content is one GET away at the provenance route.
     """
     svc = _svc_or_404()
     await _authorized_artifact(artifact_id, principal, RoomCapability.READ)
-    versions = (await svc.repos.artifacts.list_versions(artifact_id))[:limit]
+    versions = await svc.repos.artifacts.list_versions(artifact_id, limit=limit)
     return [
         {
             "version_id": v.version_id,
@@ -3045,13 +3021,9 @@ async def list_decisions(
     principal: CurrentUser,
     limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
-    """Needs lead wiring: repositories. Ideal signature:
-    ``svc.list_room_decisions(room_id, *, limit: int) -> list[Decision]``; the
-    slice below (finding 10) bounds the response, not the read.
-    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    decs = (await svc.list_room_decisions(room_id))[:limit]
+    decs = await svc.list_room_decisions(room_id, limit=limit)
     return [
         {
             "decision_id": d.decision_id,
@@ -3096,13 +3068,9 @@ async def list_memories(
     principal: CurrentUser,
     limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
-    """Needs lead wiring: repositories. Ideal signature:
-    ``svc.list_room_memories(room_id, *, limit: int) -> list[Memory]``; the
-    slice below (finding 10) bounds the response, not the read.
-    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    mems = (await svc.list_room_memories(room_id))[:limit]
+    mems = await svc.list_room_memories(room_id, limit=limit)
     return [
         {
             "memory_id": m.memory_id,
@@ -3254,13 +3222,8 @@ async def list_notifications(
     principal: CurrentUser,
     limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
-    """Needs lead wiring: repositories. Ideal signature:
-    ``svc.list_notifications(user_id, *, limit: int) -> list[Notification]``,
-    with the underlying repository's ``list_unread`` given the same LIMIT
-    discipline; the slice below (finding 10) bounds the response, not the read.
-    """
     svc = _svc_or_404()
-    notifs = (await svc.list_notifications(principal.user_id))[:limit]
+    notifs = await svc.list_notifications(principal.user_id, limit=limit)
     return [
         {
             "notification_id": n.notification_id,

@@ -2,15 +2,15 @@
 whole history of outputs, versions, branches, output selections, tasks,
 decisions, memories, or a user's whole notification backlog came back in one
 response. Each now takes the same `limit` (default 100, ceiling 500) the rest
-of the API's list routes already use, and the repository call underneath it
-is sliced in Python as an interim (see "Needs lead wiring: repositories" in
-the report) since the repository methods themselves are the runtime track's
-file.
+of the API's list routes already use, and that `limit` reaches the SQL
+`LIMIT` in the repository method underneath (see `test_fix_limits.py` for the
+end-to-end proof against real rows).
 
-Every case here monkeypatches the service call the route makes to return a
-large synthetic list, rather than seeding hundreds of real rows through
-several transactions per row: what is under test is `routes.py`'s own
-`[:limit]`, not the repository or the domain objects it returns.
+Every case here monkeypatches the service call the route makes with a fake
+that applies the same slice a repository's `LIMIT` would, rather than seeding
+hundreds of real rows through several transactions per row: what is under
+test is that `routes.py` passes the query parameter's default and ceiling
+through as `limit`, not the repository or the domain objects it returns.
 """
 
 from __future__ import annotations
@@ -97,8 +97,10 @@ async def test_room_outputs_are_paginated(seeded_client) -> None:
         for i in range(150)
     ]
 
-    async def fake_list_room_outputs(self: MultiplayerService, rid: str) -> list[Any]:
-        return outputs
+    async def fake_list_room_outputs(
+        self: MultiplayerService, rid: str, *, limit: int | None = None
+    ) -> list[Any]:
+        return outputs[:limit]
 
     monkeypatch.setattr(MultiplayerService, "list_room_outputs", fake_list_room_outputs)
     await _assert_paginated(
@@ -118,8 +120,10 @@ async def test_room_output_selections_are_paginated(seeded_client) -> None:
         for i in range(150)
     ]
 
-    async def fake_list_output_selections(self: MultiplayerService, rid: str) -> list[Any]:
-        return selections
+    async def fake_list_output_selections(
+        self: MultiplayerService, rid: str, *, limit: int | None = None
+    ) -> list[Any]:
+        return selections[:limit]
 
     monkeypatch.setattr(MultiplayerService, "list_output_selections", fake_list_output_selections)
     await _assert_paginated(
@@ -134,8 +138,10 @@ async def test_room_tasks_are_paginated(seeded_client) -> None:
     client, room_id, monkeypatch = seeded_client
     tasks = [Task(task_id=f"task-{i}", room_id=room_id, title=f"t{i}") for i in range(150)]
 
-    async def fake_list_room_tasks(self: MultiplayerService, rid: str) -> list[Any]:
-        return tasks
+    async def fake_list_room_tasks(
+        self: MultiplayerService, rid: str, *, limit: int | None = None
+    ) -> list[Any]:
+        return tasks[:limit]
 
     monkeypatch.setattr(MultiplayerService, "list_room_tasks", fake_list_room_tasks)
     await _assert_paginated(
@@ -150,8 +156,10 @@ async def test_room_decisions_are_paginated(seeded_client) -> None:
         for i in range(150)
     ]
 
-    async def fake_list_room_decisions(self: MultiplayerService, rid: str) -> list[Any]:
-        return decisions
+    async def fake_list_room_decisions(
+        self: MultiplayerService, rid: str, *, limit: int | None = None
+    ) -> list[Any]:
+        return decisions[:limit]
 
     monkeypatch.setattr(MultiplayerService, "list_room_decisions", fake_list_room_decisions)
     await _assert_paginated(
@@ -173,8 +181,10 @@ async def test_room_memories_are_paginated(seeded_client) -> None:
         for i in range(150)
     ]
 
-    async def fake_list_room_memories(self: MultiplayerService, rid: str) -> list[Any]:
-        return memories
+    async def fake_list_room_memories(
+        self: MultiplayerService, rid: str, *, limit: int | None = None
+    ) -> list[Any]:
+        return memories[:limit]
 
     monkeypatch.setattr(MultiplayerService, "list_room_memories", fake_list_room_memories)
     await _assert_paginated(
@@ -191,8 +201,10 @@ async def test_notifications_are_paginated(seeded_client) -> None:
         for i in range(150)
     ]
 
-    async def fake_list_notifications(self: MultiplayerService, uid: str) -> list[Any]:
-        return notifs
+    async def fake_list_notifications(
+        self: MultiplayerService, uid: str, *, limit: int | None = None
+    ) -> list[Any]:
+        return notifs[:limit]
 
     monkeypatch.setattr(MultiplayerService, "list_notifications", fake_list_notifications)
     await _assert_paginated(
@@ -218,8 +230,10 @@ async def test_room_branches_are_paginated(seeded_client) -> None:
         for i in range(150)
     ]
 
-    async def fake_list_room_branches(self: MultiplayerService, rid: str) -> list[Branch]:
-        return branches
+    async def fake_list_room_branches(
+        self: MultiplayerService, rid: str, *, limit: int | None = None
+    ) -> list[Branch]:
+        return branches[:limit]
 
     async def fake_empty_list(self: MultiplayerService, ident: str) -> list[Any]:
         return []
@@ -272,8 +286,8 @@ async def test_artifact_versions_are_paginated_and_drop_content(seeded_client) -
     # Targeted patches on the real repo object, not a wholesale replacement:
     # `_authorized_artifact` still needs the real `.get()` to find the room
     # this artifact belongs to.
-    async def fake_list_versions(aid: str) -> list[ArtifactVersion]:
-        return versions
+    async def fake_list_versions(aid: str, *, limit: int | None = None) -> list[ArtifactVersion]:
+        return versions[:limit]
 
     async def fake_get_version(version_id: str) -> ArtifactVersion:
         return versions[0]

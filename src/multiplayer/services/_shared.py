@@ -536,21 +536,27 @@ class _ServiceCore(ABC):
     @abstractmethod
     async def list_agent_templates(self) -> list[AgentTemplate]: ...
     @abstractmethod
-    async def list_output_selections(self, room_id: str) -> list[OutputSelection]: ...
+    async def list_output_selections(
+        self, room_id: str, *, limit: int | None = None
+    ) -> list[OutputSelection]: ...
     @abstractmethod
     async def list_pending_approvals(self, room_id: str) -> list[Approval]: ...
     @abstractmethod
     async def list_room_agents(self, room_id: str) -> list[AgentInstance]: ...
     @abstractmethod
-    async def list_room_decisions(self, room_id: str) -> list[Decision]: ...
+    async def list_room_decisions(
+        self, room_id: str, *, limit: int | None = None
+    ) -> list[Decision]: ...
     @abstractmethod
-    async def list_room_memories(self, room_id: str) -> list[Memory]: ...
+    async def list_room_memories(
+        self, room_id: str, *, limit: int | None = None
+    ) -> list[Memory]: ...
     @abstractmethod
     async def list_room_messages(
         self, room_id: str, limit: int = 100, after_sequence: int | None = None
     ) -> list[Message]: ...
     @abstractmethod
-    async def list_room_tasks(self, room_id: str) -> list[Task]: ...
+    async def list_room_tasks(self, room_id: str, *, limit: int | None = None) -> list[Task]: ...
     @abstractmethod
     async def select_output(
         self, room_id: str, output_id: str, disposition: OutputDisposition, decided_by: str
@@ -1384,6 +1390,8 @@ class _SharedMixin(_ServiceCore):
     async def list_room_artifacts(self, room_id: str) -> list[Artifact]:
         return await self.repos.artifacts.list_by_room(room_id)
 
-    async def list_room_outputs(self, room_id: str) -> list[AgentOutput]:
+    async def list_room_outputs(
+        self, room_id: str, *, limit: int | None = None
+    ) -> list[AgentOutput]:
         await self.get_room(room_id)
-        return await self.repos.agent_outputs.list_by_room(room_id)
+        return await self.repos.agent_outputs.list_by_room(room_id, limit=limit)

@@ -1948,11 +1948,13 @@ class BranchRepo:
         row = await self.db.fetch_one("SELECT * FROM branches WHERE branch_id = ?", (branch_id,))
         return None if row is None else self._from_row(row)
 
-    async def list_by_room(self, room_id: str) -> list[Branch]:
-        rows = await self.db.fetch_all(
-            "SELECT * FROM branches WHERE room_id = ? ORDER BY created_at, branch_id",
-            (room_id,),
-        )
+    async def list_by_room(self, room_id: str, *, limit: int | None = None) -> list[Branch]:
+        sql = "SELECT * FROM branches WHERE room_id = ? ORDER BY created_at, branch_id"
+        params: tuple[Any, ...] = (room_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
+        rows = await self.db.fetch_all(sql, params)
         return [self._from_row(row) for row in rows]
 
     async def get_or_create_legacy(self, room_id: str, initiated_by: str) -> Branch:
@@ -2810,13 +2812,17 @@ class AgentOutputRepo:
         )
         return None if row is None else self._from_row(row)
 
-    async def list_by_room(self, room_id: str) -> list[AgentOutput]:
-        rows = await self.db.fetch_all(
+    async def list_by_room(self, room_id: str, *, limit: int | None = None) -> list[AgentOutput]:
+        sql = (
             "SELECT o.*, e.branch_id AS branch_id FROM agent_outputs o "
             "LEFT JOIN executions e ON e.execution_id = o.execution_id "
-            "WHERE o.room_id = ? ORDER BY o.created_at",
-            (room_id,),
+            "WHERE o.room_id = ? ORDER BY o.created_at"
         )
+        params: tuple[Any, ...] = (room_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
+        rows = await self.db.fetch_all(sql, params)
         return [self._from_row(row) for row in rows]
 
     async def list_by_branch(self, branch_id: str) -> list[AgentOutput]:
@@ -2995,11 +3001,15 @@ class OutputSelectionRepo:
         )
         return await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
 
-    async def list_by_room(self, room_id: str) -> list[OutputSelection]:
-        rows = await self.db.fetch_all(
-            "SELECT * FROM output_selections WHERE room_id = ? ORDER BY updated_at, output_id",
-            (room_id,),
-        )
+    async def list_by_room(
+        self, room_id: str, *, limit: int | None = None
+    ) -> list[OutputSelection]:
+        sql = "SELECT * FROM output_selections WHERE room_id = ? ORDER BY updated_at, output_id"
+        params: tuple[Any, ...] = (room_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
+        rows = await self.db.fetch_all(sql, params)
         return [
             OutputSelection(
                 room_id=row["room_id"],
@@ -3302,10 +3312,13 @@ class TaskRepo:
         await self.db.commit()
         return task
 
-    async def list_by_room(self, room_id: str) -> list[Task]:
-        rows = await self.db.fetch_all(
-            "SELECT * FROM tasks WHERE room_id = ? ORDER BY created_at", (room_id,)
-        )
+    async def list_by_room(self, room_id: str, *, limit: int | None = None) -> list[Task]:
+        sql = "SELECT * FROM tasks WHERE room_id = ? ORDER BY created_at"
+        params: tuple[Any, ...] = (room_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
+        rows = await self.db.fetch_all(sql, params)
         return [self._from_row(r) for r in rows]
 
     async def redact_content_in_transaction(self, task_id: str, marker: str) -> None:
@@ -4695,11 +4708,15 @@ class ArtifactRepo:
             container_id=version.artifact_id,
         )
 
-    async def list_versions(self, artifact_id: str) -> list[ArtifactVersion]:
-        rows = await self.db.fetch_all(
-            "SELECT * FROM artifact_versions WHERE artifact_id = ? ORDER BY version_number DESC",
-            (artifact_id,),
-        )
+    async def list_versions(
+        self, artifact_id: str, *, limit: int | None = None
+    ) -> list[ArtifactVersion]:
+        sql = "SELECT * FROM artifact_versions WHERE artifact_id = ? ORDER BY version_number DESC"
+        params: tuple[Any, ...] = (artifact_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
+        rows = await self.db.fetch_all(sql, params)
         return [
             ArtifactVersion(
                 version_id=r["version_id"],
@@ -5917,10 +5934,13 @@ class DecisionRepo:
         )
         return None if row is None else self._from_row(row)
 
-    async def list_by_room(self, room_id: str) -> list[Decision]:
-        rows = await self.db.fetch_all(
-            "SELECT * FROM decisions WHERE room_id = ? ORDER BY created_at", (room_id,)
-        )
+    async def list_by_room(self, room_id: str, *, limit: int | None = None) -> list[Decision]:
+        sql = "SELECT * FROM decisions WHERE room_id = ? ORDER BY created_at"
+        params: tuple[Any, ...] = (room_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
+        rows = await self.db.fetch_all(sql, params)
         return [self._from_row(r) for r in rows]
 
     async def update_status(
@@ -5993,12 +6013,15 @@ class MemoryRepo:
         await self.db.commit()
         return memory
 
-    async def list_by_room(self, room_id: str) -> list[Memory]:
-        rows = await self.db.fetch_all(
-            "SELECT * FROM memories WHERE room_id = ? AND superseded_by IS NULL "
-            "ORDER BY created_at",
-            (room_id,),
+    async def list_by_room(self, room_id: str, *, limit: int | None = None) -> list[Memory]:
+        sql = (
+            "SELECT * FROM memories WHERE room_id = ? AND superseded_by IS NULL ORDER BY created_at"
         )
+        params: tuple[Any, ...] = (room_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
+        rows = await self.db.fetch_all(sql, params)
         return [self._from_row(r) for r in rows]
 
     async def list_by_workspace(self, workspace_id: str) -> list[Memory]:
@@ -6203,12 +6226,16 @@ class NotificationRepo:
         await self.db.commit()
         return notification
 
-    async def list_unread(self, user_id: str) -> list[Notification]:
-        rows = await self.db.fetch_all(
+    async def list_unread(self, user_id: str, *, limit: int | None = None) -> list[Notification]:
+        sql = (
             "SELECT * FROM notifications WHERE user_id = ? AND status = 'UNREAD' "
-            "ORDER BY created_at DESC",
-            (user_id,),
+            "ORDER BY created_at DESC"
         )
+        params: tuple[Any, ...] = (user_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
+        rows = await self.db.fetch_all(sql, params)
         return [
             Notification(
                 notification_id=r["notification_id"],

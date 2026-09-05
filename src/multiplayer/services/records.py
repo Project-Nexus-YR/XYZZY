@@ -243,8 +243,8 @@ class _RecordsMixin(_SharedMixin):
         await self._broadcast_persisted_events([event])
         return task
 
-    async def list_room_tasks(self, room_id: str) -> list[Task]:
-        return await self.repos.tasks.list_by_room(room_id)
+    async def list_room_tasks(self, room_id: str, *, limit: int | None = None) -> list[Task]:
+        return await self.repos.tasks.list_by_room(room_id, limit=limit)
 
     async def _is_published_synthesis(self, artifact_id: str) -> bool:
         """True when any version of this artifact was published by a branch synthesis."""
@@ -518,8 +518,10 @@ class _RecordsMixin(_SharedMixin):
         await self._broadcast_persisted_events([event])
         return decision
 
-    async def list_room_decisions(self, room_id: str) -> list[Decision]:
-        return await self.repos.decisions.list_by_room(room_id)
+    async def list_room_decisions(
+        self, room_id: str, *, limit: int | None = None
+    ) -> list[Decision]:
+        return await self.repos.decisions.list_by_room(room_id, limit=limit)
 
     async def create_memory(
         self,
@@ -564,8 +566,8 @@ class _RecordsMixin(_SharedMixin):
         await self._broadcast_persisted_events([event])
         return memory
 
-    async def list_room_memories(self, room_id: str) -> list[Memory]:
-        return await self.repos.memories.list_by_room(room_id)
+    async def list_room_memories(self, room_id: str, *, limit: int | None = None) -> list[Memory]:
+        return await self.repos.memories.list_by_room(room_id, limit=limit)
 
     async def create_notification(
         self,
@@ -586,5 +588,7 @@ class _RecordsMixin(_SharedMixin):
         await self.repos.notifications.create(notif)
         return notif
 
-    async def list_notifications(self, user_id: str) -> list[Notification]:
-        return await self.repos.notifications.list_unread(user_id)
+    async def list_notifications(
+        self, user_id: str, *, limit: int | None = None
+    ) -> list[Notification]:
+        return await self.repos.notifications.list_unread(user_id, limit=limit)
