@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
@@ -15,6 +17,8 @@ import aiosqlite
 log = logging.getLogger(__name__)
 
 _READER_POOL_SIZE = 4
+# Matches the busy_timeout pragma below, in seconds.
+_CONNECT_LOCK_WAIT_SECONDS = 30.0
 
 
 class Database:
@@ -47,8 +51,22 @@ class Database:
             # sqlite3 opens lazily: a corrupt, truncated, or non-SQLite file
             # passes connect() and only fails on the first real statement, so
             # that failure has to stay inside this handler to name the path.
-            await self._db.execute("PRAGMA journal_mode=WAL")
             await self._db.execute("PRAGMA busy_timeout=30000")
+            # SQLite's busy handler (armed by busy_timeout above) does not
+            # cover the exclusive lock a first-time switch to WAL takes: two
+            # processes converting the same brand-new file at once can still
+            # have one of them fail this statement with "database is locked"
+            # right away instead of waiting. Retry it ourselves for the same
+            # thirty seconds busy_timeout already promises everywhere else.
+            deadline = time.monotonic() + _CONNECT_LOCK_WAIT_SECONDS
+            while True:
+                try:
+                    await self._db.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc) or time.monotonic() > deadline:
+                        raise
+                    await asyncio.sleep(0.05)
             await self._db.execute("PRAGMA foreign_keys=ON")
         except Exception:
             log.exception("Failed to connect to database at %s", self._path)
