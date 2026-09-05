@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- `connect-src` is `'self'` alone: the `ws:` and `wss:` sources only widened
+  the policy to every other host, since the keyword already matches a
+  websocket to the page's own origin.
+- The runtime image uninstalls pip, setuptools and wheel after the install,
+  which removes setuptools' vendored copies of jaraco.context and wheel and
+  the fixable HIGH CVEs they carried. The image scan in CI fails on any
+  CRITICAL or HIGH finding that has a fix; unfixed Debian findings are
+  reported, not counted.
 - The request body cap is enforced on the bytes received, at the ASGI
   layer, so a chunked upload without a Content-Length is refused at the cap
   before authentication or parsing instead of being read into memory.
@@ -64,6 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A bearer token that stops being valid ends the session visibly, every
+  time it happens on the same page: the socket stops reconnecting and the
+  setup screen returns with a message. Every dialog and the narrow drawer
+  move focus in on open, trap Tab, close on Escape and restore focus to the
+  opener. Every fetch a control triggers reports failure as a toast with
+  the server's detail, a validation error renders field by field, and the
+  shell has landmarks, a skip link, arrow-key menus and a live connection
+  status.
+- The eight list routes that accepted a limit but read every row now pass
+  it to the SQL as `LIMIT`, under the same ordering.
 - A socket subscribing with `last_sequence` pages its backfill to the end
   and keeps one high-water mark per room instead of a set of ids, so a
   100,000-event backlog is delivered gapless with constant state per
