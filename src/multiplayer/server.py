@@ -90,15 +90,16 @@ DEMO_BEARER_TOKEN = "demo"
 # app.js and app.css), so script-src and style-src need only 'self': a loaded
 # remote script or an injected style attribute is refused, not merely logged.
 # Fonts are vendored under web/fonts/ and served same origin, so font-src
-# names no outside host. connect-src carries ws: and wss: for the realtime
-# socket, which is not same-scheme as the https/http page that opens it.
+# names no outside host. connect-src is 'self' alone: since CSP level 3 that
+# keyword also matches a websocket to the page's own host, so ws: and wss:
+# would only have widened the policy to every other host.
 _CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
     "style-src 'self'; "
     "font-src 'self'; "
     "img-src 'self' data:; "
-    "connect-src 'self' ws: wss:; "
+    "connect-src 'self'; "
     "frame-ancestors 'none'; "
     "object-src 'none'; "
     "base-uri 'self'; "

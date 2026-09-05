@@ -67,7 +67,7 @@ async def test_every_response_carries_the_security_headers():
                 assert "style-src 'self'" in csp
                 assert "font-src 'self'" in csp
                 assert "img-src 'self' data:" in csp
-                assert "connect-src 'self' ws: wss:" in csp
+                assert "connect-src 'self'; " in csp
                 assert "base-uri 'self'" in csp
                 assert "form-action 'self'" in csp
 
