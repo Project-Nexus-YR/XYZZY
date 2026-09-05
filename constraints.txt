@@ -7,8 +7,8 @@
 #
 # `ast_serialize` (a mypy dependency) was frozen at 0.8.0 but has no cp311
 # wheel on PyPI, only a source distribution, so pinning it here would force a
-# from-source build on the CI runner (Python 3.11). It is left unpinned so
-# pip resolves whatever version ships a cp311 wheel.
+# from-source build on the CI runners (Python 3.11 and 3.14). It is left
+# unpinned so pip resolves whatever version ships a wheel for each.
 #
 # `uvloop` does not appear in a Windows `pip freeze` because uvicorn's own
 # `standard` extra marks it `sys_platform != "win32"`: it never installs on
