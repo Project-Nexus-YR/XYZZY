@@ -6257,6 +6257,33 @@ class NotificationRepo:
         )
         await self.db.commit()
 
+    async def redact_for_room_in_transaction(self, room_id: str, marker: str) -> None:
+        """Blank every notification's title/body for a room an erased user
+        authored an event in.
+
+        A notification never rides inside a chained event payload (it is
+        composed at send time, then stored only here), so this is the same
+        marker shape used elsewhere for that kind of column, not the
+        redaction_id marker the chained event log carries.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("notification redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE notifications SET title = ?, body = ? WHERE room_id = ?",
+            (marker, marker, room_id),
+        )
+
+    async def redact_for_recipient_in_transaction(self, user_id: str, marker: str) -> None:
+        """Blank every notification's title/body addressed to the erased user
+        themselves, the same marker shape as ``redact_for_room_in_transaction``.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("notification redaction requires transaction ownership")
+        await self.db.execute(
+            "UPDATE notifications SET title = ?, body = ? WHERE user_id = ?",
+            (marker, marker, user_id),
+        )
+
 
 class IdempotencyRepo:
     def __init__(self, db: Database) -> None:

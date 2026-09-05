@@ -117,7 +117,16 @@ _ABANDONED_INTERVENTION_REASON = "the user who steered this run was erased"
 #                          the immutability trigger 018/020 gave the column,
 #                          so it is now scrubbed in place the same as a
 #                          message, alongside the ``human_redirected_agent``
-#                          event payload that already carried the same text).
+#                          event payload that already carried the same text),
+#                          or a notification's ``title``/``body`` (round 7:
+#                          an invitee's notice names the inviting or invited
+#                          user by their room and display name, neither of
+#                          which is a template, org/workspace name, frozen
+#                          provenance, or an audit trail, so it does not fit
+#                          any reason the "kept_by_ruling" bucket documents
+#                          below; scrubbed by room, for every room the erased
+#                          user authored an event in, and by recipient, for
+#                          every notification addressed to them).
 #   "kept_by_ruling"    -- deliberately left alone, with a documented reason:
 #                          live shared infrastructure (agent/room templates,
 #                          a spawned agent's own name/system_prompt, an org's
@@ -433,8 +442,8 @@ _COLUMN_CLASSIFICATION: dict[tuple[str, str], _ColumnClassification] = {
     ("notifications", "notification_id"): "not_user_authored",
     ("notifications", "user_id"): "not_user_authored",
     ("notifications", "room_id"): "not_user_authored",
-    ("notifications", "title"): "kept_by_ruling",
-    ("notifications", "body"): "kept_by_ruling",
+    ("notifications", "title"): "redacted",
+    ("notifications", "body"): "redacted",
     ("notifications", "notification_type"): "not_user_authored",
     ("notifications", "status"): "not_user_authored",
     ("notifications", "created_at"): "not_user_authored",
@@ -899,6 +908,14 @@ class _ErasureMixin(_SharedMixin):
                     await self.repos.interventions.redact_instruction_in_transaction(
                         intervention_id, _NO_CHAIN_MARKER
                     )
+                # Every notification tied to this room (e.g. an invitation
+                # naming the erased user as inviter, or the room by its name)
+                # is scrubbed here too: a room only ever reaches this loop
+                # because some row of this user's own was found in it, the
+                # same reasoning the intervention sweep just above relies on.
+                await self.repos.notifications.redact_for_room_in_transaction(
+                    room_id, _NO_CHAIN_MARKER
+                )
             if redaction_announcements:
                 rooms_touched.append(room_id)
                 total_redactions += len(redaction_announcements)
@@ -1002,6 +1019,13 @@ class _ErasureMixin(_SharedMixin):
         async with self.db.transaction():
             await self.repos.users.tombstone_in_transaction(user_id)
             await self.repos.user_sessions.revoke_all_for_user_in_transaction(user_id, moment)
+            # A notification addressed to the erased user themselves (e.g. an
+            # invitation naming who invited them) is never reached by the
+            # per-room sweep above unless that same room also carries one of
+            # their own authored events.
+            await self.repos.notifications.redact_for_recipient_in_transaction(
+                user_id, _NO_CHAIN_MARKER
+            )
         for handle_room_id in await self.repos.handles.list_rooms_for_participant(
             ParticipantType.USER, user_id
         ):
