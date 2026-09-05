@@ -8,7 +8,12 @@ COPY src ./src
 # pyproject's package-data), and the server resolves it with
 # importlib.resources, which works the same whether the package is an
 # editable checkout or, as here, installed into site-packages.
+#
+# pip, setuptools and wheel only serve the install; the app resolves its own
+# version through importlib.metadata. Removing them afterwards takes their
+# vendored copies (jaraco.context, wheel) and their CVEs out of the image.
 RUN pip install --no-cache-dir -c constraints.txt . \
+    && pip uninstall -y setuptools wheel pip \
     && useradd --system --uid 10001 xyzzy \
     && mkdir /data && chown xyzzy /data
 USER xyzzy
