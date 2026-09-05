@@ -9,6 +9,8 @@ image has a Dependabot updater, and the health check honours XYZZY_PORT.
 
 from __future__ import annotations
 
+import re
+
 import tomllib
 from pathlib import Path
 
@@ -51,8 +53,12 @@ def test_docker_build_job_scans_the_image() -> None:
     scan = next(s for s in steps if s.get("uses", "").startswith("aquasecurity/trivy-action@"))
     assert scan["with"]["severity"] == "CRITICAL,HIGH"
     assert str(scan["with"]["exit-code"]) == "1"
+    assert str(scan["with"]["ignore-unfixed"]) in {"True", "true"}
+    # Pinned by commit with the version it stands for named beside it; the
+    # commit itself moves with every dependabot bump, so the test asserts the
+    # shape, not the value.
     text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
-    assert "aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0" in text
+    assert re.search(r"aquasecurity/trivy-action@[0-9a-f]{40} # v\d+\.\d+\.\d+", text)
 
 
 def test_publish_job_checks_tag_against_pyproject_version() -> None:
