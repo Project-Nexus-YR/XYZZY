@@ -13,7 +13,7 @@ export function renderAgents(agents) {
   const canRemove = state.currentRoomRole === 'admin';
   reconcileList(panel, agents, a => a.agent_id, a => `
     <div class="card" data-agent-id="${escHtml(a.agent_id)}">
-      <div class="title">${escHtml(a.name)} <span class="badge ${a.status.toLowerCase()}">${a.status}</span></div>
+      <div class="title">${escHtml(a.name)} <span class="badge ${escHtml(a.status.toLowerCase())}">${escHtml(a.status)}</span></div>
       <div class="detail">${escHtml(a.role)}${a.handle ? ` · <span class="handle">@${escHtml(a.handle)}</span>` : ''}</div>
       ${canRemove ? `<button class="btn-sm" data-agent-id="${escHtml(a.agent_id)}" data-agent-name="${escHtml(a.name)}" data-action="confirmRemoveAgent">Remove</button>` : ''}
     </div>
@@ -50,7 +50,7 @@ export function renderSidebarAgents(agents) {
   el.innerHTML = agents.map(a => `
     <div class="item">
       <span class="dot ${a.status === 'WORKING' ? 'working' : a.status === 'IDLE' ? 'idle' : 'online'}"></span>
-      ${escHtml(a.name)}${a.handle ? ` <span class="handle">@${escHtml(a.handle)}</span>` : ''} <span class="badge badge-push ${a.status.toLowerCase()}">${a.status}</span>
+      ${escHtml(a.name)}${a.handle ? ` <span class="handle">@${escHtml(a.handle)}</span>` : ''} <span class="badge badge-push ${escHtml(a.status.toLowerCase())}">${escHtml(a.status)}</span>
     </div>
   `).join('');
 }
@@ -60,8 +60,8 @@ export function renderTasks(tasks) {
   if (!tasks.length) { panel.innerHTML = '<div class="card"><div class="detail">No tasks</div></div>'; return; }
   reconcileList(panel, tasks, t => t.task_id, t => `
     <div class="card" data-task-id="${escHtml(t.task_id)}">
-      <div class="title">${escHtml(t.title)} <span class="badge ${t.status.toLowerCase()}">${t.status}</span></div>
-      <div class="detail">${t.assigned_agent_id ? 'Assigned: ' + t.assigned_agent_id.slice(0,12) : 'Unassigned'} | ${t.priority}</div>
+      <div class="title">${escHtml(t.title)} <span class="badge ${escHtml(t.status.toLowerCase())}">${escHtml(t.status)}</span></div>
+      <div class="detail">${t.assigned_agent_id ? 'Assigned: ' + escHtml(t.assigned_agent_id.slice(0,12)) : 'Unassigned'} | ${escHtml(t.priority)}</div>
     </div>
   `);
 }
@@ -74,8 +74,8 @@ export function renderApprovals(approvals) {
       <div class="action">${escHtml(a.action)}</div>
       <div class="reason">${escHtml(a.reason || 'awaiting a human')}</div>
       <div class="btns">
-        <button class="btn-approve" data-action="approveAction" data-approval-id="${a.approval_id}">Approve</button>
-        <button class="btn-reject" data-action="rejectAction" data-approval-id="${a.approval_id}">Reject</button>
+        <button class="btn-approve" data-action="approveAction" data-approval-id="${escHtml(a.approval_id)}">Approve</button>
+        <button class="btn-reject" data-action="rejectAction" data-approval-id="${escHtml(a.approval_id)}">Reject</button>
       </div>
     </div>
   `).join('');
@@ -174,6 +174,8 @@ export function renderDecisions(decs) {
   panel.innerHTML = decs.map(decisionCardHtml).join('');
 }
 
+// Said in the words of the person it stops, because a rule that parks a colleague's
+// tool call is not an administrator's private setting.
 export const POSTURE_COPY = {
   GUARDED: 'Guarded · only the tools that always need a human pause here',
   STRICT: 'Strict · every tool call in this channel pauses for a human',
@@ -271,11 +273,19 @@ export function roleLabel(role) {
 }
 
 export async function approveAction(approvalId) {
-  await api('POST', `/approvals/${approvalId}/approve`, {comment: 'Approved'});
-  await loadState();
+  try {
+    await api('POST', `/approvals/${approvalId}/approve`, {comment: 'Approved'});
+    await loadState();
+  } catch (err) {
+    toast(`Approval was not recorded: ${errorMessage(err)}`, 'error');
+  }
 }
 
 export async function rejectAction(approvalId) {
-  await api('POST', `/approvals/${approvalId}/reject`, {comment: 'Rejected'});
-  await loadState();
+  try {
+    await api('POST', `/approvals/${approvalId}/reject`, {comment: 'Rejected'});
+    await loadState();
+  } catch (err) {
+    toast(`Rejection was not recorded: ${errorMessage(err)}`, 'error');
+  }
 }

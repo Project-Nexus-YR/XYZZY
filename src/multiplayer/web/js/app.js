@@ -5,8 +5,8 @@
 import { toggleTheme } from './util.js';
 import { enterDemoWorkspace, startSsoLogin, setup, signOut, clearTokenError, handleSummaryKey, initAuth } from './auth.js';
 import {
-  openContext, closeContext, openCenterView, toggleSidebar, toggleAITray, setStrategy,
-  handleComposerKey, toggleChannelMenu, closeChannelMenu, openModal, closeModal,
+  openContext, closeContext, openCenterView, toggleSidebar, closeSidebarDrawer, toggleAITray,
+  setStrategy, handleComposerKey, toggleChannelMenu, closeChannelMenu, openModal, closeModal,
 } from './shell.js';
 import {
   openCreateChannelModal, openBrowseChannels, switchRoom, submitCreateChannel,
@@ -60,7 +60,12 @@ function closeAiTray() {
 }
 
 function closeSidebar() {
-  toggleSidebar(false);
+  // The backdrop click is the drawer's own close path — routed through
+  // closeSidebarDrawer (not toggleSidebar(false)) so it returns focus to
+  // #sidebar-toggle the same way Escape and the Tab-trap's own close do,
+  // instead of leaving focus stranded on whatever element inside the
+  // now-hidden drawer last held it.
+  closeSidebarDrawer();
 }
 
 function invitePeopleFromMenu() {

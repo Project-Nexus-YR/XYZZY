@@ -100,10 +100,10 @@ export async function runSearch(event) {
 // Routing every kind through openThread is what painted "message not found" over a
 // task, a decision or an artifact version.
 export const SEARCH_HIT_TARGETS = {
-  TASK: data => ({view: 'members', selector: `[data-task-id="${data.objectId}"]`}),
-  DECISION: data => ({view: 'members', selector: `[data-decision-id="${data.objectId}"]`}),
-  ARTIFACT_VERSION: data => ({view: 'artifacts', selector: `[data-artifact-id="${data.containerId}"]`}),
-  AGENT_OUTPUT: data => ({view: 'branch', selector: `[data-output-id="${data.objectId}"]`}),
+  TASK: data => ({view: 'members', selector: `[data-task-id="${CSS.escape(data.objectId)}"]`}),
+  DECISION: data => ({view: 'members', selector: `[data-decision-id="${CSS.escape(data.objectId)}"]`}),
+  ARTIFACT_VERSION: data => ({view: 'artifacts', selector: `[data-artifact-id="${CSS.escape(data.containerId)}"]`}),
+  AGENT_OUTPUT: data => ({view: 'branch', selector: `[data-output-id="${CSS.escape(data.objectId)}"]`}),
 };
 
 // A hit in another channel opens that channel first. Opening its thread while the

@@ -74,13 +74,15 @@ export function toast(message, tone = '') {
   setTimeout(() => item.remove(), 4200);
 }
 
-// 'branch'/'artifacts'/'meta'/'ontology' are center-view calls; every existing call
-// site that used to open the right panel for these keeps working unchanged. Evidence
-// has no view of its own — it lives with the artifact it supports.
+// index.html gives #ws-status role="status" (an implicit polite live region),
+// so its own text content is what a screen reader announces on every change —
+// a separate aria-label duplicating that same text would only be one more
+// place for the two to drift apart. A narrow room header can visually clip
+// this element without touching the DOM text itself, so the accessible
+// announcement stays intact even when the label is not fully visible.
 export function setWsStatus(text, connected) {
   const el = document.getElementById('ws-status');
   el.textContent = text;
-  el.setAttribute('aria-label', text);
   el.classList.toggle('connected', Boolean(connected));
 }
 
@@ -89,11 +91,20 @@ export function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+// FastAPI's own validation failures carry `detail` as a list of {loc, msg, type}
+// objects, not a string — anything downstream that reads `parsed.detail` as
+// prose (a toast, a field-error <div>) used to print '[object Object]' for
+// that one class of refusal, the one carrying the most precise reason of them
+// all. A string detail (every other error handler in this app) still passes
+// straight through.
 export function errorMessage(err) {
   const raw = err && err.message ? err.message : String(err || 'Unknown error');
   try {
     const parsed = JSON.parse(raw);
-    return parsed.detail || raw;
+    const detail = parsed.detail;
+    if (Array.isArray(detail)) return detail.map(entry => entry.msg || JSON.stringify(entry)).join('; ');
+    if (typeof detail === 'string') return detail || raw;
+    return raw;
   } catch (_) {
     return raw;
   }

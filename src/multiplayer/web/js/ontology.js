@@ -216,6 +216,3 @@ export async function reviewOntologyRelationship(relationshipId, action) {
     toast(`Ontology relationship review was not saved: ${errorMessage(err)}`, 'error');
   }
 }
-
-// Said in the words of the person it stops, because a rule that parks a colleague's
-// tool call is not an administrator's private setting.

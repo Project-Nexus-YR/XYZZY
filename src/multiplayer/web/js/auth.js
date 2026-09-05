@@ -16,9 +16,9 @@ export async function signOut() {
   location.reload();
 }
 
-// The word is always in aria-label so it still reads to a screen reader; on a
-// narrow room header only the dot has room, and a truncated word ("CONNECTEC")
-// is worse than no word at all.
+// A wrong token used to surface only as a corner toast, gone in seconds and
+// easy to miss. This puts the failure on the field itself: an error border,
+// plain words, and focus — and it clears the moment the person types again.
 export function showTokenError(message) {
   const input = document.getElementById('setup-token');
   const err = document.getElementById('setup-token-error');
@@ -39,6 +39,11 @@ export async function setup() {
   clearTokenError();
   if (!state.accessToken) { showTokenError('Enter your access token.'); return; }
   state.sessionMode = 'bearer';
+  // A fresh sign-in with a new token undoes whatever the last one's revocation
+  // set: without this, a second 4401 (or 401) on this token never runs
+  // handleBearerUnauthorized again, since the guard from the previous
+  // session's teardown is still latched true.
+  state.bearerSessionEnding = false;
   const setupButton = document.getElementById('setup-button');
   setupButton.disabled = true;
   setupButton.textContent = 'Opening…';
@@ -122,6 +127,7 @@ export async function resumeStoredSession() {
   state.accessToken = saved.token;
   state.userName = saved.name || '';
   state.sessionMode = 'bearer';
+  state.bearerSessionEnding = false;
   try {
     const context = await api('GET', '/me/context');
     state.userId = context.user_id;
@@ -216,6 +222,7 @@ export async function enterDemoWorkspace() {
   state.accessToken = 'demo';
   state.userName = 'Yasser';
   state.sessionMode = 'bearer';
+  state.bearerSessionEnding = false;
   try {
     const context = await api('GET', '/me/context');
     state.userId = context.user_id;

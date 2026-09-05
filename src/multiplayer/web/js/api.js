@@ -3,13 +3,9 @@ import { state } from './state.js';
 
 export const API = '/api/v1';
 export const ACTIVE_ROOM_STORAGE_KEY = 'xyzzy.activeRoomId';
-// Every output the room holds, unfiltered by branch: a mention-run output belongs
-// to no branch, and its message still has to be able to open it.
 export const SESSION_STORAGE_KEY = 'xyzzy.session';
 export const COOKIE_401_GUARD_KEY = 'xyzzy.cookie401At';
 
-// A member row's display_name is what a person is called; the server falls back to
-// the raw id only when a payload has not yet grown the field. Never show the id.
 export function persistSession() {
   try { sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({token: state.accessToken, name: state.userName})); }
   catch (_) { /* Private browsing can disable storage; the tab still holds it in memory. */ }
@@ -44,8 +40,9 @@ export async function api(method, path, body, options = {}) {
     r = await fetch(url, opts);
   }
   if (!r.ok) {
-    if (r.status === 401 && state.sessionMode === 'cookie' && !options.skipAuthRedirect) {
-      handleCookieUnauthorized();
+    if (r.status === 401 && !options.skipAuthRedirect) {
+      if (state.sessionMode === 'cookie') handleCookieUnauthorized();
+      else if (state.sessionMode === 'bearer') handleBearerUnauthorized('Your access token is no longer valid.');
     }
     const e = await r.text();
     const error = new Error(e);
@@ -80,6 +77,34 @@ export function handleCookieUnauthorized() {
   state.cookieRedirecting = true;
   try { sessionStorage.setItem(COOKIE_401_GUARD_KEY, String(now)); } catch (_) { /* best effort */ }
   location.href = `${API}/auth/login`;
+}
+
+// A revoked or expired bearer token (manage.py token revoke, an operator
+// rotating XYZZY_AUTH_TOKENS) used to leave the tab on "Reconnecting"
+// forever: the socket kept retrying and every action failed with a generic
+// toast, with no path back to sign-in. Both the places a stale bearer token
+// can surface — a 401 on any fetch here, and a 4401 close on the socket
+// (socket.js's onclose) — end the session visibly through this one routine
+// instead. bearerSessionEnding guards it exactly like cookieRedirecting
+// guards handleCookieUnauthorized below: only the first caller acts.
+export function handleBearerUnauthorized(message) {
+  if (state.bearerSessionEnding) return;
+  state.bearerSessionEnding = true;
+  state.sessionMode = '';
+  clearStoredSession();
+  rememberRoomId('');
+  clearTimeout(state.wsReconnectTimer);
+  if (state.ws) { state.ws.onclose = null; state.ws.close(); state.ws = null; }
+  document.getElementById('setup-screen').style.display = '';
+  document.getElementById('app-header').style.display = 'none';
+  document.getElementById('app-main').style.display = 'none';
+  const input = document.getElementById('setup-token');
+  input.value = '';
+  input.classList.add('error');
+  const err = document.getElementById('setup-token-error');
+  err.textContent = message;
+  err.classList.remove('hidden');
+  toast(message, 'error');
 }
 
 export function storedRoomId() {

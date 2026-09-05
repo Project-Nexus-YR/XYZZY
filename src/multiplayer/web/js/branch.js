@@ -1,5 +1,5 @@
 import { api } from './api.js';
-import { closeModal, currentCenterView, openCenterView, openContext, openModal, outputSelections, toggleAITray } from './shell.js';
+import { closeModal, currentCenterView, openCenterView, openContext, openModal, toggleAITray } from './shell.js';
 import { loadState } from './socket.js';
 import { errorMessage, escHtml, htmlToElement, idempotencyKey, memberName, morphElement, reconcileList, renderMarkdown, shortId, toast } from './util.js';
 import { state } from './state.js';
@@ -165,8 +165,8 @@ export function renderBranchActivity(branches, runs) {
     // One vocabulary everywhere selections are summarized: included/excluded/
     // unreviewed, never a bare "reviewed" that says nothing about the outcome.
     const branchOutputs = state.roomOutputs.filter(output => output.branch_id === branch.branch_id);
-    const included = branchOutputs.filter(output => outputSelections.get(output.output_id) === 'included').length;
-    const excluded = branchOutputs.filter(output => outputSelections.get(output.output_id) === 'excluded').length;
+    const included = branchOutputs.filter(output => state.outputSelections.get(output.output_id) === 'included').length;
+    const excluded = branchOutputs.filter(output => state.outputSelections.get(output.output_id) === 'excluded').length;
     const count = branchAgentCount(branch, related);
     const key = `branch-activity:${branch.branch_id}`;
     const html = `<article class="branch-activity" data-reconcile-key="${escHtml(key)}"><button data-action="selectBranch" data-branch-id="${branch.branch_id}" aria-label="${escHtml(branchTitle(branch))} — ${escHtml(status)}, ${included} included, ${excluded} excluded"><span class="branch-symbol"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span><span><span class="branch-title">${escHtml(branchTitle(branch))}</span><span class="branch-detail">${escHtml(branchStarterClause(branch))}${count} ${count === 1 ? 'agent' : 'agents'}</span></span><span class="branch-progress"><span class="status-text ${status}">${escHtml(status)}</span><br>${included} included · ${excluded} excluded</span></button></article>`;
@@ -417,7 +417,7 @@ export function renderOutputs(outputs, runs) {
 
   panel.innerHTML = outputs.map(output => {
     const agent = state.roomAgents.find(a => a.agent_id === output.agent_id);
-    const selection = outputSelections.get(output.output_id) || '';
+    const selection = state.outputSelections.get(output.output_id) || '';
     const cardClass = selection ? ` ${selection}` : '';
     return `
       <article class="output-card${cardClass}" data-output-id="${escHtml(output.output_id)}">
@@ -464,8 +464,8 @@ export function firstClause(prompt) {
 // once edited, their wording wins even if the branch selection changes under it.
 export function updateSelectionSummary() {
   const available = new Set(state.roomOutputs.map(o => o.output_id));
-  const included = [...outputSelections].filter(([id, state]) => available.has(id) && state === 'included').length;
-  const excluded = [...outputSelections].filter(([id, state]) => available.has(id) && state === 'excluded').length;
+  const included = [...state.outputSelections].filter(([id, disposition]) => available.has(id) && disposition === 'included').length;
+  const excluded = [...state.outputSelections].filter(([id, disposition]) => available.has(id) && disposition === 'excluded').length;
   const reviewed = included + excluded;
   document.getElementById('selection-summary').textContent = reviewed
     ? `${included} included · ${excluded} excluded · ${state.roomOutputs.length - reviewed} unreviewed`

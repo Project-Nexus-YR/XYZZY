@@ -234,7 +234,3 @@ export async function removeMember(memberUserId) {
     await loadState();
   } catch (err) { toast(`Could not remove ${memberUserId}: ${errorMessage(err)}`, 'error'); }
 }
-
-// A wrong token used to surface only as a corner toast, gone in seconds and
-// easy to miss. This puts the failure on the field itself: an error border,
-// plain words, and focus — and it clears the moment the person types again.

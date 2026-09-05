@@ -1,10 +1,10 @@
-import { api, persistSession } from './api.js';
+import { api, handleBearerUnauthorized, persistSession } from './api.js';
 import { applyPermissions, branchTitle, renderBranches, renderOutputs, renderResumeRunsBanner } from './branch.js';
 import { renderAgents, renderApprovals, renderArtifacts, renderDecisions, renderMembers, renderPosture, renderSidebarAgents, renderTasks } from './members.js';
 import { appendMessage, appendSystemMessage, applyReadCursor, reconcileMessages, refreshNotificationDot, refreshUnread, scrollMessagesToBottom } from './messages.js';
 import { renderOntology } from './ontology.js';
 import { handleAccessRevoked, refreshOtherRoomUnreads, refreshRooms, renderRoomsList } from './rooms.js';
-import { outputSelections, updateRoomHeader } from './shell.js';
+import { updateRoomHeader } from './shell.js';
 import { refreshThread } from './thread.js';
 import { bytesToBase64Url, logEvent, setWsStatus, toast, updateActivityLogSummary } from './util.js';
 import { state } from './state.js';
@@ -72,12 +72,24 @@ export function connectWS() {
     state.wsReconnectAttempts = 0;
     // Rehydrate durable runs and outputs after every reconnect. Ordered events
     // remain the synchronization source; state restores anything missed offline.
-    loadState();
+    loadStateOrShowReconnecting();
   };
   socket.onclose = (event) => {
     // A socket replaced by a channel switch must neither reconnect nor repaint.
     if (socket !== state.ws) return;
     if (event.code === 4403) { handleAccessRevoked(); return; }
+    // 4401 is the server closing on a token it no longer accepts (a revoke, a
+    // rotation) — see websocket.py:259 and tests/security/test_token_auth.py.
+    // Reconnecting into the same rejected credential forever is not a
+    // recoverable state, so bearer mode ends the session the same way a
+    // cookie 401 does (handleCookieUnauthorized in api.js). A bare 1006 is
+    // deliberately left alone here: it is indistinguishable from a plain
+    // network drop, and treating every dropped connection as a revoked
+    // credential would sign a person out over a flaky network.
+    if (event.code === 4401 && state.sessionMode === 'bearer') {
+      handleBearerUnauthorized('Your access token is no longer valid.');
+      return;
+    }
     setWsStatus('Reconnecting', false);
     state.wsReconnectAttempts++;
     const delay = Math.min(state.wsReconnectDelay * Math.pow(1.5, state.wsReconnectAttempts - 1), WS_MAX_DELAY);
@@ -227,10 +239,10 @@ export async function loadStateImpl() {
   state.roomOutputs = (snapshot.outputs || []).filter(output =>
     !state.currentBranchId || output.branch_id === state.currentBranchId
   );
-  outputSelections.clear();
+  state.outputSelections.clear();
   (snapshot.output_selections || []).forEach(selection => {
     if (!state.currentBranchId || selection.branch_id === state.currentBranchId) {
-      outputSelections.set(selection.output_id, selection.disposition.toLowerCase());
+      state.outputSelections.set(selection.output_id, selection.disposition.toLowerCase());
     }
   });
   renderBranches(durableBranches, snapshot.runs || []);
@@ -349,6 +361,19 @@ export async function loadStateImpl() {
   refreshOtherRoomUnreads();
 }
 
+// Every loadState() call in this file from here down is triggered by the
+// socket itself, not by a person's own click — there is no button to put a
+// field-error or toast on, and no click handler waiting to show one. A
+// dropped connection or a mid-flight 401 already reads as "Reconnecting" to
+// a person watching #ws-status, so a refresh that this same socket
+// triggered failing for the same kind of reason reads the same way, instead
+// of vanishing as a rejection nothing on the page ever surfaces. A control-
+// triggered fetch (approveAction, sendMessage, declarePosture, ...) is a
+// different case entirely and keeps its own try/toast handling untouched.
+function loadStateOrShowReconnecting(onSuccess) {
+  return loadState().then(onSuccess, () => setWsStatus('Reconnecting', false));
+}
+
 export function handleRealtimeEvent(msg) {
   if (msg.type === 'ping' || msg.type === 'pong' || msg.type === 'connected') return;
   if (msg.type === 'room_removed') {
@@ -382,7 +407,7 @@ export function handleRealtimeEvent(msg) {
         state.ws.send(JSON.stringify({type: 'resync_request', room_id: state.roomId,
                                        expected: state.lastSequence + 1, got: msg.sequence}));
       }
-      loadState().finally(() => { state.resyncRequested = false; });
+      loadStateOrShowReconnecting().finally(() => { state.resyncRequested = false; });
     }
     state.lastSequence = Math.max(state.lastSequence, msg.sequence || 0);
     logEvent(msg);
@@ -390,7 +415,7 @@ export function handleRealtimeEvent(msg) {
       case 'message.created':
         if (msg.payload.parent_message_id && !msg.payload.broadcast_to_room) {
           // A thread reply belongs to its thread, not to the channel log.
-          loadState();
+          loadStateOrShowReconnecting();
           break;
         }
         appendMessage({message_id: msg.payload.message_id, role: msg.payload.role,
@@ -421,7 +446,7 @@ export function handleRealtimeEvent(msg) {
         refreshUnread();
         break;
       case 'message.reaction_added': case 'message.reaction_removed':
-        loadState();
+        loadStateOrShowReconnecting();
         break;
       case 'user.joined_room':
         appendSystemMessage(`${msg.payload.user_id} joined the room`);
@@ -430,42 +455,50 @@ export function handleRealtimeEvent(msg) {
         appendSystemMessage(`${msg.payload.user_id} left the room`);
         break;
       case 'user.invited_room':
-        loadState().then(() => appendSystemMessage(`${msg.payload.user_id} was invited as ${msg.payload.role}`));
+        loadStateOrShowReconnecting(() => appendSystemMessage(`${msg.payload.user_id} was invited as ${msg.payload.role}`));
         break;
       case 'user.role_changed':
-        loadState().then(() => appendSystemMessage(`${msg.payload.user_id} is now ${msg.payload.role}`));
+        loadStateOrShowReconnecting(() => appendSystemMessage(`${msg.payload.user_id} is now ${msg.payload.role}`));
         break;
       case 'user.removed_room':
-        loadState().then(() => appendSystemMessage(`${msg.payload.user_id} was removed from the channel`));
+        loadStateOrShowReconnecting(() => appendSystemMessage(`${msg.payload.user_id} was removed from the channel`));
         break;
       case 'agent.joined_room':
         appendSystemMessage(`Agent ${msg.payload.name} (${msg.payload.role}) joined`);
-        loadState();
+        loadStateOrShowReconnecting();
         break;
       case 'agent.status_changed':
-        loadState();
+        loadStateOrShowReconnecting();
+        break;
+      // An agent removed out of band (another tab, another admin) used to
+      // have no handler at all: the Agents panel kept showing it until some
+      // unrelated snapshot refresh happened to catch up. loadState() re-reads
+      // the room's agent roster the same way every other membership event
+      // here does.
+      case 'agent.left_room':
+        loadStateOrShowReconnecting();
         break;
       case 'agent.run.started': case 'agent.output.created': case 'agent.run.completed':
       case 'output.selection.updated': case 'artifact.decision_brief_synthesized':
       case 'artifact.synthesis_published':
       case 'ontology.materialized': case 'ontology.assertion_confirmed':
       case 'ontology.assertion_corrected':
-        loadState();
+        loadStateOrShowReconnecting();
         break;
       case 'task.created': case 'task.assigned': case 'task.completed': case 'task.cancelled':
-        loadState();
+        loadStateOrShowReconnecting();
         break;
       case 'approval.requested': case 'approval.granted': case 'approval.rejected':
-        loadState();
+        loadStateOrShowReconnecting();
         break;
       case 'room.posture_declared':
-        loadState().then(() => appendSystemMessage(`Channel posture is now ${String(msg.payload.posture || '').toLowerCase()}`));
+        loadStateOrShowReconnecting(() => appendSystemMessage(`Channel posture is now ${String(msg.payload.posture || '').toLowerCase()}`));
         break;
       case 'artifact.created': case 'artifact.version_created':
-        loadState();
+        loadStateOrShowReconnecting();
         break;
       case 'decision.created':
-        loadState();
+        loadStateOrShowReconnecting();
         break;
       case 'human.interrupted_agent':
         appendSystemMessage(`Agent interrupted by human`);

@@ -4,7 +4,9 @@ import { escHtml } from './util.js';
 import { state } from './state.js';
 
 export const QUICK_REACTIONS = ['👍', '🎯', '⚠️'];
-export const outputSelections = new Map();
+// 'branch'/'artifacts'/'meta'/'ontology' are center-view calls; every existing call
+// site that used to open the right panel for these keeps working unchanged. Evidence
+// has no view of its own — it lives with the artifact it supports.
 export const CENTER_VIEW_ROUTES = {branch: 'branch', artifacts: 'artifact', ontology: 'artifact', meta: 'meta'};
 export function openContext(view = 'branch') {
   if (CENTER_VIEW_ROUTES[view]) { openCenterView(CENTER_VIEW_ROUTES[view]); return; }
@@ -65,11 +67,18 @@ export function updateRoomHeader() {
 }
 
 export function closeSidebarDrawer() {
-  document.getElementById('sidebar').classList.remove('open');
+  const sidebar = document.getElementById('sidebar');
+  const wasOpenDrawer = sidebar.classList.contains('open') && sidebar.getAttribute('aria-modal') === 'true';
+  sidebar.classList.remove('open');
   document.getElementById('sidebar-backdrop').classList.remove('open');
-  document.getElementById('sidebar').removeAttribute('role');
-  document.getElementById('sidebar').removeAttribute('aria-modal');
+  sidebar.removeAttribute('role');
+  sidebar.removeAttribute('aria-modal');
   document.getElementById('sidebar-toggle')?.setAttribute('aria-expanded', 'false');
+  // Only when this actually closed an open mobile drawer: every other caller
+  // (switching rooms, opening a center view, a desktop resize) calls this
+  // defensively whether or not the drawer was ever open, and would otherwise
+  // steal focus onto a toggle button the person never interacted with.
+  if (wasOpenDrawer) document.getElementById('sidebar-toggle')?.focus();
 }
 export function toggleSidebar(force) {
   const sidebar = document.getElementById('sidebar');
@@ -80,7 +89,14 @@ export function toggleSidebar(force) {
   // Only a mobile drawer is modal — on desktop the sidebar is permanent chrome,
   // never opened through this toggle, so these attributes only ever appear
   // alongside the drawer state that makes them true.
-  if (open) { sidebar.setAttribute('role', 'dialog'); sidebar.setAttribute('aria-modal', 'true'); }
+  if (open) {
+    sidebar.setAttribute('role', 'dialog');
+    sidebar.setAttribute('aria-modal', 'true');
+    // Matches the modal's own Tab trap below (see the keydown listener) and
+    // the same claim aria-modal is already making: the page behind it stops
+    // being reachable, starting with where focus lands.
+    sidebar.querySelector('.nav-item, a[href], button:not([disabled])')?.focus();
+  }
   else { sidebar.removeAttribute('role'); sidebar.removeAttribute('aria-modal'); }
   document.getElementById('sidebar-toggle')?.setAttribute('aria-expanded', String(open));
 }
@@ -124,16 +140,25 @@ document.addEventListener('keydown', event => {
     event.preventDefault();
     if (!document.getElementById('launch-button').disabled) launchParallelAnalyses();
   }
-  // Trap Tab inside the modal while it is open — the dialog is the only thing
-  // on the page a keyboard user should be able to reach.
-  if (event.key === 'Tab' && !document.getElementById('modal-backdrop').classList.contains('hidden')) {
-    const focusable = [...document.getElementById('modal-card').querySelectorAll('button,input,textarea,select,a[href]')]
-      .filter(el => !el.disabled && el.offsetParent !== null);
-    if (!focusable.length) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  // Trap Tab inside whichever of the modal or the (mobile) sidebar drawer is
+  // currently the aria-modal surface — each claims the rest of the page is
+  // unreachable, so Tab has to actually honour that rather than walking out
+  // the back of it into whatever sits behind.
+  if (event.key === 'Tab') {
+    const modalOpen = !document.getElementById('modal-backdrop').classList.contains('hidden');
+    const sidebar = document.getElementById('sidebar');
+    const drawerOpen = !modalOpen && sidebar.getAttribute('aria-modal') === 'true';
+    if (modalOpen || drawerOpen) {
+      const scope = modalOpen ? document.getElementById('modal-card') : sidebar;
+      const focusable = [...scope.querySelectorAll('button,input,textarea,select,a[href]')]
+        .filter(el => !el.disabled && el.offsetParent !== null);
+      if (focusable.length) {
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+    }
   }
 });
 document.getElementById('messages').addEventListener('scroll', scheduleAutoRead);
@@ -194,8 +219,29 @@ export function toggleChannelMenu(event) {
   const insetInlineEnd = rtl ? rect.left : (window.innerWidth - rect.right);
   menu.style.insetInlineEnd = `${Math.max(8, insetInlineEnd)}px`;
   menu.classList.remove('hidden');
+  // role="menu" promises arrow-key navigation between its menuitems; opening
+  // it with focus left on the trigger button broke that promise entirely.
+  menu.querySelector('[role="menuitem"]')?.focus();
 }
-export function closeChannelMenu() { document.getElementById('channel-menu').classList.add('hidden'); }
+export function closeChannelMenu() {
+  const menu = document.getElementById('channel-menu');
+  const wasOpen = !menu.classList.contains('hidden');
+  menu.classList.add('hidden');
+  if (wasOpen && menu.contains(document.activeElement)) {
+    document.getElementById('channel-menu-button')?.focus();
+  }
+}
+// ArrowUp/ArrowDown/Home/End move focus among the menu's own items, and
+// Escape/outside-click closing it is already handled elsewhere — this only
+// ever runs while the menu is open, since it is unreachable otherwise.
+document.getElementById('channel-menu').addEventListener('keydown', event => {
+  const items = [...document.querySelectorAll('#channel-menu [role="menuitem"]')];
+  const index = items.indexOf(document.activeElement);
+  if (event.key === 'ArrowDown') { event.preventDefault(); items[(index + 1) % items.length]?.focus(); }
+  else if (event.key === 'ArrowUp') { event.preventDefault(); items[(index - 1 + items.length) % items.length]?.focus(); }
+  else if (event.key === 'Home') { event.preventDefault(); items[0]?.focus(); }
+  else if (event.key === 'End') { event.preventDefault(); items[items.length - 1]?.focus(); }
+});
 
 // Whatever had focus before the modal opened, so closing it can put focus back
 // rather than dropping a keyboard user at the top of the page.
@@ -218,7 +264,13 @@ export function openModal(html) {
   // redirect-agent dialogs) still wires up its own onsubmit/onclick handlers
   // right after this call returns, and a deferred rAF focus has, on some
   // paths, lost that race to a later synchronous focus/blur in the same tick.
-  card.querySelector('input,textarea')?.focus();
+  // The two button-only confirm dialogs (leave-channel, remove-agent) have no
+  // input or textarea at all, so without a fallback focus stayed on whatever
+  // was behind the backdrop — the modal claimed to be the only reachable
+  // thing on the page and left a keyboard user tabbing through the page it
+  // covers instead. Cancel is first in both of those dialogs' markup, so this
+  // fallback lands on it rather than on the destructive action.
+  (card.querySelector('input,textarea') || card.querySelector('button,select,a[href]'))?.focus();
 }
 // A modal closed any way (Cancel, Escape, backdrop click) resolves the field
 // dialog's promise with null — one path, not three that each have to remember.

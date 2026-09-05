@@ -139,6 +139,18 @@ button:disabled{cursor:not-allowed;opacity:.4}
 .hidden{display:none!important}
 .sidebar-backdrop{display:none}
 
+/* Off-screen until it is the thing tabbed to, exactly like every other skip
+   link — hidden from sighted mouse use, present for a keyboard user's very
+   first Tab, ahead of the sidebar's own 20-odd buttons. */
+.skip-link{
+  position:absolute;top:-40px;left:var(--s-2);z-index:200;
+  background:var(--raised);color:var(--text);
+  padding:var(--s-2) var(--s-3);border-radius:var(--r-2);
+  font:var(--w-medium) var(--t-ui)/1 var(--sans);
+  box-shadow:var(--shadow-2,0 2px 8px rgba(0,0,0,.2));
+}
+.skip-link:focus{top:var(--s-2)}
+
 /* every machine fact — ids, counts, durations, stamps — is set here */
 .mono,.badge,.status,.nav-label,.nav-meta,.member-row .handle,.events-log,
 .identity-role,.unread-pill,.msg .time,.agent-provenance,.thread-counts,

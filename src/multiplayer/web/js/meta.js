@@ -44,8 +44,8 @@ export async function renderMeta(query) {
         (lag ? ` · ${escHtml(String(lag))} events still syncing` : '');
       answer.innerHTML = `<span class="ontology-badge" title="${escHtml(result.status)}">${escHtml(humanizeToken(result.status))}</span> ${renderMarkdown(result.summary)}`;
       evidence.innerHTML = [...result.claims, ...result.unconfirmed].map(claim =>
-        `<article class="meta-chain"><span class="ontology-badge ${claim.review_status.toLowerCase()}" title="${escHtml(claim.assurance)}">${escHtml(humanizeToken(claim.assurance))}</span>
-          ${escHtml(claim.text)}<br>Confidence ${Number(claim.confidence).toFixed(2)} · as of event ${claim.asserted_at_sequence}
+        `<article class="meta-chain"><span class="ontology-badge ${escHtml(claim.review_status.toLowerCase())}" title="${escHtml(claim.assurance)}">${escHtml(humanizeToken(claim.assurance))}</span>
+          ${escHtml(claim.text)}<br>Confidence ${Number(claim.confidence).toFixed(2)} · as of event ${escHtml(claim.asserted_at_sequence)}
           · ${claim.current ? 'current' : `${claim.invalidating_events} later events`}
           · source ${escHtml(humanizeToken(claim.source_object_kind))} <code title="${escHtml(claim.source_object_id)}">${escHtml(shortId(claim.source_object_id))}</code></article>`).join('');
       return;
@@ -57,7 +57,7 @@ export async function renderMeta(query) {
       `<span title="authorized head ${escHtml(String(freshness.authorized_head))}"> · evidence current to event ${escHtml(String(freshness.authorized_head))}</span>` +
       (decisionLag ? ` · ${escHtml(String(decisionLag))} events still syncing` : '') +
       ` · ${counts.returned_claims} of ${counts.available_claims} claims`;
-    answer.innerHTML = `<span class="ontology-badge ${result.decision.review_status.toLowerCase()}">${escHtml(metaDerivationLabel(result.decision))}</span> ` +
+    answer.innerHTML = `<span class="ontology-badge ${escHtml(result.decision.review_status.toLowerCase())}">${escHtml(metaDerivationLabel(result.decision))}</span> ` +
       `${renderMarkdown(result.summary)}<span class="ontology-meta">Confidence ${Number(result.decision.confidence).toFixed(2)} · freshness ${escHtml(freshness.decision_updated_at)}</span>`;
     evidence.innerHTML = result.evidence_chains.map((chain, index) => {
       const claim = chain.claim;
@@ -68,10 +68,10 @@ export async function renderMeta(query) {
         : '';
       return `<article class="meta-chain">
         <strong>Decision → Claim ${index + 1} → AgentOutput</strong><br>
-        <span class="ontology-badge ${claim.review_status.toLowerCase()}">${escHtml(metaDerivationLabel(claim))}</span>
+        <span class="ontology-badge ${escHtml(claim.review_status.toLowerCase())}">${escHtml(metaDerivationLabel(claim))}</span>
         ${escHtml(claim.label)}<br>
         Confidence ${Number(claim.confidence).toFixed(2)} · output <code title="${escHtml(source.output_id)}">${escHtml(shortId(source.output_id))}</code>${correction}<br>
-        Governed link: <span class="ontology-badge ${decisionLink.review_status.toLowerCase()}" title="${escHtml(decisionLink.kind)}">${escHtml(humanizeToken(decisionLink.kind))}</span>
+        Governed link: <span class="ontology-badge ${escHtml(decisionLink.review_status.toLowerCase())}" title="${escHtml(decisionLink.kind)}">${escHtml(humanizeToken(decisionLink.kind))}</span>
         confidence ${Number(decisionLink.confidence).toFixed(2)}
         <details><summary>Exact provider/source evidence</summary><pre>${escHtml(JSON.stringify({
           source_prompt: source.source_prompt,
