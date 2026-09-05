@@ -21,7 +21,7 @@ re-verified this session; the commands that produced them are below.
 | `XYZZY_MAX_ATTACHMENT_BYTES` default (README deployment table) | `grep -n "DEFAULT_MAX_ATTACHMENT_BYTES" src/multiplayer/api/routes.py` | `DEFAULT_MAX_ATTACHMENT_BYTES = 5_242_880` |
 | `XYZZY_OIDC_PROVIDER_LABEL` default (docs/SSO.md) | `grep -n "XYZZY_OIDC_PROVIDER_LABEL" src/multiplayer/api/routes.py` | `label = os.environ.get("XYZZY_OIDC_PROVIDER_LABEL", "single sign-on")` |
 | `GET /metrics` shipped in v0.3.0 (CHANGELOG) | `git log --oneline v0.2.0..v0.3.0 -- src/multiplayer/metrics.py` | `3e80c5a feat(ops): expose Prometheus metrics on an unauthenticated /metrics` |
-| 40 commits since v0.4.0 (CHANGELOG Unreleased), re-measured 2026-09-05 | `git log v0.4.0..HEAD --oneline | wc -l` | `40` (38 at the measurement, plus the two commits that landed the client fixes and this refresh) |
+| 45 commits since v0.4.0 (CHANGELOG Unreleased), re-measured 2026-09-05 | `git log v0.4.0..HEAD --oneline | wc -l` | `45` (measured as the commit that refreshed this row landed) |
 
 Carried-forward note: this repo had no prior `docs/readme-trace.md`, so there
 is no earlier-round trace to diff against; every row above was produced or
