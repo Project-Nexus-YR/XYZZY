@@ -244,6 +244,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The image runs Python 3.14, and the gates run on 3.11, the declared floor,
+  and on 3.14, the interpreter that ships.
 - The image healthcheck reads `XYZZY_PORT`, and the `xyzzy` console script
   and the empty `nexus` extra are gone: the entry point is
   `python -m multiplayer.server`.
