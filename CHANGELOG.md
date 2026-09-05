@@ -392,8 +392,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own session rather than handing the provider's tokens to the browser, so a
   revoked session fails the very next request instead of surviving until a
   self-validating access token expires.
-- Sessions carry two clocks — an idle clock that moves while the session is used
-  and an absolute one that never moves — and both are read in the statement that
+- Sessions carry two clocks, an idle clock that moves while the session is used
+  and an absolute one that never moves, and both are read in the statement that
   authenticates.
 - Refresh tokens rotate once. Presenting a spent one revokes the whole session
   rather than the token, because a replay means a copy exists somewhere it
@@ -456,9 +456,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unless the exported count equals the room's own sequence counter, so the
   claim is checked against production, not just against a test.
 - Zero-config demo mode: `XYZZY_DEMO=1`, `--demo`, or
-  `docker compose --profile demo up` boots a seeded workspace — a real
+  `docker compose --profile demo up` boots a seeded workspace (a real
   conversation with a thread and reactions, two specialists run in a parallel
-  branch offline through the simulated provider, a published Decision Brief —
+  branch offline through the simulated provider, a published Decision Brief)
   behind one-click entry with no token, channel, or account. Demo mode
   refuses to coexist with OIDC or real auth tokens, so it can never be bolted
   onto a live deployment, and the seed is idempotent across restarts with
@@ -468,8 +468,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artifact to a public URL, create/list/revoke gated on the admin capability
   and re-checked inside the write transaction, and the token is returned
   exactly once with only its sha256 stored. The public page serves the
-  artifact's escaped content and nothing else — no member names, no room
-  name, no ids — and answers a constant 404 for unknown, revoked, and
+  artifact's escaped content and nothing else, no member names, no room
+  name, no ids, and answers a constant 404 for unknown, revoked, and
   malformed tokens alike.
 - The public landing page under `site/`: a single self-contained
   `site/index.html` with every claim on the page checked against the README
