@@ -72,6 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Migration 051 writes `execution_callers.first_acted_at` in one timestamp
+  format from both triggers, and rebuild migrations run a scoped
+  `PRAGMA foreign_key_check` on the tables they rebuilt.
+- The A2A status stream honours the resync marker, and a full queue no
+  longer drops an access revocation. A `DomainError` maps to its HTTP
+  status by exception class rather than by message.
 - A bearer token that stops being valid ends the session visibly, every
   time it happens on the same page: the socket stops reconnecting and the
   setup screen returns with a message. Every dialog and the narrow drawer
@@ -154,7 +160,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The client is markup, `app.css` and ES modules under `js/`, served as
   package data with a strict Content-Security-Policy (`script-src 'self'`,
-  `style-src 'self'`), and the browser suite grew to thirty-one tests.
+  `style-src 'self'`), and the browser suite has forty-seven tests.
 - `xyzzy_sequence_gaps_total` in `/metrics` counts client resyncs, and
   `DELETE /workspaces/{workspace_id}/members/{user_id}` removes a member.
 - `XYZZY_MODEL_MAX_OUTPUT_TOKENS` caps one model call and
@@ -201,6 +207,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The image healthcheck reads `XYZZY_PORT`, and the `xyzzy` console script
+  and the empty `nexus` extra are gone: the entry point is
+  `python -m multiplayer.server`.
 - `service.py` is now composition only: its former 9,700 lines are split
   into thirteen mixins, one module per domain cluster (organizations,
   rooms, agents, runs, agent turns, branches and synthesis, conversation,

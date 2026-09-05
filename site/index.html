@@ -618,21 +618,21 @@
           <h3>Revocable mid-task</h3>
           <div>
             <p>What an agent may do is re-read from the room at every step, never cached at the start. A grant withdrawn between two tool calls stops the second one.</p>
-            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/services/steps.py#L730" target="_blank" rel="noopener">services/steps.py:730</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/security/test_continuation_authority.py#L91" target="_blank" rel="noopener">tests/security/test_continuation_authority.py:91</a></p>
+            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/services/steps.py#L731" target="_blank" rel="noopener">services/steps.py:731</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/security/test_continuation_authority.py#L91" target="_blank" rel="noopener">tests/security/test_continuation_authority.py:91</a></p>
           </div>
         </li>
         <li class="reveal" style="--d: 120ms">
           <h3>Tamper-evident</h3>
           <div>
             <p>Every event is hashed against the one before it. Edit a row and the audit command reports the break at that row.</p>
-            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/migrations/033_the_log_commits_to_its_past.sql" target="_blank" rel="noopener">migrations/033_the_log_commits_to_its_past.sql</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/security/audit.py#L99" target="_blank" rel="noopener">security/audit.py:99</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/security/test_event_chain.py#L83" target="_blank" rel="noopener">tests/security/test_event_chain.py:83</a> <span>python -m multiplayer.manage app.db audit verify</span></p>
+            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/migrations/033_the_log_commits_to_its_past.sql" target="_blank" rel="noopener">migrations/033_the_log_commits_to_its_past.sql</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/security/audit.py#L154" target="_blank" rel="noopener">security/audit.py:154</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/security/test_event_chain.py#L83" target="_blank" rel="noopener">tests/security/test_event_chain.py:83</a> <span>python -m multiplayer.manage app.db audit verify</span></p>
           </div>
         </li>
         <li class="reveal" style="--d: 180ms">
           <h3>Traceable</h3>
           <div>
             <p>A Decision Brief's claims link to the outputs that produced them. The link reads back from the published version.</p>
-            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/domain/models.py#L983" target="_blank" rel="noopener">domain/models.py:983</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/e2e/test_first_class_branches.py#L214" target="_blank" rel="noopener">tests/e2e/test_first_class_branches.py:214</a></p>
+            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/domain/models.py#L992" target="_blank" rel="noopener">domain/models.py:992</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/e2e/test_first_class_branches.py#L214" target="_blank" rel="noopener">tests/e2e/test_first_class_branches.py:214</a></p>
           </div>
         </li>
         <li class="reveal" style="--d: 240ms">
@@ -646,7 +646,7 @@
           <h3>Honest offline</h3>
           <div>
             <p>With no API key configured, every specialist output is labelled SIMULATED. The loop still runs end to end, and nothing pretends to be a model.</p>
-            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/model_providers/openai_responses.py#L255" target="_blank" rel="noopener">model_providers/openai_responses.py:255</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/regression/test_agent_outputs.py#L60" target="_blank" rel="noopener">tests/regression/test_agent_outputs.py:60</a></p>
+            <p class="proof"><span class="k">proof</span> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/src/multiplayer/model_providers/openai_responses.py#L276" target="_blank" rel="noopener">model_providers/openai_responses.py:276</a> <a href="https://github.com/Project-Nexus-YR/XYZZY/blob/main/tests/regression/test_agent_outputs.py#L60" target="_blank" rel="noopener">tests/regression/test_agent_outputs.py:60</a></p>
           </div>
         </li>
       </ul>
