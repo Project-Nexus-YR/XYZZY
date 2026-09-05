@@ -406,7 +406,7 @@ python -m pytest tests/regression/ -v
 
 ## Current Status
 
-The current repository gate is 1255 tests (1254 passing, 1 skipped without `OPENAI_API_KEY`) plus Ruff format/check and strict `mypy src`,
+The current repository gate is 1271 tests (1270 passing, 1 skipped without `OPENAI_API_KEY`) plus Ruff format/check and strict `mypy src`,
 run on every push to `main` and every pull request by `.github/workflows/ci.yml`.
 The suite covers:
 - Unit tests for domain models
