@@ -1,4 +1,4 @@
-# XYZZY — Product Requirements Document
+# XYZZY: Product Requirements Document
 
 ## 1. Product
 
@@ -715,7 +715,7 @@ If those behaviors do not occur, broader management and enterprise features shou
 
 ## 24. Development Roadmap
 
-### Phase 0 — Correctness
+### Phase 0: Correctness
 
 - authentication;
 - authorization;
@@ -724,7 +724,7 @@ If those behaviors do not occur, broader management and enterprise features shou
 - idempotency;
 - concurrency control.
 
-### Phase 1 — Multiplayer AI
+### Phase 1: Multiplayer AI
 
 - shared channels;
 - one functional agent;
@@ -732,20 +732,20 @@ If those behaviors do not occur, broader management and enterprise features shou
 - shared outputs;
 - turn-locked execution.
 
-### Phase 2 — Branches
+### Phase 2: Branches
 
 - multiple agents;
 - independent outputs;
 - comparison;
 - provenance.
 
-### Phase 3 — Synthesis
+### Phase 3: Synthesis
 
 - output selection;
 - synthesis profiles;
 - versioned artifacts.
 
-### Phase 4 — Ontology
+### Phase 4: Ontology
 
 - core objects;
 - relationships;
@@ -753,7 +753,7 @@ If those behaviors do not occur, broader management and enterprise features shou
 - lazy extraction;
 - freshness cursors.
 
-### Phase 5 — Meta
+### Phase 5: Meta
 
 - status;
 - blockers;
@@ -761,21 +761,21 @@ If those behaviors do not occur, broader management and enterprise features shou
 - decisions;
 - evidence-backed queries.
 
-### Phase 6 — Control Plane
+### Phase 6: Control Plane
 
 - richer skills;
 - tool gateway;
 - approvals;
 - configurable roles/policies.
 
-### Phase 7 — Integrations
+### Phase 7: Integrations
 
 - GitHub;
 - task manager;
 - collaboration systems;
 - documents.
 
-### Phase 8 — Management Intelligence
+### Phase 8: Management Intelligence
 
 - progress reports;
 - decisions needed;

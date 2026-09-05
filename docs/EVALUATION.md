@@ -14,7 +14,7 @@ docker compose up
 ```
 
 Open `http://localhost:8000` and sign in with the dev token
-`change-me-dev-token` (from `docker-compose.yml` — replace it before
+`change-me-dev-token` (from `docker-compose.yml`: replace it before
 deploying anywhere real). Without an `OPENAI_API_KEY`, specialists run in
 simulator mode: every AI output is clearly labeled
 `SIMULATED WORKFLOW OUTPUT` rather than presented as real analysis, and the
@@ -22,7 +22,7 @@ whole workflow below still works. Set `OPENAI_API_KEY` in
 `docker-compose.yml` first if you want live model output.
 
 You'll need a second signed-in user for the invite step. XYZZY has no
-self-serve signup or user directory — every account is created by an
+self-serve signup or user directory: every account is created by an
 operator. From another terminal, against the same container:
 
 ```bash
@@ -30,7 +30,7 @@ docker compose exec xyzzy python -m multiplayer.manage /data/multiplayer.db user
 docker compose exec xyzzy python -m multiplayer.manage /data/multiplayer.db token mint bob --label eval
 ```
 
-The `token mint` output is the only copy of that token — it isn't stored.
+The `token mint` output is the only copy of that token: it isn't stored.
 Open a second browser (or a private window) and sign in as `bob` with it.
 
 ## The core loop (15 minutes)
@@ -40,7 +40,7 @@ Open a second browser (or a private window) and sign in as `bob` with it.
    (`POST /api/v1/workspaces/{workspace_id}/rooms`, body
    `{"name": "...", "description": "..."}`).
 2. **Invite.** Invite `bob` into the room. This is where you need his user
-   id, not his email — the invite call is
+   id, not his email: the invite call is
    `POST /api/v1/rooms/{room_id}/members/invitations` with body
    `{"user_id": "bob", "role": "viewer"}`. Have bob join from his own
    session so both of you are members with a live cursor in the room.
@@ -54,19 +54,19 @@ Open a second browser (or a private window) and sign in as `bob` with it.
    exclude each output for synthesis (`PUT /api/v1/branches/{branch_id}/output-selections/{output_id}`,
    body `{"disposition": "INCLUDE"}` or `"EXCLUDE"`), then publish:
    `POST /api/v1/branches/{branch_id}/syntheses/decision-brief`, body
-   `{"title": "..."}`. The resulting artifact version is immutable — a new
+   `{"title": "..."}`. The resulting artifact version is immutable: a new
    synthesis always creates a new version.
 5. **Accept the decision.** Create a decision tied to the brief
    (`POST /api/v1/rooms/{room_id}/decisions`), then move it to `ACTIVE`:
    `POST /api/v1/decisions/{decision_id}/status`, body
    `{"status": "ACTIVE"}`.
 6. **Ask Meta why.** From the room's Meta panel, ask why the decision was
-   made. Under the hood this is `GET /api/v1/rooms/{room_id}/meta?kind=WHY_DECISION`
-   — `kind` is a closed set (`STATUS`, `BLOCKERS`, `CHANGES`,
+   made. Under the hood this is `GET /api/v1/rooms/{room_id}/meta?kind=WHY_DECISION`:
+   `kind` is a closed set (`STATUS`, `BLOCKERS`, `CHANGES`,
    `DECISIONS_OPEN`, `DECISIONS_MADE`, `DISAGREEMENT`, `WHY_DECISION`,
    `DECISION_EVIDENCE`); free-text `question` works too and is recorded
    rather than parsed when a `kind` is also given. Meta answers only from
-   what the asking user can already read in the room — it doesn't leak
+   what the asking user can already read in the room: it doesn't leak
    evidence bob can't see, and bob's own Meta question won't surface
    anything scoped to a room he isn't in.
 
@@ -75,13 +75,13 @@ Open a second browser (or a private window) and sign in as `bob` with it.
 `GET /api/v1/artifact-versions/{version_id}/provenance` is the drill-down.
 It returns:
 
-- `content_hash` and `provenance_hash`, plus `provenance_hash_verified` —
+- `content_hash` and `provenance_hash`, plus `provenance_hash_verified`:
   whether the stored hash still matches the content, checked server-side on
   every read, not just trusted from the stored row.
-- `branch_synthesis` — which synthesis produced this version, which model
-  and provider ran it, whether it was `simulated`, and `selected_output_ids`
-  — the exact agent outputs that fed it, in order.
-- `claims` — the Decision → Claim → AgentOutput chain: each claim in the
+- `branch_synthesis`: which synthesis produced this version, which model
+  and provider ran it, whether it was `simulated`, and `selected_output_ids`,
+  the exact agent outputs that fed it, in order.
+- `claims`: the Decision → Claim → AgentOutput chain: each claim in the
   brief traced back to the specific output it came from, not just the
   branch it came from.
 
@@ -90,8 +90,8 @@ whether the record has been altered since.
 
 ## Local models
 
-Point specialists at any OpenAI-compatible chat-completions server —
-Ollama, LM Studio, vLLM, llama.cpp — instead of the OpenAI API:
+Point specialists at any OpenAI-compatible chat-completions server
+(Ollama, LM Studio, vLLM, llama.cpp) instead of the OpenAI API:
 
 ```bash
 export XYZZY_LOCAL_MODEL_BASE_URL="http://localhost:11434/v1"
@@ -99,7 +99,7 @@ export XYZZY_OPENAI_MODEL="llama3"
 ```
 
 This takes priority over `OPENAI_API_KEY` when both are set. If you set
-`OPENAI_API_KEY` anyway, it's sent as a bearer token to the local base URL —
+`OPENAI_API_KEY` anyway, it's sent as a bearer token to the local base URL:
 unset it, or use a placeholder, if you don't want your OpenAI key sent to a
 local runtime. See the README's Local Installation section for the full
 variable list, including OIDC and deployment settings not needed for this
@@ -115,7 +115,7 @@ walkthrough.
   section for what running more than one process actually requires.
 - **No tasks UI yet.** The task API is complete server-side
   (`POST/GET /rooms/{room_id}/tasks`, `/assign`, `/delegate`, `/complete`,
-  `/cancel`) but has no client surface — see `docs/BACKLOG.md`. Reachable
+  `/cancel`) but has no client surface: see `docs/BACKLOG.md`. Reachable
   only by calling the API directly today.
 - **Invitation needs the user id, not an email or username.** There's no
   user directory or lookup endpoint; the only way to learn another user's id

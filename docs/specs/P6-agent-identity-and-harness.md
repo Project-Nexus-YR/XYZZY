@@ -1,4 +1,4 @@
-# P6 — Agent identity and harness
+# P6: Agent identity and harness
 
 Design for the five P6 conditions in `docs/benchmarks/buzz-agent-workspace-baseline.md`, all of it **on top
 of** the five-way intersection in `security/capabilities.py` and none of it widening that. block/buzz has
@@ -10,17 +10,17 @@ identity, delegation and a harness contract but no tool scoping, no agent-remova
 carries an Ed25519 public key whose private half lives in the harness process, never in the workspace, so
 identity survives a harness restart on another host and is revoked once rather than per run. Every run proves
 membership through a per-run bearer credential stored only as a SHA-256 hash and compared with
-`hmac.compare_digest` — the opaque-token discipline already in `security/auth.py`; a signed-challenge harness
+`hmac.compare_digest`, the opaque-token discipline already in `security/auth.py`; a signed-challenge harness
 proves it a second time, answering a random launch challenge at `initialize` against the stored key.
 
-**Fail-closed.** No run may be created unless a matching identity row exists, `revoked_at IS NULL`, and — in
-`SIGNED_CHALLENGE` mode — the challenge was answered: a `BEFORE INSERT` trigger on `agent_runs`, not only a
+**Fail-closed.** No run may be created unless a matching identity row exists, `revoked_at IS NULL`, and, in
+`SIGNED_CHALLENGE` mode, the challenge was answered: a `BEFORE INSERT` trigger on `agent_runs`, not only a
 service check, so a future code path cannot launch an anonymous agent by forgetting the checker. Buzz's
 invariant is that a keyless agent refuses to start; we make that refusal a database constraint.
 
 **Two proof modes, and no server keyring.** A signature proves authorship across a transport nobody controls.
 Buzz needs one because its agents reach a public relay from anywhere; the NEXUS bridge and the OpenAI provider
-run inside this process, where the service constructs the run in the same transaction that writes it — a
+run inside this process, where the service constructs the run in the same transaction that writes it: a
 keypair for those would invent a secret to guard a boundary that does not exist. So
 `agent_identities.proof_mode` is `IN_PROCESS` or `SIGNED_CHALLENGE`, with a CHECK requiring `public_key IS NOT
 NULL` exactly when the mode is `SIGNED_CHALLENGE`, and the launch trigger demands a challenge answer only in
@@ -28,7 +28,7 @@ that mode. Everything else is identical across both, so the first out-of-process
 verifier, not a redesign. Public keys only: AGENTS.md's rule against building before demonstrated need.
 **Events.** `agent.identity.registered`, `agent.identity.revoked`, `agent.launch.refused` (`agent_id`,
 `reason` ∈ `no_identity` / `revoked` / `challenge_failed` / `unknown_harness`).
-**Test** — `tests/security/test_agent_identity.py`: delete the identity row, then launch through the service
+**Test**: `tests/security/test_agent_identity.py`: delete the identity row, then launch through the service
 and again through a direct repository insert; both raise, no `agent_runs` row exists, one refusal event is
 appended. The wrong-key case runs against a `SIGNED_CHALLENGE` fixture; no production path builds one yet.
 
@@ -36,10 +36,10 @@ appended. The wrong-key case runs against a `SIGNED_CHALLENGE` fixture; no produ
 
 **Decision.** `agent_runs.authorized_by` is a NOT NULL user id naming the human under whose authority the run
 acts, from the authenticated principal, never a request body. It propagates to `tool_requests.authorized_by`
-and `approvals.authorized_by`: `requested_by` holds the agent id — the actor, not the authority.
+and `approvals.authorized_by`: `requested_by` holds the agent id, the actor, not the authority.
 
 **Two humans, and the initiator is a ceiling.** `POST /executions/{id}/step` authorizes its caller at room
-`MUTATE`, then `execute_agent_step` derives `CapabilityTerms` from `branch.initiated_by` alone — so a member
+`MUTATE`, then `execute_agent_step` derives `CapabilityTerms` from `branch.initiated_by` alone: so a member
 an admin narrowed to `["research"]` may step a run another member initiated and be offered, and executed,
 `artifact.write` under that member's terms. `redirect_agent`, which injects prompt text, has the same shape.
 **This is a live privilege escalation in the committed code, not one this design merely declines to
@@ -47,18 +47,18 @@ introduce.** When the caller is not the initiator, the `user` term becomes the i
 capabilities and the caller's: the initiator's grant bounds the run from above and never substitutes for it,
 so nobody obtains through a run more than they hold. It narrows one term rather than adding a sixth.
 `agent_runs.acting_user_id` records who last moved the run, so audit sees both; every verb that advances or
-steers a run passes its caller — `step`, `redirect`, `intervene`, `pause`, `resume`, `cancel`, and approval.
+steers a run passes its caller: `step`, `redirect`, `intervene`, `pause`, `resume`, `cancel`, and approval.
 
 **Re-checked at execution time.** This repository's recurring defect class is check-then-use: a decision taken
 when the run was requested and never revisited at the write. The rule is that **no capability set is ever an
 input to a later decision**. `CapabilityTerms` is re-derived from durable records, inside the writing
-transaction, at every point: **run creation** — identity, addressing, authority, terms · **before each
-`session/prompt`** — authority, terms, which shape the offered tool list · **tool gateway decision** —
-authority, terms · **inside each tool writer's own transaction** — authority, terms, the missing leg today ·
-**interrupt, cancel, resume** — authority, addressing · **before an `AgentOutput`** — authority.
+transaction, at every point: **run creation**: identity, addressing, authority, terms · **before each
+`session/prompt`**: authority, terms, which shape the offered tool list · **tool gateway decision**:
+authority, terms · **inside each tool writer's own transaction**: authority, terms, the missing leg today ·
+**interrupt, cancel, resume**: authority, addressing · **before an `AgentOutput`**: authority.
 
 **Pushed down, not wrapped around.** The obvious home for the last leg is `_run_tool`, which dispatches the
-approved tool — but `_run_tool` calls `create_task` and `create_artifact`, each of which opens `async with
+approved tool, but `_run_tool` calls `create_task` and `create_artifact`, each of which opens `async with
 self.db.transaction()`, and `Database.transaction()` raises `RuntimeError: nested database transactions are
 not supported` on re-entry, so a re-check there would sit *outside* the write and relocate check-then-use an
 eighth time rather than end it. The check goes down into the writers instead: each takes an authorization
@@ -82,11 +82,11 @@ async def create_artifact(self, ..., *, authorization: RunAuthorization | None =
 
 **Events.** `agent.run.authority_revoked` (`run_id`, `authorized_by`, `acting_user_id`, `stage`,
 `missing_capability`); plus the existing `tool.call_rejected`.
-**Test** — `tests/security/test_delegated_authority.py`: approve `artifact.write`, remove the authorizing
-member, release the approval — no artifact, request `REJECTED`, event names the stage; a second case demotes
+**Test**: `tests/security/test_delegated_authority.py`: approve `artifact.write`, remove the authorizing
+member, release the approval: no artifact, request `REJECTED`, event names the stage; a second case demotes
 admin to viewer between prompt and tool execution; a third demotes after `_run_tool` is entered, where only
 the writer's own transaction can still catch it. `tests/security/test_acting_user_intersection.py` runs a case
-per verb — `step`, `redirect`, `intervene`, `pause`, `resume`, `cancel`, approval — with a caller narrowed to
+per verb (`step`, `redirect`, `intervene`, `pause`, `resume`, `cancel`, approval) with a caller narrowed to
 `["research"]` acting on an unrestricted member's run, asserting the effective set never exceeds the caller's.
 
 ## 3. Addressing modes
@@ -99,7 +99,7 @@ harness to police its own audience; storing it here means a compromised harness 
 evaluated before a run is created, before a mention invokes an agent, and on interrupt, cancel and resume.
 `NOBODY` parks the agent: history readable, no run starts. Addressing gates who may point it, not what it does.
 **Events.** `agent.addressing.updated` (requires room `ADMINISTER`), `agent.addressing.refused`.
-**Test** — `tests/security/test_addressing_modes.py`: for each mode, an owner, an allowlisted member, a plain
+**Test**: `tests/security/test_addressing_modes.py`: for each mode, an owner, an allowlisted member, a plain
 member and a non-member each attempt a direct run and a mention; the matrix is asserted, and a harness
 advertising a wider audience changes nothing.
 
@@ -134,7 +134,7 @@ class AgentHarness(Protocol):
 
 **The challenge is optional because the boundary is.** `initialize` takes and returns `bytes | None`, present
 exactly in `SIGNED_CHALLENGE` mode. An in-process harness is handed `None` and returns `None` rather than
-signing against a key the server holds — ceremony dressing a boundary §1 argues does not exist.
+signing against a key the server holds, ceremony dressing a boundary §1 argues does not exist.
 
 **Two implementations, no behaviour change.** `NexusHarness` wraps `NexusAgentBridge`: `session_new` calls
 `create_execution`; `session_prompt` calls `execute_step`, emits one `SessionUpdate` per step, maps `action ==
@@ -146,9 +146,9 @@ registry; an unknown id refuses to launch.
 
 **`MAX_TOKENS` waits for a provider that reports truncation.** `OpenAIResponsesProvider._decode_response`
 hardcodes `"action": "finish"` and reads no truncation field, so nothing here can reach that state today. The
-value stays — a truncated turn is a real terminal outcome, and adding it later reopens a closed state machine
-— but the conformance suite cannot exercise it, and this spec says so rather than specify an unrunnable test.
-**Test** — `tests/unit/test_harness_contract.py` runs one conformance suite against both (initialize answers a
+value stays: a truncated turn is a real terminal outcome, and adding it later reopens a closed state machine,
+but the conformance suite cannot exercise it, and this spec says so rather than specify an unrunnable test.
+**Test**: `tests/unit/test_harness_contract.py` runs one conformance suite against both (initialize answers a
 challenge when given one and returns `None` when not, every prompt terminates in exactly one `StopReason`,
 cancel is idempotent), plus a golden test: the seeded branch run keeps identical `AgentOutput` provenance.
 
@@ -167,36 +167,36 @@ second state machine over the same fact: `executions.status` stays the domain st
 | `SETTLED` | terminal, `settlement` set | none |
 
 `settlement` ∈ `END_TURN`, `CANCELLED`, `MAX_TOKENS`, `FAILED`, `ORPHANED`, `AUTHORITY_REVOKED`,
-`AGENT_REMOVED`, `APPROVAL_REFUSED`. Every non-settled run holds a heartbeat lease — a long one while
-`AWAITING_APPROVAL`, since a reviewer may take hours — and a sweep at startup and on an interval settles each
+`AGENT_REMOVED`, `APPROVAL_REFUSED`. Every non-settled run holds a heartbeat lease (a long one while
+`AWAITING_APPROVAL`, since a reviewer may take hours) and a sweep at startup and on an interval settles each
 expired lease `ORPHANED`. **No state is exempt**: an exemption is not a longer deadline but no deadline, and
-manufactures the fourth case the guarantee denies — a run is settled, holds a live lease, or is swept.
+manufactures the fourth case the guarantee denies: a run is settled, holds a live lease, or is swept.
 
 **A refused approval settles the run.** `reject_action` today resolves the tool request `REJECTED` and stops,
 leaving the run `AWAITING_APPROVAL`: non-settled, unleased, and under the old exemption unsweepable forever.
-Rejection now ends in one of two named places, inside the transaction that writes it — settling the run
+Rejection now ends in one of two named places, inside the transaction that writes it: settling the run
 `APPROVAL_REFUSED`, or returning it to `STREAMING` on a fresh lease when the reviewer refuses the tool but
 wants the turn continued. No third path leaves the run where it found it.
 
 **Interrupt, cancel, resume.** Interrupt injects an intervention into the next step and the run continues;
 cancel is terminal. Both re-run the addressing and authority checks, so a second admin may stop a run the
-owner started — buzz validates interrupt verbs against the owner's signature alone, which cannot express that.
+owner started: buzz validates interrupt verbs against the owner's signature alone, which cannot express that.
 An `ORPHANED` run is never resumed in place, since that re-adopts a state nobody observed; resume opens a new
 run with `resumed_from_run_id`, same identity, fresh authority. Each verb passes its caller, per §2.
 
-**Removal settles deterministically — and this piece builds it.** `remove_agent_from_room` does not exist,
+**Removal settles deterministically, and this piece builds it.** `remove_agent_from_room` does not exist,
 `AGENT_LEFT_ROOM` is declared in `domain/events.py` and never emitted, and `_running_executions` is declared
 on the service and never read; none of that is a hook to extend. The new verb requires room `ADMINISTER` and,
 in one transaction, sets `agent_room_memberships.removed_at`, moves every non-settled run for that agent in
 that room through `CANCEL_REQUESTED` to `SETTLED`/`AGENT_REMOVED`, and appends `agent.left_room` plus one
 `agent.run.settled` per run. Settlement is decided by the database and telling the harness is best-effort, so
-an in-flight turn can still land — and the credential does not stop it, because the in-flight write path is
+an in-flight turn can still land, and the credential does not stop it, because the in-flight write path is
 `complete_execution`, which consults neither `agent_runs` nor any credential. So `complete_execution` re-reads
 its run inside the transaction it already opens and refuses when `harness_state = 'SETTLED'`: no output, no
 terminal status, settlement intact. **That refusal, not the credential, stops a settled run writing.**
 **Events.** `agent.run.settled` (`run_id`, `settlement`, `decided_by`), `agent.run.orphaned`, plus the
 existing `agent.left_room`, `execution.cancelled`, `execution.failed`.
-**Test** — `tests/failure/test_harness_crash.py` kills a harness mid-stream, runs the sweep, and asserts every
+**Test**: `tests/failure/test_harness_crash.py` kills a harness mid-stream, runs the sweep, and asserts every
 run is `SETTLED` with a named settlement and a matching event, and that a run parked `AWAITING_APPROVAL` past
 its long lease is swept, not exempted; `tests/e2e/test_agent_removal.py` removes an agent with two runs in
 flight and one awaiting approval: all three settle `AGENT_REMOVED`, a late `session/update` is rejected, a
@@ -207,12 +207,12 @@ late `complete_execution` raises and writes no `agent_outputs` row. A rejected a
 **Decision.** Identity is a **gate**, never a term. Order: identity valid → addressing allows → authority
 re-derived → `CapabilityTerms.effective` → `decide(tool, effective)` → approval → execute → audit.
 `agent_identities` has no capability column by design, and `HarnessInfo.advertised_capabilities` is display
-metadata never unioned into the intersection — a harness claiming `coding` for an agent whose template lacks
+metadata never unioned into the intersection: a harness claiming `coding` for an agent whose template lacks
 it changes nothing. A sixth term would break the AGENTS.md invariant that effective capabilities are the
 intersection of user, agent, skill, channel and workspace; a gate cannot widen the set, only refuse earlier.
 The §2 caller intersection obeys this: it narrows `user` rather than adding a term. Buzz substitutes pod
 sandboxing for capability restriction; we keep the intersection and let identity say who acted.
-**Test** — `tests/security/test_capability_enforcement.py` gains a case where a valid, signed,
+**Test**: `tests/security/test_capability_enforcement.py` gains a case where a valid, signed,
 owner-addressed identity requests `artifact.write` while the authorizing human is a viewer: the request is
 `REJECTED`, and the effective set is asserted identical with and without identity.
 
@@ -282,18 +282,18 @@ ALTER TABLE approvals ADD COLUMN authorized_by TEXT NOT NULL DEFAULT '';
 ALTER TABLE agent_room_memberships ADD COLUMN removed_at TEXT;
 ```
 
-Backfill: existing instances get an `IN_PROCESS` identity row with no key — every harness today runs in this
-process — and `agent_addressing` at `OWNER_ONLY` owned by their room's creator, the narrowest mode that keeps
+Backfill: existing instances get an `IN_PROCESS` identity row with no key (every harness today runs in this
+process) and `agent_addressing` at `OWNER_ONLY` owned by their room's creator, the narrowest mode that keeps
 existing rooms working, where `ANYONE` would silently widen them. Historical `tool_requests` and `approvals`
 keep `authorized_by = ''`, read as "authority not recorded" rather than having one invented; `acting_user_id`
 backfills to `authorized_by`, the only caller those runs are known to have had.
 
 ## Not building
 
-From the scope guardrails in `AGENTS.md` — what a buzz reader might expect here and must not get:
+From the scope guardrails in `AGENTS.md`, what a buzz reader might expect here and must not get:
 
 - **No agent-to-agent society.** Delegation stays a parent run's tool call under the same human's authority.
-- **No unrestricted swarm.** No self-launching agents, schedules or fan-out — a run exists because a human asked.
+- **No unrestricted swarm.** No self-launching agents, schedules or fan-out: a run exists because a human asked.
 - **No custom model-serving stack.** A harness is a client of an existing runtime: no weights, no server.
 - **No skill marketplace, no per-harness sandbox pods.** Buzz substitutes pod isolation for capability scoping.
 - **No private-key storage.** Public keys only, so no agent secret can leak through an audit view.

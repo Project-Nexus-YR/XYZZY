@@ -1,4 +1,4 @@
-# XYZZY seeded workflow run — 2026-08-20
+# XYZZY seeded workflow run: 2026-08-20
 
 **Superseded record.** The suite size and file name below predate the
 services split and the erasure track: "Automated suite: 143 tests" is a

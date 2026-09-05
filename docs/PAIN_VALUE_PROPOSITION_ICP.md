@@ -1,4 +1,4 @@
-# XYZZY — Pain, Value Proposition & ICP
+# XYZZY: Pain, Value Proposition & ICP
 
 ## 1. Core Pain
 
@@ -45,7 +45,7 @@ The AI reasoning itself is fragmented and largely invisible to the rest of the t
 
 This creates four specific pains.
 
-### Pain 1 — AI Reasoning Is Siloed
+### Pain 1: AI Reasoning Is Siloed
 
 Team members cannot easily:
 
@@ -58,7 +58,7 @@ Team members cannot easily:
 
 AI has increased individual productivity without creating equivalent **team intelligence**.
 
-### Pain 2 — Synthesis Is Manual
+### Pain 2: Synthesis Is Manual
 
 Complex decisions involve information distributed across:
 
@@ -79,7 +79,7 @@ Someone eventually has to manually reconstruct:
 
 Managers and technical leads become human synthesis engines.
 
-### Pain 3 — Organizational Reasoning Disappears
+### Pain 3: Organizational Reasoning Disappears
 
 Organizations usually preserve the final output:
 
@@ -106,7 +106,7 @@ What assumptions were made?
 
 That reasoning gets buried in chats and private AI sessions.
 
-### Pain 4 — Powerful AI Creates an Authority Problem
+### Pain 4: Powerful AI Creates an Authority Problem
 
 As agents gain access to:
 
@@ -332,7 +332,7 @@ The executive controls the depth.
 
 # 7. ICP
 
-## Primary ICP — AI-Native Technical Teams
+## Primary ICP: AI-Native Technical Teams
 
 **5–50 person technical teams already using AI heavily for real work.**
 

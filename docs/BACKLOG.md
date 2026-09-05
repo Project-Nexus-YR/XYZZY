@@ -43,7 +43,7 @@ adoption the project does not yet have.
 - **Multi-node deployment and horizontal scaling.** The server is one process
   on SQLite by design (SECURITY.md's threat model and the event-chain writer
   assume a single writer). Going multi-node means Postgres or a fan-out layer
-  and a rethink of sequence allocation — do it when a real deployment hits the
+  and a rethink of sequence allocation: do it when a real deployment hits the
   ceiling, not before.
 - **Native desktop and mobile clients.** The web SPA is the only client. A
   Slack/Discord bridge is the cheaper adoption lever and should come first.
@@ -58,7 +58,7 @@ line: what the API already supports, and why the UI still waits.
 
 - **Tasks UI.** `POST/GET /rooms/{room_id}/tasks`, `POST /tasks/{id}/assign`,
   `/delegate`, `/complete`, `/cancel` exist server-side with no client surface at
-  all — a full CRUD + assignment workflow, not a small add, and this round's
+  all: a full CRUD + assignment workflow, not a small add, and this round's
   budget went to the channel lifecycle gap the owner actually hit.
 - **Hand-authored decisions/artifacts.** `POST /rooms/{room_id}/decisions`,
   `POST /rooms/{room_id}/artifacts`, `POST /artifacts/{id}/versions` let a
@@ -79,7 +79,7 @@ line: what the API already supports, and why the UI still waits.
   already exposed (Guarded/Strict). Building a real editor for that needs its
   own information design; posture covers the common case for now.
 - **Room rename.** No `PATCH /rooms/{room_id}` route exists to change a
-  channel's name after creation — nothing to wire up until the server adds it.
+  channel's name after creation: nothing to wire up until the server adds it.
 - **Request-to-join.** `POST /rooms/{room_id}/join` exists, but Browse
   channels shows non-member rooms as "by invitation" only; a self-serve
   request-to-join flow (with an admin approval step) is a workflow the server

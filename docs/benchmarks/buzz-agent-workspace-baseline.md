@@ -89,17 +89,17 @@ whole organisation, which is the same product thesis as XYZZY.
 
 | Idea | Where | Why it matters here |
 |---|---|---|
-| Three declared security postures — Strict pauses every tool call for approval, Auto screens external content before it reaches the model, Dangerous does neither — inheritable by narrower scopes | `SECURITY.md` | XYZZY has per-tool `requires_approval` booleans and no posture above them. A room-level posture that a narrower scope may only tighten, never loosen, is the missing layer |
+| Three declared security postures (Strict pauses every tool call for approval, Auto screens external content before it reaches the model, Dangerous does neither), inheritable by narrower scopes | `SECURITY.md` | XYZZY has per-tool `requires_approval` booleans and no posture above them. A room-level posture that a narrower scope may only tighten, never loosen, is the missing layer |
 | An always-on command policy of hard denials and approval rules that applies even under the most permissive posture | `SECURITY.md` | A floor no policy can lower, independent of the capability intersection |
 | Agents act with the authorising human's own permissions rather than a service identity | `README.md` | Independent confirmation of P6's delegated authority: attribution by construction rather than by logging |
 | A run record carrying `leaseToken`, `leaseExpiresAt`, `workerId`, `attempts`, `maxAttempts`, with `leaseLapsed()` reclaiming stuck runs, `errorParks()` parking a run that exceeds its attempts, and a reaper process | `src/runs/run-store.ts` | This is the answer to "no run may be left in a state the system cannot describe". P6 has the lease and the sweep; it is missing a parked terminal state |
 | Idempotent enqueue via `dedupKey` on the run store | `src/runs/run-store.ts` | Matches XYZZY's idempotency keys, applied to run submission rather than only to writes |
-| Background work as first-class triggers — crons, webhooks, watches | repository overview | Confirms `triggered_by: SCHEDULE` is a real category, not speculation |
+| Background work as first-class triggers (crons, webhooks, watches) | repository overview | Confirms `triggered_by: SCHEDULE` is a real category, not speculation |
 | Skills with their own access control, separate from the channel model | repository overview | XYZZY folds skills into the five-way intersection; qm gives them an ACL of their own |
 
 Session concurrency converges with ours independently: `createOrchestrator()` takes a per-session
 lease and refuses a second turn with "session busy (another turn is in progress)"
-(`src/core/orchestrator.ts`) — XYZZY's turn lock, arrived at separately. Parallelism comes from
+(`src/core/orchestrator.ts`). This is XYZZY's turn lock, arrived at separately. Parallelism comes from
 separate worker processes across sessions; no dependency graph or fan-out primitive was found in the
 files read.
 
@@ -116,22 +116,22 @@ From its own `SECURITY.md` and open issues, not inferred:
 4. **Sandbox credentials are plaintext while in use** and readable by any process in that sandbox.
 5. **"Model-context entries do not yet carry complete origin labels for every granted read, so
    mixed-permission filtering is incomplete."**
-6. **Turn outcomes are not recorded faithfully** — issue #609 reports that "silent" means two
+6. **Turn outcomes are not recorded faithfully**: issue #609 reports that "silent" means two
    different things and that suppressed turns are absent from metrics.
 7. **A tracked task lives in only one session**, so qm "answers confidently and wrongly about it"
-   elsewhere — issue #608. This is exactly the failure P7's refuse-rather-than-guess rule exists to
+   elsewhere (issue #608). This is exactly the failure P7's refuse-rather-than-guess rule exists to
    prevent.
 8. **Admins are privileged content readers** with scope-authorized access to transcripts and memory,
    audited but requiring no additional approval.
 
 The sentence that states the whole difference, from `SECURITY.md`: **"audit records support
-investigation; they do not prevent an action."** XYZZY's claim is the opposite one — the check is
+investigation; they do not prevent an action."** XYZZY's claim is the opposite one: the check is
 inside the write transaction, so the action does not happen. Every piece in this gauntlet is judged
 against that.
 
 ### Not copying
 
-qm's `Dangerous` posture — a selectable tier with neither approval pauses nor content screening —
+qm's `Dangerous` posture (a selectable tier with neither approval pauses nor content screening)
 has no place in a governed workspace; a posture may tighten the floor, never remove it. Nor the
 denylist-as-boundary pattern, which qm itself calls evadable, nor plaintext in-sandbox credentials.
 
@@ -153,7 +153,7 @@ produced by selective synthesis.
 Strip product labels before criticism. Ties and unverified conditions count as a XYZZY loss.
 The critic returns a binary winner and the single largest remaining gap, nothing else.
 
-### P5 — Conversation layer
+### P5: Conversation layer
 
 XYZZY wins only if it matches Buzz on threaded replies, mention addressing, reactions, and
 cross-object search, while clearly beating it on all of:
@@ -168,7 +168,7 @@ cross-object search, while clearly beating it on all of:
 5. a mention that addresses an agent records why the agent spoke, and cannot invoke an agent the
    mentioning user lacks the capability to invoke.
 
-### P6 — Agent identity and harness
+### P6: Agent identity and harness
 
 XYZZY wins only if it matches Buzz on durable agent identity and a pluggable harness, while
 clearly beating it on all of:
@@ -182,7 +182,7 @@ clearly beating it on all of:
    recording the outcome;
 5. a harness crash leaves no run in a state the system cannot describe.
 
-### P7 — Ontology and Meta
+### P7: Ontology and Meta
 
 Buzz has no equivalent, so the bar here stays the ChatGPT shared-Projects baseline plus:
 

@@ -1,4 +1,4 @@
-# P8 — A channel posture, and a reviewer's bound
+# P8: A channel posture, and a reviewer's bound
 
 Two things, on top of the five-way intersection in `security/capabilities.py` and neither of them
 widening it.
@@ -6,7 +6,7 @@ widening it.
 The first is the posture gap in `docs/benchmarks/buzz-agent-workspace-baseline.md`. XYZZY has
 per-tool `requires_approval` booleans decided at write time by whoever registered the tool and
 nothing above them: no way to say "in this room, everything pauses", and no way afterwards to show
-which rule was in force. `yc-software/qm` declares three postures — Strict pauses every tool call,
+which rule was in force. `yc-software/qm` declares three postures: Strict pauses every tool call,
 Auto screens external content, Dangerous does neither. We take one of them.
 
 The second is an over-reach found in shipped code while building the first, and fixed here because
@@ -24,7 +24,7 @@ its own recommendation: two postures, on the room, admin-gated.
 
 - `GUARDED` is today's behaviour, byte for byte: the five-way intersection decides what an agent
   may do, and the per-tool floor decides what pauses.
-- `STRICT` adds one rule — every call pauses for a human — and takes nothing away.
+- `STRICT` adds one rule (every call pauses for a human) and takes nothing away.
 
 There is no scope but the room, no rank table, no middle tier, and no third posture. A workspace
 tier would be a second scope to compose, and composition is where four of the reviewed defects
@@ -55,7 +55,7 @@ def under_posture(decision: GatewayDecision, posture: Posture) -> GatewayDecisio
 The only value it returns other than the decision it was handed is a copy naming
 `requires_approval` and `reason`. So "may a posture change what a channel permits" is not a
 question about anybody's discipline: `allowed` is not an expression this function contains. A
-refused decision is returned untouched rather than offered to a reviewer — "ask a human" applied to
+refused decision is returned untouched rather than offered to a reviewer: "ask a human" applied to
 a denial would permit the call by whoever answered instead of by the records.
 
 **Raised, never set.** `STRICT` cannot lower a floor tool to unpaused, because the branch returns
@@ -63,7 +63,7 @@ early when `requires_approval` is already true. That is the difference between a
 policy, and it is one word wide.
 
 **Derived, never stamped.** The declaration rows are read inside `_handle_tool_request`, beside the
-terms, at the moment a call becomes a pause or an execution — the one moment that decision is made.
+terms, at the moment a call becomes a pause or an execution, the one moment that decision is made.
 Nothing resolved is stored: no column on `rooms`, no field on `tool_requests`. `tool_requests.reason`
 names the strict posture when the posture is why a call paused, which is a record of a cause, not an
 input to a later decision. This repository has lost fourteen rounds to a decision captured at one
@@ -91,13 +91,13 @@ on `set_room_policy`, and there is no unguarded insert path.
 
 **Loosening is permitted.** In one sentence: a posture that could only rise would make one mistaken
 `STRICT` permanent and the channel disposable, and the harm that would buy is not available to be
-bought, because §2 reads the posture once — at the moment a call is decided — so loosening cannot
+bought, because §2 reads the posture once, at the moment a call is decided, so loosening cannot
 reach a decision already made.
 
 **A declaration is an audit record.** Rows in `room_postures`, append-only, one per declaration with
 a surrogate `declaration_id`. `UPDATE` and `DELETE` abort. `INSERT OR REPLACE` against an existing
 `declaration_id` aborts too, on a `BEFORE INSERT` trigger rather than the delete one, because SQLite
-does not fire delete triggers for `REPLACE` unless `recursive_triggers` happens to be on — that is
+does not fire delete triggers for `REPLACE` unless `recursive_triggers` happens to be on: that is
 the exact defeat the review used against the previous draft. So "which rule governed this action"
 is a query over rows that cannot have changed since.
 
@@ -114,14 +114,14 @@ back through the database even where the service line was removed.
 It fails closed, so it is not an escalation. It is over-reach, and the kind that teaches people not
 to answer approvals.
 
-**Decision.** The reviewer is recorded against the call she released — `tool_request_reviewers`,
-keyed `(request_id, reviewer_id)`, append-only — and the run is advanced under the principal the
+**Decision.** The reviewer is recorded against the call she released (`tool_request_reviewers`,
+keyed `(request_id, reviewer_id)`, append-only) and the run is advanced under the principal the
 turn was parked on, which is the same one `_resume_suspended_turn` already carried the rest of the
 turn under.
 
-**The bound is narrowed in scope, never removed.** Both doors that decide a stored call — the
+**The bound is narrowed in scope, never removed.** Both doors that decide a stored call, the
 reviewer's own (`_current_tool_decision`) and the writer's, inside the transaction that writes
-(`_run_authorization`) — reach the reviewers through one helper, so neither can be the one that
+(`_run_authorization`), reach the reviewers through one helper, so neither can be the one that
 forgot them. A reviewer still cannot approve herself past her own grant on the call she is
 answering for.
 
@@ -130,7 +130,7 @@ run's bounding set, takes no principal from its caller, and is still the only fu
 `bounding_principals`. What the reviewer enters through is `BoundingPrincipals.also_bounded_by`,
 whose only operation is a union: there is no expression in it that drops a principal the durable
 rows named. Since the terms are an intersection over the set, a wider set is always a narrower
-grant — so nothing built from these two can yield more authority than `_authorization_for` alone.
+grant, so nothing built from these two can yield more authority than `_authorization_for` alone.
 The escalation class is *adding* authority, and this can only subtract.
 
 ## Migration
