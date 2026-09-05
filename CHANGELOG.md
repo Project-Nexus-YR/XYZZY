@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- The request body cap is enforced on the bytes received, at the ASGI
+  layer, so a chunked upload without a Content-Length is refused at the cap
+  before authentication or parsing instead of being read into memory.
+- Tokens ingested from `XYZZY_AUTH_TOKENS` are retired when they leave
+  the environment, and the demo token cannot survive into a real
+  deployment. Cookie sessions are rate-limited by session and bearer
+  requests by token, not by peer address.
+- The image is scanned for critical and high vulnerabilities before it
+  publishes, its provenance is a signed attestation, Dependabot watches the
+  base image, every extra is pinned in `constraints.txt`, and a version tag
+  is refused unless it matches `pyproject.toml`.
 - A redacted row binds its own header: the redaction record snapshots the
   event's type, actor, timestamp and sequence, the chained `EVENT_REDACTED`
   event carries that snapshot's hash and the original event hash, and the
@@ -53,6 +64,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A socket subscribing with `last_sequence` pages its backfill to the end
+  and keeps one high-water mark per room instead of a set of ids, so a
+  100,000-event backlog is delivered gapless with constant state per
+  socket. A rejected handshake is accepted and closed with its code, so a
+  browser reads 4401 or 4403 instead of 1006. Presence follows sockets.
+- The client's lists reconcile by key: stale children are removed before
+  survivors are positioned, a pressed control keeps its identity and its
+  pending click across a snapshot refresh, the open output record is render
+  state, foreign children survive, a live message inserts in place, and a
+  buffered event for a message the snapshot already rendered is not
+  replayed.
+- A stop waits `XYZZY_SHUTDOWN_GRACE_SECONDS` for open streams and then
+  exits; the eight list routes that had no limit take a capped one.
 - Two processes booting one database with pending migrations no longer
   lose one of them: the migration pass runs under a single write lock and a
   failed open closes its connection so the process exits. A schema the
@@ -110,6 +134,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The client is markup, `app.css` and ES modules under `js/`, served as
+  package data with a strict Content-Security-Policy (`script-src 'self'`,
+  `style-src 'self'`), and the browser suite grew to thirty-one tests.
+- `xyzzy_sequence_gaps_total` in `/metrics` counts client resyncs, and
+  `DELETE /workspaces/{workspace_id}/members/{user_id}` removes a member.
 - `XYZZY_MODEL_MAX_OUTPUT_TOKENS` caps one model call and
   `XYZZY_RUN_TOKEN_BUDGET` caps a run; a run that would exceed its budget
   settles `MAX_TOKENS` with a recorded reason. NEXUS mode runs its provider

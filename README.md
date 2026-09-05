@@ -283,6 +283,8 @@ deployment that terminates TLS in front of the server needs the first three.
 | `XYZZY_RATE_LIMIT_PER_MINUTE` | `120` | Requests per minute per bearer token, or per peer address when there is no token. `/api/v1/health` is exempt so a monitor cannot spend a client's budget. |
 | `XYZZY_MODEL_MAX_OUTPUT_TOKENS` | `4096` | Cap on the tokens one model call may generate (`max_output_tokens` on the Responses API, `max_tokens` on Chat Completions). |
 | `XYZZY_RUN_TOKEN_BUDGET` | `500000` | Ceiling on the tokens one run may spend across all of its steps; the run settles `MAX_TOKENS` before the step that would exceed it. `0` or a negative value disables the ceiling. |
+| `XYZZY_SHUTDOWN_GRACE_SECONDS` | `10` | How long a stop waits for open requests and streams before the process exits; a stream on a task that never finishes cannot hold a deploy past this. |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Proxies whose `X-Forwarded-For` uvicorn trusts. Set it to your reverse proxy's address so rate limiting and logs see the client, not the proxy. |
 | `XYZZY_MAX_BODY_BYTES` | `1048576` | Largest declared request body. A chunked request declares no length, so this caps the honest case only. |
 | `XYZZY_MAX_ATTACHMENT_BYTES` | `5242880` | Largest file attachment upload; the body-cap middleware exempts exactly the upload route so this limit governs instead. |
 | `XYZZY_LOG_LEVEL` | `INFO` | Root log level. |
