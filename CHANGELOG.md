@@ -197,7 +197,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The client is markup, `app.css` and ES modules under `js/`, served as
   package data with a strict Content-Security-Policy (`script-src 'self'`,
-  `style-src 'self'`), and the browser suite has forty-seven tests.
+  `style-src 'self'`), and a Playwright suite drives every view.
 - `xyzzy_sequence_gaps_total` in `/metrics` counts client resyncs, and
   `DELETE /workspaces/{workspace_id}/members/{user_id}` removes a member.
 - `XYZZY_MODEL_MAX_OUTPUT_TOKENS` caps one model call and

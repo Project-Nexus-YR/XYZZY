@@ -285,7 +285,7 @@ deployment that terminates TLS in front of the server needs the first three.
 | `XYZZY_RUN_TOKEN_BUDGET` | `500000` | Ceiling on the tokens one run may spend across all of its steps; the run settles `MAX_TOKENS` before the step that would exceed it. `0` or a negative value disables the ceiling. |
 | `XYZZY_SHUTDOWN_GRACE_SECONDS` | `10` | How long a stop waits for open requests and streams before the process exits; a stream on a task that never finishes cannot hold a deploy past this. |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Proxies whose `X-Forwarded-For` uvicorn trusts. Set it to your reverse proxy's address so rate limiting and logs see the client, not the proxy. |
-| `XYZZY_MAX_BODY_BYTES` | `1048576` | Largest declared request body. A chunked request declares no length, so this caps the honest case only. |
+| `XYZZY_MAX_BODY_BYTES` | `1048576` | Largest request body, counted on the bytes received: a chunked request with no declared length is refused with 413 at the cap, before any route runs. |
 | `XYZZY_MAX_ATTACHMENT_BYTES` | `5242880` | Largest file attachment upload; the body-cap middleware exempts exactly the upload route so this limit governs instead. |
 | `XYZZY_LOG_LEVEL` | `INFO` | Root log level. |
 | `XYZZY_REDIS_URL` | unset | Fans room events, session revocations, and presence out across several server processes sharing one database; see [Scaling out](#scaling-out). |
