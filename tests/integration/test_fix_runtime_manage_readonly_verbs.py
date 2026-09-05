@@ -111,3 +111,21 @@ async def test_open_database_readonly_lets_an_up_to_date_database_through(tmp_pa
         assert row is not None and row["n"] > 0
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_read_only_verbs_refuse_a_database_migrated_by_a_newer_build(tmp_path) -> None:
+    """A read-only verb on a schema this checkout does not know would read
+    what it understands and miss the rest, so it refuses the way the server
+    does rather than reporting a partial truth."""
+    db_path = tmp_path / "app.db"
+    db = await open_database(str(db_path))
+    await db.execute(
+        "INSERT INTO schema_migrations(name, applied_at) VALUES (?, datetime('now'))",
+        ("099_from_a_newer_release.sql",),
+    )
+    await db.commit()
+    await db.close()
+
+    with pytest.raises(RuntimeError, match="newer build"):
+        await open_database_readonly(str(db_path))

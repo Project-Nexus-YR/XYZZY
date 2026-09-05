@@ -71,6 +71,11 @@ async def _pending_migrations(db: Database) -> list[str]:
         rows = await db.fetch_all("SELECT name FROM schema_migrations")
         applied = {str(row["name"]) for row in rows}
     shipped = {f.name for f in _MIGRATIONS_DIR.glob("*.sql")}
+    unknown = sorted(applied - shipped)
+    if unknown:
+        raise RuntimeError(
+            f"database was migrated by a newer build: this checkout does not ship {unknown}"
+        )
     return sorted(shipped - applied)
 
 
