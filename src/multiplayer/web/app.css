@@ -957,6 +957,8 @@ a,.output-link{text-underline-offset:2px}
   background:var(--raised);color:var(--text);border:1px solid var(--line-2);
   padding:var(--s-2) var(--s-3);border-radius:var(--r-3);box-shadow:var(--shadow-2);
   max-width:340px;font-size:var(--t-ui);line-height:1.5;letter-spacing:var(--k-ui);
+  white-space:pre-line;
+  overflow-wrap:anywhere;
 }
 
 /* ---------- responsive ---------- */

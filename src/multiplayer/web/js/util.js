@@ -97,12 +97,35 @@ export function escHtml(s) {
 // that one class of refusal, the one carrying the most precise reason of them
 // all. A string detail (every other error handler in this app) still passes
 // straight through.
+// A validation entry's `loc` is the path to the offending field, `body`
+// prefix included — drop that leading segment (it names the payload, not a
+// field) and dot-join the rest, so ['body', 'content'] reads as "content".
+function fieldLabel(loc) {
+  if (!Array.isArray(loc) || loc.length === 0) return null;
+  const rest = loc[0] === 'body' ? loc.slice(1) : loc;
+  return rest.length ? rest.join('.') : null;
+}
+
 export function errorMessage(err) {
   const raw = err && err.message ? err.message : String(err || 'Unknown error');
   try {
     const parsed = JSON.parse(raw);
     const detail = parsed.detail;
-    if (Array.isArray(detail)) return detail.map(entry => entry.msg || JSON.stringify(entry)).join('; ');
+    if (Array.isArray(detail)) {
+      // A non-object entry (null, a bare string) used to throw reading
+      // `.msg` off it, which this catch turned into the raw body — keep
+      // that fallback when no entry in the list is usable, rather than
+      // printing "null" as a line of its own.
+      const entries = detail.filter(entry => entry && typeof entry === 'object');
+      if (entries.length === 0) return raw;
+      return entries
+        .map(entry => {
+          if (!entry.msg) return JSON.stringify(entry);
+          const field = fieldLabel(entry.loc);
+          return field ? `${field}: ${entry.msg}` : entry.msg;
+        })
+        .join('\n');
+    }
     if (typeof detail === 'string') return detail || raw;
     return raw;
   } catch (_) {

@@ -13,6 +13,7 @@ and test_fix_realtime_client_gap_resync.py.
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
@@ -362,6 +363,95 @@ def test_80_a_failing_socket_triggered_loadstate_does_not_throw_unhandled(
 def test_81_errormessage_renders_a_422_list_body_field_by_field(
     live_server: _LiveServer,
 ) -> None:
+    # No client-reachable route carries a form-violable pydantic constraint,
+    # so the 422 body is injected on the wire with page.route rather than
+    # provoked for real; /me/bootstrap (the create-channel form's own
+    # request) is the target.
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.goto(live_server.base_url)
+        _install_unhandled_rejection_guard(page)
+
+        def fulfil_422(route):
+            route.fulfill(
+                status=422,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "detail": [
+                            {
+                                "type": "string_too_short",
+                                "loc": ["body", "r"],
+                                "msg": "too short",
+                            },
+                            {
+                                "type": "missing",
+                                "loc": ["body", "n"],
+                                "msg": "required",
+                            },
+                        ]
+                    }
+                ),
+            )
+
+        page.route("**/api/v1/me/bootstrap", fulfil_422)
+
+        page.wait_for_selector("#setup-card-variant:not(.hidden)", timeout=10000)
+        page.click("text=Setting up a new workspace?")
+        page.fill("#setup-room", "ab")
+        page.evaluate(
+            """
+            async () => {
+              const { createFirstChannelFromCookieSession } = await import('/static/js/auth.js');
+              await createFirstChannelFromCookieSession();
+            }
+            """
+        )
+        page.wait_for_function(
+            "() => document.querySelectorAll('#toast-region .toast.error').length > 0",
+            timeout=5000,
+        )
+        message = page.eval_on_selector("#toast-region .toast.error", "el => el.textContent")
+
+        assert "[object Object]" not in message
+        lines = message.split("\n")
+        assert len(lines) == 2
+        assert lines[0].endswith("r: too short")
+        assert lines[1] == "n: required"
+
+        # The string can hold a "\n" per entry while the toast still renders
+        # it as one visual line (a bare newline collapses under the default
+        # `white-space: normal`), and a naive rect count is thrown off by a
+        # zero-width phantom rect Chromium emits at the break — so distinct
+        # rounded line-box tops, from a Range over the element's own text,
+        # is the check that actually pins the fix to what a reader sees
+        # rather than just the string. The entries above are short enough
+        # that the toast's own width never forces a wrap on its own, so any
+        # second line here can only come from the preserved "\n".
+        line_count = page.eval_on_selector(
+            "#toast-region .toast.error",
+            """
+            el => {
+              const range = document.createRange();
+              range.selectNodeContents(el);
+              const rects = Array.from(range.getClientRects()).filter(r => r.width > 0);
+              return new Set(rects.map(r => Math.round(r.y))).size;
+            }
+            """,
+        )
+        assert line_count == 2
+        _assert_no_unhandled_rejections(page)
+        browser.close()
+
+
+def test_81_errormessage_falls_back_to_the_raw_body_when_no_entry_is_usable(
+    live_server: _LiveServer,
+) -> None:
+    # A detail list holding no object entry (a bare null, here) used to throw
+    # reading `.msg` off it, which the outer catch turned into the raw body.
+    # That fallback must survive: a naive per-entry fix renders the literal
+    # string "null" as its own line instead.
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
@@ -372,16 +462,13 @@ def test_81_errormessage_renders_a_422_list_body_field_by_field(
             """
             async () => {
               const { errorMessage } = await import('/static/js/util.js');
-              const err = new Error(JSON.stringify({detail: [
-                {type: 'string_type', loc: ['body', 'content'],
-                 msg: 'Input should be a valid string'},
-              ]}));
-              return errorMessage(err);
+              const raw = JSON.stringify({detail: [null]});
+              const err = new Error(raw);
+              return { result: errorMessage(err), raw };
             }
             """
         )
-        assert result == "Input should be a valid string"
-        assert "[object Object]" not in result
+        assert result["result"] == result["raw"]
         _assert_no_unhandled_rejections(page)
         browser.close()
 
