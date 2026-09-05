@@ -20,7 +20,7 @@ import {
   openNotifications, openNotification, openAgentOutput, toggleReaction,
   markRoomRead, sendMessage,
   scheduleAutoRead, appendSystemMessage, appendMessage, applyReadCursor, reconcileMessages,
-  refreshNotificationDot, refreshUnread, scrollMessagesToBottom,
+  refreshNotificationDot, scheduleRefreshUnread, scrollMessagesToBottom,
 } from './messages.js';
 import { submitThreadReply, runSearch, openSearchHit, openThread, setThreadTarget, refreshThread } from './thread.js';
 import {
@@ -75,7 +75,7 @@ on('refreshOtherRoomUnreads', refreshOtherRoomUnreads);
 on('handleAccessRevoked', handleAccessRevoked);
 on('refreshRooms', refreshRooms);
 on('appendMessage', appendMessage);
-on('refreshUnread', refreshUnread);
+on('scheduleRefreshUnread', scheduleRefreshUnread);
 on('appendSystemMessage', appendSystemMessage);
 // The shell/messages/rooms/branch pairs that cycled with each other the same
 // way, broken the same way.

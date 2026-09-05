@@ -1164,6 +1164,13 @@ async def get_room_state(
     The embedded event list is capped at the caller's request the same way
     ``list_room_events`` is, and the cap travels down to the query, so a long
     lived room is never read whole and trimmed after.
+
+    ``last_sequence=0`` (a fresh connect, no real cursor yet) windows that
+    event list around the recent room rather than its oldest history: from
+    the oldest message this same response returns up to the head (from
+    sequence 1 when the room has fewer messages than that page), the newest
+    ``events_limit`` of those at most. A non-zero ``last_sequence`` keeps its
+    usual meaning: every event after it, oldest first, up to the same cap.
     """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)

@@ -527,6 +527,25 @@ export async function refreshUnread() {
   catch (err) { console.error('Failed to read the read cursor:', err); }
 }
 
+// A page load or a resync can replay hundreds of message.created events in one
+// burst (see the socket.js reconnect/backfill paths), and each used to call
+// refreshUnread() on its own: one read-cursor request per message, enough to
+// rate-limit the tab mid-reload. Debounced the same way scheduleAutoRead
+// already debounces markRoomRead: every call in the burst just resets the
+// timer, so only the last one survives to actually fire, and it fires once the
+// burst has settled rather than once per event. A snapshot fetch already
+// applies its own fresh read cursor (loadStateImpl's applyReadCursor call), so
+// firing this mid-backfill would only add a redundant, possibly-stale request;
+// this reschedules itself instead of fetching while state.loadStatePromise
+// shows a backfill still in flight, and fires for real once that clears.
+export function scheduleRefreshUnread() {
+  clearTimeout(state.refreshUnreadTimer);
+  state.refreshUnreadTimer = setTimeout(() => {
+    if (state.loadStatePromise) { scheduleRefreshUnread(); return; }
+    refreshUnread();
+  }, 300);
+}
+
 export async function markRoomRead() {
   try {
     applyReadCursor(await api('PUT', `/rooms/${state.roomId}/read-cursor`, {last_read_sequence: state.lastSequence}));

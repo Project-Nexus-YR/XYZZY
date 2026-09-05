@@ -172,7 +172,53 @@ class _AuditMixin(_SharedMixin):
         # to already be in every collection read after it).
         latest_sequence = await self.get_latest_sequence(room_id)
         room = await self.get_room(room_id)
-        events = await self.get_room_events(room_id, last_sequence, limit=event_limit)
+        # Read ahead of events below: a first load (last_sequence == 0, no
+        # real cursor yet) windows events_since around whatever message page
+        # this same response actually shows, so a rendered system line
+        # always lines up with a message a person can see rather than
+        # dropping the newest ones (a room past the event cap paged from
+        # sequence 1 forward showed the same handful of ancient invites
+        # forever and never the change that just happened). A real cursor
+        # keeps its existing, unwindowed meaning below: everything past it.
+        message_page_limit = 50
+        # One row past the page: message_page_limit + 1 rows back means
+        # there is at least one earlier message this page does not show;
+        # message_page_limit or fewer means every message in the room
+        # already made it. The returned count alone at exactly
+        # message_page_limit cannot tell those two apart: a room with
+        # precisely a page of messages and a room well past it both return
+        # the identical count. So this always asks for one more than it
+        # needs rather than reading that ambiguous case as "cut off".
+        messages = await self.list_room_messages(room_id, limit=message_page_limit + 1)
+        # Bounded by the same head read above: a message committed in the
+        # gap between that read and this one must not appear here while its
+        # own room_event is excluded from events_since below (or the other
+        # way around). The client takes the higher of the two sequences as
+        # its subscribe cursor, and a mismatch there means it subscribes
+        # past whichever collection missed it, so it is never shown live.
+        messages = [m for m in messages if m.event_sequence <= latest_sequence]
+        page_was_cut_off = len(messages) > message_page_limit
+        if page_was_cut_off:
+            messages = messages[-message_page_limit:]
+        if last_sequence == 0:
+            # Nothing was cut off the message page, so there is no earlier
+            # window to respect: start from the room's true beginning, same
+            # as before. Otherwise start where the shown messages start, so
+            # a system line for something that happened before any message
+            # on screen (an old invite, on a room with real history) does
+            # not appear disconnected from everything else in the snapshot.
+            window_start = messages[0].event_sequence if page_was_cut_off else 1
+            # Still capped at event_limit, from the head end rather than
+            # the start: a window wide enough to hold the whole message
+            # page unclipped, but never wider than the caller's own limit.
+            events_after_sequence = max(window_start - 1, latest_sequence - event_limit)
+        else:
+            events_after_sequence = last_sequence
+        events = await self.get_room_events(room_id, events_after_sequence, limit=event_limit)
+        # Bounded the same way messages is above: an event committed after
+        # the head read must not surface here even though get_room_events
+        # itself enforces no upper bound of its own.
+        events = [e for e in events if e.sequence <= latest_sequence]
         members = await self.get_room_members(room_id)
         member_display_names = await self.repos.room_members.display_names(room_id)
         agents = await self.list_room_agents(room_id)
@@ -183,7 +229,6 @@ class _AuditMixin(_SharedMixin):
             for record in await self.repos.handles.list_by_room(room_id)
         }
         tasks = await self.list_room_tasks(room_id)
-        messages = await self.list_room_messages(room_id, limit=50)
         thread_summaries = await self.repos.messages.thread_summaries_by_room(room_id)
         reactions: dict[str, list[dict[str, str]]] = {}
         for reaction in await self.repos.reactions.list_live_by_room(room_id):

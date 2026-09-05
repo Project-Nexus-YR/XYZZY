@@ -1,4 +1,4 @@
-import { toast } from './util.js';
+import { setWsStatus, toast } from './util.js';
 import { state } from './state.js';
 
 export const API = '/api/v1';
@@ -94,6 +94,13 @@ export function handleBearerUnauthorized(message) {
   clearStoredSession();
   rememberRoomId('');
   clearTimeout(state.wsReconnectTimer);
+  // #ws-status otherwise keeps showing "Connected" from the socket this just
+  // tore down: a page load's own connectWS() only fires once its snapshot has
+  // landed (see showWorkspace in auth.js), so a fresh sign-in on this same
+  // tab can reach its own real "connected" moments later than before, and a
+  // stale leftover class would make a caller waiting on that element think a
+  // brand new socket is already live when none has opened yet.
+  setWsStatus('Reconnecting', false);
   if (state.ws) { state.ws.onclose = null; state.ws.close(); state.ws = null; }
   document.getElementById('setup-screen').style.display = '';
   document.getElementById('app-header').style.display = 'none';

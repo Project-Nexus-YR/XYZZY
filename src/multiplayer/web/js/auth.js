@@ -1,6 +1,6 @@
 import { API, COOKIE_401_GUARD_KEY, SESSION_STORAGE_KEY, api, clearStoredSession, persistSession, readStoredSession, rememberRoomId, storedRoomId } from './api.js';
 import { loadTemplates } from './branch.js';
-import { connectWS } from './socket.js';
+import { connectWS, loadState } from './socket.js';
 import { errorMessage, toast } from './util.js';
 import { state } from './state.js';
 
@@ -154,7 +154,7 @@ export async function resumeStoredSession() {
   }
 }
 
-export function showWorkspace() {
+export async function showWorkspace() {
   document.getElementById('setup-screen').style.display = 'none';
   document.getElementById('app-header').style.display = 'flex';
   document.getElementById('app-main').style.display = 'grid';
@@ -163,6 +163,13 @@ export function showWorkspace() {
   // being explored feels like a sandboxed toy.
   document.getElementById('workspace-sub').textContent =
     state.ssoConfig.demo ? 'Demo workspace' : 'Shared decision space';
+  // The snapshot has to settle, and state.lastSequence has to reach its real
+  // value from it, before the socket subscribes: the same order switchRoom
+  // (rooms.js) already uses for a room switch. A socket opened first sends
+  // last_sequence=0, so the server replays the room's entire log instead of
+  // just what this snapshot did not already carry.
+  try { await loadState(); }
+  catch (_) { /* connectWS's own onopen retries the snapshot once it is live */ }
   connectWS();
 }
 

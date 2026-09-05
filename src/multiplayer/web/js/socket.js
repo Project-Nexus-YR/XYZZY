@@ -4,8 +4,41 @@ import { bytesToBase64Url, logEvent, setWsStatus, toast, updateActivityLogSummar
 import { state } from './state.js';
 
 export const WS_MAX_DELAY = 30000;
+
 // Which room the current ws is subscribed to, so connectWS can tell "already
 // the live socket for this room" from "stale, close it first".
+
+// The literal text appendSystemMessage renders for a room_event, shared
+// between a live/replayed frame (handleRealtimeEvent below) and a
+// snapshot's own events_since (loadStateImpl below): the snapshot already
+// carries the same room_events a live socket would have delivered since its
+// own watermark, so applying it renders the same lines a person watching
+// the socket would have seen appear live, with no replay needed to produce
+// them. Returns null for every event_type that never renders one.
+function systemMessageText(eventType, payload) {
+  switch (eventType) {
+    case 'user.joined_room':
+      return `${payload.user_id} joined the room`;
+    case 'user.left_room':
+      return `${payload.user_id} left the room`;
+    case 'user.invited_room':
+      return `${payload.user_id} was invited as ${payload.role}`;
+    case 'user.role_changed':
+      return `${payload.user_id} is now ${payload.role}`;
+    case 'user.removed_room':
+      return `${payload.user_id} was removed from the channel`;
+    case 'agent.joined_room':
+      return `Agent ${payload.name} (${payload.role}) joined`;
+    case 'room.posture_declared':
+      return `Channel posture is now ${String(payload.posture || '').toLowerCase()}`;
+    case 'human.interrupted_agent':
+      return 'Agent interrupted by human';
+    case 'human.redirected_agent':
+      return `Agent redirected: ${payload.instruction || ''}`;
+    default:
+      return null;
+  }
+}
 
 // Nulling the handlers before close is what stops a deliberately-replaced
 // socket's own onclose from ever running: onclose used to still fire after
@@ -255,8 +288,40 @@ export async function loadStateImpl() {
       .map(event => event.payload?.message_id)
       .filter(Boolean)
   );
+  // events_since carries the same room_events a live socket would have
+  // delivered since the snapshot's own watermark; the ones among them that
+  // render a system line (systemMessageText above) become synthetic
+  // messages here, keyed by their own event_id exactly like a real message
+  // is keyed by its message_id, so reconcileMessages gives them the same
+  // zero-mutation guarantee on an unchanged reload that it already gives
+  // every real message, instead of a fresh remove-and-recreate on every
+  // single call (a keyless node, the shape a live appendSystemMessage still
+  // uses, is exactly what reconcileMessages' own sweep always removes).
+  // Sorted in with snapshot.messages by the same `sequence` field both
+  // carry, not appended after them: a fixed tail position would drift out
+  // from under a system line the moment a newer real message lands (that
+  // message's own live appendMessage anchors to whatever is physically last
+  // right now), forcing the very next reconcile to move the system line
+  // past it and, with it, blur focus a person had inside that new message.
+  // That is exactly the class of bug lastMessageElement/appendMessage exists
+  // to avoid. Sequence order is also what a real replay would have delivered:
+  // every room_event, message.created included, used to land over the
+  // socket in that same order.
+  const systemEventMessages = snapshot.events_since
+    .map(event => ({ event, text: systemMessageText(event.event_type, event.payload) }))
+    .filter(({ text }) => text)
+    .map(({ event, text }) => ({
+      message_id: event.event_id,
+      role: 'system',
+      sender_id: 'system',
+      content: text,
+      sequence: event.sequence,
+      created_at: event.timestamp,
+    }));
+  const messagesWithSystemLines = [...snapshot.messages, ...systemEventMessages]
+    .sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
   emit('reconcileMessages',
-    snapshot.messages,
+    messagesWithSystemLines,
     new Set(Array.from(liveDuringFetchMessageIds, id => `m:${id}`))
   );
 
@@ -371,14 +436,15 @@ export async function loadStateImpl() {
   // instead of vanishing into the rebuild above. message.created is a real
   // room_event and does join events_since (see the 'message.created' case
   // below) -- but snapshotSequence still cannot be trusted to watermark one
-  // reliably: get_room_state (service.py) reads events before it reads
-  // messages, so a message created in the gap between those two reads can
-  // land in snapshot.messages while its own event is a beat too late for
-  // the events_since read moments earlier; and get_room_events' events_since
-  // read is capped by the state route's events_limit (500 by default, 1000 at
-  // most), so a busy-enough room can cut it before every event since
-  // last_sequence is back. Either way, a buffered message.created for a message
-  // reconcileMessages just rendered from snapshot.messages above can still
+  // reliably: get_room_state (audit.py) reads the room's head first and
+  // bounds both messages and events_since by that same number, so a message
+  // created in the gap between that read and the rest is excluded from both
+  // consistently rather than landing in one but not the other, but
+  // get_room_events' events_since read is still capped by the state route's
+  // events_limit (500 by default, 1000 at most), so a busy-enough room can
+  // cut it before every event since last_sequence is back. A buffered
+  // message.created for a message reconcileMessages just rendered from
+  // snapshot.messages above can still
   // clear the watermark and replay anyway, calling appendMessage a second
   // time for a message_id already on screen: two ".msg" elements sharing
   // one reconcileKey, the second (empty) one winning every later reconcile's
@@ -489,28 +555,33 @@ export function handleRealtimeEvent(msg) {
                        // server payload gains that field, with no further
                        // client change needed.
                        created_at: msg.payload.created_at || msg.timestamp});
-        emit('refreshUnread');
+        emit('scheduleRefreshUnread');
         break;
       case 'message.reaction_added': case 'message.reaction_removed':
         loadStateOrShowReconnecting();
         break;
       case 'user.joined_room':
-        emit('appendSystemMessage', `${msg.payload.user_id} joined the room`);
+        emit('appendSystemMessage', systemMessageText('user.joined_room', msg.payload));
         break;
       case 'user.left_room':
-        emit('appendSystemMessage', `${msg.payload.user_id} left the room`);
+        emit('appendSystemMessage', systemMessageText('user.left_room', msg.payload));
         break;
+      // A reload's own reconcile already renders this event as a keyed
+      // synthetic line from events_since (systemMessageText/loadStateImpl
+      // above). Appending a second, keyless copy here as well used to
+      // double every one of these on screen until an unrelated reconcile
+      // swept the keyless half away.
       case 'user.invited_room':
-        loadStateOrShowReconnecting(() => emit('appendSystemMessage', `${msg.payload.user_id} was invited as ${msg.payload.role}`));
+        loadStateOrShowReconnecting();
         break;
       case 'user.role_changed':
-        loadStateOrShowReconnecting(() => emit('appendSystemMessage', `${msg.payload.user_id} is now ${msg.payload.role}`));
+        loadStateOrShowReconnecting();
         break;
       case 'user.removed_room':
-        loadStateOrShowReconnecting(() => emit('appendSystemMessage', `${msg.payload.user_id} was removed from the channel`));
+        loadStateOrShowReconnecting();
         break;
       case 'agent.joined_room':
-        emit('appendSystemMessage', `Agent ${msg.payload.name} (${msg.payload.role}) joined`);
+        emit('appendSystemMessage', systemMessageText('agent.joined_room', msg.payload));
         loadStateOrShowReconnecting();
         break;
       case 'agent.status_changed':
@@ -538,7 +609,7 @@ export function handleRealtimeEvent(msg) {
         loadStateOrShowReconnecting();
         break;
       case 'room.posture_declared':
-        loadStateOrShowReconnecting(() => emit('appendSystemMessage', `Channel posture is now ${String(msg.payload.posture || '').toLowerCase()}`));
+        loadStateOrShowReconnecting();
         break;
       case 'artifact.created': case 'artifact.version_created':
         loadStateOrShowReconnecting();
@@ -547,10 +618,10 @@ export function handleRealtimeEvent(msg) {
         loadStateOrShowReconnecting();
         break;
       case 'human.interrupted_agent':
-        emit('appendSystemMessage', `Agent interrupted by human`);
+        emit('appendSystemMessage', systemMessageText('human.interrupted_agent', msg.payload));
         break;
       case 'human.redirected_agent':
-        emit('appendSystemMessage', `Agent redirected: ${msg.payload.instruction || ''}`);
+        emit('appendSystemMessage', systemMessageText('human.redirected_agent', msg.payload));
         break;
       default:
         break;

@@ -54,6 +54,7 @@ export const state = {
   pendingEventsDuringLoad: [],
   lastNotifications: [],
   autoReadTimer: null,
+  refreshUnreadTimer: null,
   lastArtifacts: [],
   lastDecisions: [],
   synthesisTitleAuto: '',

@@ -184,9 +184,14 @@ async def test_reconnect_pages_past_the_500_row_default_without_truncating(servi
     assert len(events) == counter
     assert [e.sequence for e in events] == list(range(1, counter + 1))
 
-    # The reconnect path (get_room_state's events_since) must not truncate either.
-    state = await service.get_room_state(room.room_id, last_sequence=0)
-    assert len(state["events_since"]) == counter
+    # The reconnect path (get_room_state's events_since) must not truncate
+    # past ``after_sequence`` either, for a real cursor: last_sequence=0 is a
+    # fresh connect with no cursor yet, and now windows events_since around
+    # the recent room instead (see get_room_state's docstring and
+    # test_room_state_events_window.py), so this exercises the same
+    # no-silent-page-truncation guarantee through a real cursor instead.
+    state = await service.get_room_state(room.room_id, last_sequence=1)
+    assert len(state["events_since"]) == counter - 1
 
     # A mid-range after_sequence still returns every event past it, not one page.
     partial = await service.get_room_events(room.room_id, after_sequence=1)
