@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__
 from .api.a2a import router as a2a_router
@@ -31,6 +32,7 @@ from .api.routes import (
     set_demo_enabled,
     set_service,
     set_sessions,
+    set_shutting_down,
 )
 from .api.share_page import render_share_not_found_page, render_share_page
 from .db.connection import Database
@@ -40,6 +42,7 @@ from .realtime.websocket import websocket_endpoint
 from .security import (
     AuthorizationError,
     TokenAuthenticator,
+    hash_token,
     ingest_bootstrap_tokens,
     session_cookie_name,
 )
@@ -123,6 +126,32 @@ def _demo_mode_requested() -> bool:
     return raw not in ("", "0", "false")
 
 
+async def _refuse_demo_against_real_tokens(db: Database) -> None:
+    """``--demo`` refuses a database already holding a real credential (finding 12).
+
+    The comment on the identity-provider/``XYZZY_AUTH_TOKENS`` check above
+    promises this is "refused before the process ever binds a port"; that
+    promise held for the environment but not for the database file itself —
+    running ``--demo`` against a database a real user already bootstrapped
+    ingested the public demo token into it directly. Any live token that is
+    not the demo token's own means this file already holds a real identity,
+    and demo mode is not this database's to enter. The reverse direction (a
+    non-demo start retiring a leftover demo token) needs no code of its own
+    here: ``ingest_bootstrap_tokens`` already retires every bootstrap-labelled
+    token absent from the configured map (finding 11), and the demo token is
+    ingested as one.
+    """
+    row = await db.fetch_one(
+        "SELECT 1 FROM user_tokens WHERE revoked_at IS NULL AND token_hash != ? LIMIT 1",
+        (hash_token(DEMO_BEARER_TOKEN),),
+    )
+    if row is not None:
+        raise RuntimeError(
+            "XYZZY_DEMO cannot start against a database that already holds a "
+            "real bootstrap or minted token"
+        )
+
+
 def _positive_int(name: str, default: int) -> int:
     raw = os.environ.get(name, str(default)).strip()
     try:
@@ -154,6 +183,26 @@ def configured_origins() -> list[str]:
 
 def _peer_address_key(request: Request) -> str:
     return "a:" + (request.client.host if request.client else "unknown")
+
+
+def _cookie_session_key(request: Request) -> str | None:
+    """The session cookie's digest, when this deployment has SSO and the
+    request carries one. None whenever there is nothing to key by: no SSO
+    configured (no cookie flow exists at all), or the cookie is absent.
+
+    Reads ``current_sessions()`` live rather than a value captured at
+    app-creation time, the same discipline ``_ws_session_cookie`` already
+    uses, so this stays in step with whatever the deployment's SSO
+    configuration actually is on this request.
+    """
+    live = current_sessions()
+    if live is None or not live.provider.settings.configured:
+        return None
+    cookie_name = session_cookie_name(live.provider.settings.redirect_uri.startswith("https://"))
+    cookie_value = request.cookies.get(cookie_name)
+    if not cookie_value:
+        return None
+    return "s:" + hashlib.sha256(cookie_value.encode("utf-8")).hexdigest()[:32]
 
 
 class _RateLimitBuckets:
@@ -189,29 +238,41 @@ class _RateLimitBuckets:
             else:
                 self._address_token_counts[address] = remaining
 
-    def key_for(self, request: Request) -> str:
-        """Who this request's budget counts against.
-
-        The bearer token is the principal, so an already-tracked token keeps
-        counting against its own bucket. A token seen for the first time only
-        mints a fresh bucket while its address is under the cap; past it, the
-        address bucket is what further unknown tokens from that address
-        share, which is what stops rotation from buying fresh budget. The
-        address is the proxy's when a proxy is in front, which is why the
-        token is preferred at all rather than the other way round.
+    def _bucket_for(self, candidate: str, request: Request) -> str:
+        """Reuse ``candidate``'s live bucket, or mint one while its address is
+        under the per-address cap; past that cap, the address bucket is what
+        it shares instead. The one path both a bearer token and a session
+        cookie go through, so rotating either buys nothing once its address
+        has minted enough buckets already.
         """
-        authorization = request.headers.get("authorization", "")
-        if not authorization:
-            return _peer_address_key(request)
-        token_key = "t:" + hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:32]
-        if token_key in self.windows:
-            return token_key
+        if candidate in self.windows:
+            return candidate
         address = _peer_address_key(request)
         if self._address_token_counts.get(address, 0) >= self._token_cap_per_address:
             return address
-        self._token_bucket_address[token_key] = address
+        self._token_bucket_address[candidate] = address
         self._address_token_counts[address] = self._address_token_counts.get(address, 0) + 1
-        return token_key
+        return candidate
+
+    def key_for(self, request: Request) -> str:
+        """Who this request's budget counts against.
+
+        A bearer token is the principal when one is present. Absent that, a
+        cookie-authenticated (SSO) request is keyed by its session cookie
+        (finding 9) rather than the peer address: an address behind a shared
+        reverse proxy would otherwise bucket every SSO user in the deployment
+        together, so one user's polling could 429 everybody else sharing that
+        proxy. Only a request with neither — no credential at all — falls back
+        to the address, because there is nothing else to key it by.
+        """
+        authorization = request.headers.get("authorization", "")
+        if authorization:
+            token_key = "t:" + hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:32]
+            return self._bucket_for(token_key, request)
+        cookie_key = _cookie_session_key(request)
+        if cookie_key is not None:
+            return self._bucket_for(cookie_key, request)
+        return _peer_address_key(request)
 
     def touch(self, key: str, now: float, window_seconds: float) -> tuple[float, int]:
         """This key's (window_start, count) as of now, freshly moved to the LRU end."""
@@ -244,6 +305,73 @@ class _RateLimitBuckets:
         while len(self.windows) > self._max_tracked:
             oldest_key = next(iter(self.windows))
             self._evict(oldest_key)
+
+
+# Set on the ASGI scope (shared, by reference, with every layer below this
+# one) the moment a body crosses its cap. `guard`, below, reads it back after
+# `call_next` returns — however that call actually ended — and answers 413
+# regardless. The indirection exists because a plain exception does not
+# survive the trip: raising out of `receive()` unwinds through
+# `BaseHTTPMiddleware`'s own internal task group (the one
+# `@app.middleware("http")` is built on), which wraps it into an
+# `ExceptionGroup` before FastAPI's body-reading code ever gets to recognise
+# it, so even an `HTTPException(413, ...)` raised there arrives looking like
+# neither an `HTTPException` nor anything else worth keeping (confirmed
+# against this exact FastAPI/Starlette pair). A boolean set on a dict two
+# layers can both see sidesteps the whole question of what survives that
+# unwind.
+_BODY_CAP_EXCEEDED_KEY = "xyzzy.body_cap_exceeded"
+
+
+class _BodyCapMiddleware:
+    """Enforce a body-size cap on the bytes an HTTP request actually delivers
+    (finding 3), added as a pure ASGI middleware rather than through
+    ``@app.middleware("http")``: the latter is Starlette's ``BaseHTTPMiddleware``,
+    which still hands the route a body FastAPI has already read in full before
+    this ever gets a say. Wrapping ``receive`` here instead means nothing
+    downstream — not pydantic, not a multipart parser, not ``request.json()`` —
+    ever sees a byte past the cap, whether the request declared its size
+    honestly, lied about it, or (being chunked) never declared one at all.
+
+    Added last among this app's ``add_middleware`` calls, which Starlette
+    makes the outermost layer: this is the first thing every request meets.
+    """
+
+    def __init__(self, app: ASGIApp, limit_for: Callable[[Scope], int]) -> None:
+        self._app = app
+        self._limit_for = limit_for
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        limit = self._limit_for(scope)
+        seen = 0
+        exceeded = False
+
+        async def capped_receive() -> Message:
+            nonlocal seen, exceeded
+            if exceeded:
+                # Already over: every further read answers the same way,
+                # rather than resuming a body nothing downstream should
+                # finish parsing.
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > limit:
+                    exceeded = True
+                    scope[_BODY_CAP_EXCEEDED_KEY] = True
+                    # Not this chunk: whatever is reading the body (Starlette's
+                    # Request.stream(), a multipart parser) sees a disconnect
+                    # instead, and stops before appending it to anything it is
+                    # accumulating in memory. `guard` answers 413 once this
+                    # call unwinds, whatever it unwound as.
+                    return {"type": "http.disconnect"}
+            return message
+
+        await self._app(scope, capped_receive, send)
 
 
 def create_app(
@@ -333,6 +461,11 @@ def create_app(
         sweeper: asyncio.Task[None] | None = None
         try:
             await svc.initialize()
+            if demo_requested:
+                await _refuse_demo_against_real_tokens(db)
+            # A non-demo start retires a leftover demo token as one case of
+            # the general rule below: it is bootstrap-labelled and, on this
+            # start, absent from the configured map.
             await ingest_bootstrap_tokens(db, auth_tokens)
             if demo_requested:
                 await svc.seed_demo_workspace()
@@ -340,11 +473,21 @@ def create_app(
             set_authenticator(authenticator)
             set_sessions(sessions)
             set_demo_enabled(demo_requested)
+            # Cleared on every startup, not only set on shutdown: this process's
+            # module state outlives one create_app() (every test in this
+            # process shares it), so a stream opened against a fresh app must
+            # not inherit the previous app's shutdown signal.
+            set_shutting_down(False)
             sweeper = asyncio.create_task(sweep_run_leases())
             if fanout is not None:
                 fanout.start()
             yield
         finally:
+            # First, so a long-lived SSE stream (finding 8) notices this app is
+            # stopping and ends itself well within uvicorn's grace period
+            # instead of only at its next reauth beat, or not at all if
+            # nothing ever forces one.
+            set_shutting_down(True)
             # A red test (or a real startup failure) must not skip this: the
             # service globals and the sweeper otherwise outlive the database
             # they point at, and every later test sharing this process sees
@@ -397,23 +540,14 @@ def create_app(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         request_started = time.monotonic()
-        declared = request.headers.get("content-length", "")
-        is_attachment_upload = request.method == "POST" and bool(
-            _ATTACHMENT_UPLOAD_PATH.match(request.url.path)
-        )
-        body_limit = max_attachment_bytes() if is_attachment_upload else max_body_bytes
         try:
-            # A request that declares its size is refused before the body is
-            # read. A chunked request declares nothing, so this caps the
-            # honest case only.
-            if declared.isdigit() and int(declared) > body_limit:
-                response: Response = JSONResponse(
-                    status_code=413, content={"detail": "request body too large"}
-                )
             # The readiness probe and the metrics scrape are exempt: a monitor
             # polling either must not be able to spend the budget of whoever
-            # else shares its address.
-            elif request.url.path in RATE_LIMIT_EXEMPT_PATHS:
+            # else shares its address. The body-size cap itself is enforced
+            # below this middleware, at the ASGI layer (finding 3): the route
+            # never sees a byte past it, declared size or not.
+            response: Response
+            if request.url.path in RATE_LIMIT_EXEMPT_PATHS:
                 response = await call_next(request)
             else:
                 key = buckets.key_for(request)
@@ -432,12 +566,30 @@ def create_app(
                     buckets.record(key, started, count + 1)
                     response = await call_next(request)
         except Exception:
-            # An unhandled route exception unwinds past here. Count it as the
-            # 500 it will become, or the one signal an operator alerts on
-            # never fires and the latency histogram silently omits exactly
-            # the requests that matter.
-            metrics.record_request(request.method, 500, time.monotonic() - request_started)
-            raise
+            if request.scope.get(_BODY_CAP_EXCEEDED_KEY):
+                # `_BodyCapMiddleware` cut the body off with a disconnect
+                # rather than a value this route could read further; whatever
+                # that unwound as inside FastAPI's own body-reading (a 400, an
+                # unrelated parse error) is not the answer for it, so it never
+                # reaches the operator-alert path below either.
+                response = JSONResponse(
+                    status_code=413, content={"detail": "request body too large"}
+                )
+            else:
+                # An unhandled route exception unwinds past here. Count it as
+                # the 500 it will become, or the one signal an operator
+                # alerts on never fires and the latency histogram silently
+                # omits exactly the requests that matter.
+                metrics.record_request(request.method, 500, time.monotonic() - request_started)
+                raise
+        else:
+            if request.scope.get(_BODY_CAP_EXCEEDED_KEY):
+                # The route ran to a response anyway (a small enough handler
+                # can finish before ever noticing the disconnect) — still not
+                # its call to make once the cap already tripped.
+                response = JSONResponse(
+                    status_code=413, content={"detail": "request body too large"}
+                )
 
         metrics.record_request(
             request.method, response.status_code, time.monotonic() - request_started
@@ -447,6 +599,17 @@ def create_app(
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
+
+    def _body_cap_for_scope(scope: Scope) -> int:
+        is_attachment_upload = scope.get("method") == "POST" and bool(
+            _ATTACHMENT_UPLOAD_PATH.match(scope.get("path", ""))
+        )
+        return max_attachment_bytes() if is_attachment_upload else max_body_bytes
+
+    # Added after CORS and the rate-limit guard above, which Starlette makes
+    # this the outermost of the three: it sees a request, and caps its body,
+    # before either of them do.
+    app.add_middleware(_BodyCapMiddleware, limit_for=_body_cap_for_scope)
 
     app.include_router(router)
     # The A2A surface is rooted rather than under /api/v1: its endpoint path and
@@ -550,6 +713,11 @@ def main() -> None:
         app,
         host=os.environ.get("XYZZY_HOST", "127.0.0.1"),
         port=_positive_int("XYZZY_PORT", 8000),
+        # Unset, uvicorn waits forever for every connection to close on its own
+        # (finding 8): one open SSE stream on a task that never terminates then
+        # holds a graceful stop until the orchestrator's SIGKILL. This is the
+        # ceiling on that wait, not the ceiling on a normal request.
+        timeout_graceful_shutdown=_positive_int("XYZZY_SHUTDOWN_GRACE_SECONDS", 10),
     )
 
 

@@ -138,10 +138,33 @@ class TokenAuthenticator:
 
 
 async def ingest_bootstrap_tokens(db: Database, tokens: Mapping[str, str]) -> None:
-    """Store configured bootstrap credentials without resurrecting revoked ones."""
+    """Store configured bootstrap credentials, and retire any rotation dropped.
+
+    Insertion never resurrects a token an operator revoked by hand, via the
+    ON CONFLICT below. Retirement is the half that was missing (finding 11):
+    a bootstrap token absent from this start's configured map is exactly as
+    gone as one an operator revoked with the CLI, so it is revoked here too,
+    on every start, rather than left live in user_tokens forever because
+    ingestion alone is insert only.
+    """
+    configured_hashes = tuple(hash_token(str(token)) for token in tokens)
     for token, user_id in tokens.items():
         await db.execute(
             "INSERT INTO user_tokens(token_hash, user_id, label, created_at) "
             "VALUES (?, ?, 'bootstrap', ?) ON CONFLICT(token_hash) DO NOTHING",
             (hash_token(str(token)), str(user_id), serialize_datetime(utcnow())),
+        )
+    retired_at = serialize_datetime(utcnow())
+    if configured_hashes:
+        placeholders = ", ".join("?" for _ in configured_hashes)
+        await db.execute(
+            "UPDATE user_tokens SET revoked_at = ? WHERE label = 'bootstrap' "
+            f"AND revoked_at IS NULL AND token_hash NOT IN ({placeholders})",
+            (retired_at, *configured_hashes),
+        )
+    else:
+        await db.execute(
+            "UPDATE user_tokens SET revoked_at = ? WHERE label = 'bootstrap' "
+            "AND revoked_at IS NULL",
+            (retired_at,),
         )

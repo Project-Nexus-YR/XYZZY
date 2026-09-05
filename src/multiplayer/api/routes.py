@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import secrets
@@ -22,13 +23,14 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from ..domain.meta import MetaQuestionKind
 from ..domain.models import (
     AddressingMode,
     AgentAddressing,
     AgentInstance,
+    AgentOutput,
     Approval,
     Artifact,
     ArtifactType,
@@ -47,6 +49,7 @@ from ..domain.models import (
     OntologyRelationshipKind,
     OntologyReviewAction,
     OutputDisposition,
+    OutputSelection,
     RoomTemplate,
     Session,
     Task,
@@ -81,11 +84,38 @@ _svc: MultiplayerService | None = None
 _authenticator: TokenAuthenticator | None = None
 _sessions: SessionService | None = None
 _demo_enabled = False
+# Set the moment the lifespan starts tearing down, cleared again the moment the
+# next one starts (a fresh create_app() shares this process's module state with
+# whichever app ran before it, tests included). A long-lived SSE stream races
+# this on every wait, rather than learning about a graceful stop only when its
+# reauth beat next comes round — which, at REAUTH_SECONDS, could be well past
+# whatever grace period the orchestrator is willing to wait out.
+#
+# Replaced, not cleared, on every "not shutting down": `asyncio.Event` binds
+# to whichever loop first calls `.wait()` on it and raises if a later `.wait()`
+# arrives from a different one. One process has exactly one loop for its whole
+# life, so this never matters in production; a test process runs one app's
+# lifespan per event loop, sharing this module across all of them, and a
+# `.clear()` alone would leave the object bound to a loop that already closed.
+_shutting_down = asyncio.Event()
 
 
 def set_service(svc: MultiplayerService | None) -> None:
     global _svc
     _svc = svc
+
+
+def set_shutting_down(flag: bool) -> None:
+    global _shutting_down
+    if flag:
+        _shutting_down.set()
+    else:
+        _shutting_down = asyncio.Event()
+
+
+def shutdown_event() -> asyncio.Event:
+    """The signal a long-lived stream races against so it ends on its own."""
+    return _shutting_down
 
 
 def set_demo_enabled(enabled: bool) -> None:
@@ -523,12 +553,29 @@ class RunOntologyExtractionRequest(BaseModel):
     extractor: str
 
 
+# The most keys a hand-corrected entity's properties may carry (finding 35): a
+# bound of some kind, matched to every other user-authored field in the
+# ontology having one, not a claim that this exact number is load-bearing.
+MAX_CORRECTED_PROPERTY_KEYS = 50
+
+
 class ReviewOntologyEntityRequest(BaseModel):
     action: str
     reason: str = ""
     corrected_label: str | None = None
-    corrected_properties: dict[str, Any] | None = None
+    corrected_properties: dict[str, str | int | float | bool | None] | None = None
     corrected_confidence: float | None = None
+
+    @field_validator("corrected_properties")
+    @classmethod
+    def _bounded_properties(
+        cls, value: dict[str, str | int | float | bool | None] | None
+    ) -> dict[str, str | int | float | bool | None] | None:
+        if value is not None and len(value) > MAX_CORRECTED_PROPERTY_KEYS:
+            raise ValueError(
+                f"corrected_properties allows at most {MAX_CORRECTED_PROPERTY_KEYS} keys"
+            )
+        return value
 
 
 class ReviewOntologyRelationshipRequest(BaseModel):
@@ -1023,6 +1070,31 @@ async def list_workspace_members(
     ]
 
 
+@router.delete("/workspaces/{workspace_id}/members/{user_id}")
+async def remove_workspace_member(
+    workspace_id: str,
+    user_id: str,
+    principal: CurrentUser,
+) -> dict[str, str]:
+    """Retire a workspace member (finding 13).
+
+    Needs lead wiring: the runtime track owns ``MultiplayerService`` and has
+    not yet merged ``remove_workspace_member``. This route is written against
+    its agreed signature, ``remove_workspace_member(workspace_id, user_id,
+    requested_by=principal.user_id)``, ahead of that merge; the ``type:
+    ignore`` below is what to delete once the method exists.
+    """
+    svc = _svc_or_404()
+    await _require_workspace(workspace_id, principal)
+    try:
+        await svc.remove_workspace_member(workspace_id, user_id, requested_by=principal.user_id)
+    except DomainError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except AuthorizationError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    return {"status": "removed"}
+
+
 @router.get("/workspaces/{workspace_id}/rooms")
 async def list_rooms(
     workspace_id: str,
@@ -1109,7 +1181,10 @@ async def join_room(
     principal: CurrentUser,
 ) -> dict[str, str]:
     svc = _svc_or_404()
-    await _require_room(room_id, principal, RoomCapability.MUTATE)
+    # READ, matching the service and leave_room's own gate (finding 36): joining
+    # only records presence and an audit event, and an invited viewer must be
+    # able to do that without the write capability nothing about joining needs.
+    await _require_room(room_id, principal, RoomCapability.READ)
     try:
         await svc.join_room(room_id, principal.user_id)
     except DomainError as e:
@@ -1317,15 +1392,22 @@ def _branch_record(branch: Branch, *, token_usage_total: int = 0) -> dict[str, A
     }
 
 
-async def _branch_token_usage_total(svc: MultiplayerService, branch: Branch) -> int:
+async def _branch_token_usage_total(
+    svc: MultiplayerService,
+    branch: Branch,
+    outputs: list[AgentOutput],
+    selections: list[OutputSelection],
+) -> int:
     """Sum the token usage of the branch's included outputs and its synthesis.
 
     An excluded output's run still ran, but what a branch cost is asked about the
     answer it kept, so only the outputs the branch actually included are counted,
     the same set ``synthesize_branch`` itself requires before it will run.
+
+    ``outputs`` and ``selections`` are read once by the caller and passed in
+    (finding 33): both are room-wide, and re-reading them per branch turned a
+    list of N branches into N room-wide scans of everything ever produced.
     """
-    outputs = await svc.list_room_outputs(branch.room_id)
-    selections = await svc.list_output_selections(branch.room_id)
     included_output_ids = {
         selection.output_id
         for selection in selections
@@ -1390,12 +1472,28 @@ async def start_branch(
 async def list_room_branches(
     room_id: str,
     principal: CurrentUser,
+    limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
+    """One page of the room's branches (finding 10).
+
+    Needs lead wiring: repositories. ``svc.list_room_branches`` has no LIMIT of
+    its own, so the ideal fix is a repository signature of
+    ``list_room_branches(room_id: str, *, limit: int) -> list[Branch]`` pushed
+    into the SQL the way ``events.list_since`` already does; until that lands,
+    the interim below still reads every branch and slices in Python, which
+    only bounds the response, not the read.
+    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    branches = await svc.list_room_branches(room_id)
+    branches = (await svc.list_room_branches(room_id))[:limit]
+    # Read once for the whole page rather than once per branch (finding 33).
+    outputs = await svc.list_room_outputs(room_id)
+    selections = await svc.list_output_selections(room_id)
     return [
-        _branch_record(branch, token_usage_total=await _branch_token_usage_total(svc, branch))
+        _branch_record(
+            branch,
+            token_usage_total=await _branch_token_usage_total(svc, branch, outputs, selections),
+        )
         for branch in branches
     ]
 
@@ -1408,7 +1506,9 @@ async def get_branch(
     svc = _svc_or_404()
     branch = await _authorized_branch(branch_id, principal, RoomCapability.READ)
     runs = await svc.list_branch_runs(branch_id)
-    token_usage_total = await _branch_token_usage_total(svc, branch)
+    outputs = await svc.list_room_outputs(branch.room_id)
+    selections = await svc.list_output_selections(branch.room_id)
+    token_usage_total = await _branch_token_usage_total(svc, branch, outputs, selections)
     return {
         "branch": _branch_record(branch, token_usage_total=token_usage_total),
         "runs": [_run_record(run) for run in runs],
@@ -1792,12 +1892,18 @@ async def list_room_agents(
 async def list_room_outputs(
     room_id: str,
     principal: CurrentUser,
+    limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
-    """List immutable agent outputs for inspection and later selection."""
+    """List immutable agent outputs for inspection and later selection.
+
+    Needs lead wiring: repositories. Bounded here by slicing the full read
+    (finding 10); the SQL still returns every row. Ideal signature:
+    ``svc.list_room_outputs(room_id, *, limit: int) -> list[AgentOutput]``.
+    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
     try:
-        outputs = await svc.list_room_outputs(room_id)
+        outputs = (await svc.list_room_outputs(room_id))[:limit]
     except DomainError as e:
         raise HTTPException(404, str(e)) from e
     return [
@@ -1849,10 +1955,15 @@ async def select_room_output(
 async def list_room_output_selections(
     room_id: str,
     principal: CurrentUser,
+    limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
+    """Needs lead wiring: repositories. Ideal signature:
+    ``svc.list_output_selections(room_id, *, limit: int) -> list[OutputSelection]``;
+    the slice below (finding 10) bounds the response, not the read.
+    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    selections = await svc.list_output_selections(room_id)
+    selections = (await svc.list_output_selections(room_id))[:limit]
     return [
         {
             "output_id": selection.output_id,
@@ -2273,10 +2384,15 @@ async def create_task(
 async def list_tasks(
     room_id: str,
     principal: CurrentUser,
+    limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
+    """Needs lead wiring: repositories. Ideal signature:
+    ``svc.list_room_tasks(room_id, *, limit: int) -> list[Task]``; the slice
+    below (finding 10) bounds the response, not the read.
+    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    tasks = await svc.list_room_tasks(room_id)
+    tasks = (await svc.list_room_tasks(room_id))[:limit]
     return [
         {
             "task_id": t.task_id,
@@ -2752,15 +2868,22 @@ async def update_artifact(
 async def list_artifact_versions(
     artifact_id: str,
     principal: CurrentUser,
+    limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
+    """Needs lead wiring: repositories. Ideal signature:
+    ``svc.repos.artifacts.list_versions(artifact_id, *, limit: int) ->
+    list[ArtifactVersion]``; the slice below (finding 10) bounds the response,
+    not the read. ``content`` is dropped from each row (finding 10): an
+    artifact edited often used to return its whole history's content on one
+    call, and a version's content is one GET away at the provenance route.
+    """
     svc = _svc_or_404()
     await _authorized_artifact(artifact_id, principal, RoomCapability.READ)
-    versions = await svc.repos.artifacts.list_versions(artifact_id)
+    versions = (await svc.repos.artifacts.list_versions(artifact_id))[:limit]
     return [
         {
             "version_id": v.version_id,
             "version_number": v.version_number,
-            "content": v.content,
             "content_hash": v.content_hash,
             "provenance_hash": v.provenance_hash,
             "branch_synthesis_id": v.branch_synthesis_id,
@@ -2794,6 +2917,9 @@ async def get_artifact_version_provenance(
     )
     return {
         "version_id": version_id,
+        # The list route dropped this (finding 10); this is the one GET away
+        # it promised in exchange.
+        "content": version.content,
         "branch_synthesis": (
             {
                 "synthesis_id": synthesis.synthesis_id,
@@ -2917,10 +3043,15 @@ async def update_decision_status(
 async def list_decisions(
     room_id: str,
     principal: CurrentUser,
+    limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
+    """Needs lead wiring: repositories. Ideal signature:
+    ``svc.list_room_decisions(room_id, *, limit: int) -> list[Decision]``; the
+    slice below (finding 10) bounds the response, not the read.
+    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    decs = await svc.list_room_decisions(room_id)
+    decs = (await svc.list_room_decisions(room_id))[:limit]
     return [
         {
             "decision_id": d.decision_id,
@@ -2963,10 +3094,15 @@ async def create_memory(
 async def list_memories(
     room_id: str,
     principal: CurrentUser,
+    limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
+    """Needs lead wiring: repositories. Ideal signature:
+    ``svc.list_room_memories(room_id, *, limit: int) -> list[Memory]``; the
+    slice below (finding 10) bounds the response, not the read.
+    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.READ)
-    mems = await svc.list_room_memories(room_id)
+    mems = (await svc.list_room_memories(room_id))[:limit]
     return [
         {
             "memory_id": m.memory_id,
@@ -2986,10 +3122,16 @@ async def list_memories(
 async def request_approval(
     room_id: str,
     principal: CurrentUser,
-    execution_id: str = Query(""),
-    agent_id: str = Query(""),
-    action: str = Query(""),
+    execution_id: str = Query("", max_length=200),
+    agent_id: str = Query("", max_length=200),
+    action: str = Query("", max_length=10000),
 ) -> dict[str, Any]:
+    """Finding 35: ``action`` still rides the query string (the web client and
+    an existing entity-authorization test both build this call as a query
+    string, so moving it into a JSON body is a wire-format change beyond this
+    fix), but it now carries the same length ceiling the rest of the API's
+    free text does, and blank is refused rather than stored.
+    """
     svc = _svc_or_404()
     await _require_room(room_id, principal, RoomCapability.MUTATE)
     execution = await _authorized_execution(execution_id, principal, RoomCapability.MUTATE)
@@ -3003,6 +3145,9 @@ async def request_approval(
         or execution.agent_id != agent.agent_id
     ):
         raise HTTPException(400, "execution and agent must belong to the approval room")
+    action = action.strip()
+    if not action:
+        raise HTTPException(400, "action must not be blank")
     try:
         approval = await svc.request_approval(
             room_id,
@@ -3107,9 +3252,15 @@ async def redirect_agent(
 @router.get("/notifications")
 async def list_notifications(
     principal: CurrentUser,
+    limit: int = Query(100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
+    """Needs lead wiring: repositories. Ideal signature:
+    ``svc.list_notifications(user_id, *, limit: int) -> list[Notification]``,
+    with the underlying repository's ``list_unread`` given the same LIMIT
+    discipline; the slice below (finding 10) bounds the response, not the read.
+    """
     svc = _svc_or_404()
-    notifs = await svc.list_notifications(principal.user_id)
+    notifs = (await svc.list_notifications(principal.user_id))[:limit]
     return [
         {
             "notification_id": n.notification_id,

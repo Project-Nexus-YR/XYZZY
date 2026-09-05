@@ -461,13 +461,26 @@ async def _task_events(
         return
 
     subscription = await svc.hub.subscribe(task.room_id, viewer_id)
-    authenticator = routes._authenticator
+    shutdown = routes.shutdown_event()
     last_state = task.state.value
     try:
         loop = asyncio.get_running_loop()
         next_reauth = loop.time() + REAUTH_SECONDS
         while True:
+            if shutdown.is_set():
+                # A graceful stop (finding 8): say the stream is over rather
+                # than letting uvicorn's shutdown grace period run out and cut
+                # it dead. Checked before the wait below too, not only here, so
+                # a stream already parked in that wait notices without having
+                # to wait out a full REAUTH_SECONDS beat first.
+                yield _sse(call_id, _closing_event(task, last_state, "server-shutting-down"))
+                return
             if loop.time() >= next_reauth:
+                # Read live rather than captured once at generator start: the
+                # global goes None at the same shutdown this stream must also
+                # notice, and a value cached before that happened would never
+                # see it change.
+                authenticator = routes._authenticator
                 if authenticator is None:
                     yield _sse(call_id, _closing_event(task, last_state, "server-shutting-down"))
                     return
@@ -488,18 +501,67 @@ async def _task_events(
                     yield _sse(call_id, _closing_event(task, last_state, "access-revoked"))
                     return
                 next_reauth = loop.time() + REAUTH_SECONDS
+
+            queue_get = asyncio.ensure_future(subscription.queue.get())
+            shutdown_wait = asyncio.ensure_future(shutdown.wait())
             try:
-                event = await asyncio.wait_for(subscription.queue.get(), timeout=REAUTH_SECONDS)
-            except TimeoutError:
-                # An SSE comment: it stops a proxy or a client calling a quiet
-                # stream dead, and carries no event anybody has to parse.
+                done, _pending = await asyncio.wait(
+                    {queue_get, shutdown_wait},
+                    timeout=REAUTH_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for pending_task in (queue_get, shutdown_wait):
+                    if not pending_task.done():
+                        pending_task.cancel()
+                await asyncio.gather(queue_get, shutdown_wait, return_exceptions=True)
+
+            if shutdown_wait in done:
+                yield _sse(call_id, _closing_event(task, last_state, "server-shutting-down"))
+                return
+            if queue_get not in done:
+                # Neither the hub nor the shutdown signal moved within a beat:
+                # an SSE comment, so a proxy or client does not call a quiet
+                # stream dead. Carries no event anybody has to parse.
                 yield ": keep-alive\n\n"
                 continue
+
+            event = queue_get.result()
             if event.get("type") == "access_revoked":
                 # Told rather than dropped. Somebody whose membership was just
                 # removed is going to reconnect otherwise, and keep reconnecting.
                 yield _sse(call_id, _closing_event(task, last_state, "access-revoked"))
                 return
+            if event.get("type") == "resync":
+                # The hub's bounded queue overflowed and evicted an entry this
+                # stream can never see again (finding 70). That entry could have
+                # been this task's own terminal update, so the marker is not
+                # simply skipped: the task is re-read from the source of truth
+                # and its current state is emitted as a fresh status update,
+                # exactly the way the websocket path closes on the same marker
+                # rather than silently continuing to drain a feed with a gap in it.
+                refreshed = await svc.repos.agent_tasks.get(task.task_id)
+                if refreshed is None:
+                    yield _sse(call_id, _closing_event(task, last_state, "resync-required"))
+                    return
+                last_state = refreshed.state.value
+                is_final = refreshed.state.value in _TERMINAL_VALUES
+                yield _sse(
+                    call_id,
+                    {
+                        "taskId": task.task_id,
+                        "contextId": task.context_id,
+                        "kind": "status-update",
+                        "status": {
+                            "state": last_state,
+                            "timestamp": refreshed.updated_at.isoformat(),
+                        },
+                        "final": is_final,
+                    },
+                )
+                if is_final:
+                    return
+                continue
             update = _status_update(event, task)
             if update is None:
                 continue

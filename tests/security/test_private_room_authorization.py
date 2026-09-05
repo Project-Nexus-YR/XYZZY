@@ -140,13 +140,23 @@ def test_private_room_denies_outsider_and_viewer_mutations_without_side_effects(
         assert viewer_state.json()["outputs"][0]["output_id"] == seeded["output_id"]
 
         viewer_events_before = viewer_state.json()["events_since"]
+        # join is READ-gated (an invited viewer may join their own room), so it
+        # is asserted separately below rather than folded into these still-403
+        # mutations, which stay MUTATE-gated even for a viewer; it is checked
+        # after, not before, the no-side-effects comparison, since a real join
+        # does record presence and a USER_JOINED_ROOM event.
         for path, body in forbidden_mutations:
+            if path == f"/api/v1/rooms/{room_id}/join":
+                continue
             response = client.post(path, headers=OUTSIDER_HEADERS, json=body)
             assert response.status_code == 403, path
         viewer_events_after = client.get(
             f"/api/v1/rooms/{room_id}/events", headers=OUTSIDER_HEADERS
         ).json()
         assert viewer_events_after == viewer_events_before
+
+        joined = client.post(f"/api/v1/rooms/{room_id}/join", headers=OUTSIDER_HEADERS)
+        assert joined.status_code == 200, joined.text
 
         with client.websocket_connect(
             f"/ws?room_id={room_id}", headers=OUTSIDER_HEADERS
