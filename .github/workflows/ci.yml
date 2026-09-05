@@ -46,13 +46,16 @@ jobs:
           load: true
           tags: xyzzy:ci
       # Fails the merge on a CRITICAL or HIGH CVE in the base image or the
-      # installed packages, the one layer no other gate looks inside.
+      # installed packages, the one layer no other gate looks inside. Only
+      # CVEs with a fix are counted: Debian ships slim with several HIGH
+      # findings it has no patch for, and a gate nobody can act on is noise.
       - uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           image-ref: xyzzy:ci
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
+          ignore-unfixed: true
       # Proves the built image actually serves the app, not just that it
       # builds: a broken Dockerfile or entrypoint must fail this job before
       # anything can merge.
