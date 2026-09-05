@@ -133,6 +133,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A subscriber whose queue overflows is told so: the drop is counted in
   `/metrics`, logged once, and the socket closes with code 4408 so the
   client reconnects and reloads instead of silently missing events.
+- A socket opened with `last_sequence` past the room's own head (a wiped or
+  re-seeded room, a snapshot from somewhere else) closed on nothing and
+  silently swallowed every live event from then on. It now gets the same
+  4408 the queue-overflow case above uses, naming the cursor and the head in
+  the close reason. The head is read once, before the socket subscribes, joins
+  presence, or sends the connected frame, so a cursor that was beyond the head
+  at that read still resyncs even when an event committed a moment later
+  would have made it look valid, and a doomed socket never joins presence at
+  all. Everything from the subscription's creation through the end of the
+  handler now shares one `try`/`finally`, so a peer already gone before the
+  connected frame or partway through a backfill no longer leaks its
+  subscription or leaves presence online, and every close before that point
+  (a missing `room_id`, a malformed cursor, a failed auth check, this one) is
+  wrapped in its own `suppress(WebSocketDisconnect)`, so a peer already gone
+  by the time one of those runs no longer logs an ERROR traceback either.
+  The client resets its stored
+  cursor to 0 on a 4408, then never opens a new socket until a fresh
+  snapshot has actually landed, retrying a failed snapshot fetch through the
+  same backoff a plain reconnect uses rather than reconnecting on the stale
+  0 immediately (a failed fetch whose deduped follow-up then succeeds no
+  longer counts as a failure either, since that wait no longer routes
+  through `Promise.finally`, which re-throws the original rejection even
+  once a successful follow-up has landed), and takes its cursor from that
+  snapshot's own
+  `latest_sequence` (a new field on `GET /rooms/{id}/state`, the room's real
+  head, not the capped `events_since` page, read before every other query in
+  that method so a socket subscribing at the number it returns can never be
+  missing an event that committed while the rest of the snapshot was being
+  read) once it does land: a large room's reconnect now costs one close, one
+  extra snapshot fetch beyond the two the client's own reconnect already
+  makes, and no replay, rather than the room's full history. A cursor over
+  19 ASCII digits, or one that is not
+  1 to 19 ASCII digits at all (a sign, an underscore digit separator, and a
+  non-ASCII decimal digit all parse under Python's own `int()` but not
+  here), is rejected at parse time with 4400, the same as any other
+  malformed cursor, so a close reason built from it can never overrun a
+  close frame's own byte budget.
 - A socket opened with `last_sequence` replays every later room event, in
   order and without duplicates, before live delivery, so the window between a
   snapshot read and the socket subscribe can no longer lose an event. The

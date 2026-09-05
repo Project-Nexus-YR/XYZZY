@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from collections.abc import Sequence
 from contextlib import suppress
 from typing import Protocol
@@ -36,6 +37,8 @@ class EventSource(Protocol):
         self, room_id: str, after_sequence: int = 0, limit: int = 500
     ) -> Sequence[RoomEvent]: ...
 
+    async def get_latest_sequence(self, room_id: str) -> int: ...
+
 
 class PresenceHeartbeat(Protocol):
     """What the socket tells presence: who is here, and that they still are.
@@ -62,6 +65,21 @@ REAUTH_SECONDS = 30.0
 # any single call's cap: a page shorter than this is the only signal that a
 # reconnecting caller reached the head of the room's history.
 _BACKFILL_PAGE_SIZE = 500
+
+# No room's sequence will ever reach this (2**63 - 1, 19 digits): past it, a
+# `last_sequence` is malformed input, not merely a very large valid cursor.
+# Bounding it here, at parse time, is what keeps a close reason built from
+# it (see the stale-cursor 4408 below) short, and keeps `int()` itself from
+# ever being asked to parse an attacker-sized digit string.
+_MAX_CURSOR = (1 << 63) - 1
+
+# ASCII digits only, 1 to 19 of them: `int()` on its own also accepts
+# underscores as digit-group separators, a leading `+`/`-`, and any Unicode
+# decimal digit (Arabic-Indic, fullwidth, ...), none of which a `last_sequence`
+# query value should parse as. Matched against the stripped raw value before
+# int() ever sees it, so `_MAX_CURSOR` above is the only remaining reason a
+# same-shape cursor can still be rejected.
+_CURSOR_PATTERN = re.compile(r"[0-9]{1,19}")
 
 
 def _websocket_authorization(
@@ -137,12 +155,19 @@ async def websocket_endpoint(
     replay_cursor: int | None = None
     cursor_error = False
     if raw_cursor is not None:
-        try:
-            replay_cursor = int(raw_cursor.strip())
-        except ValueError:
+        stripped_cursor = raw_cursor.strip()
+        # Matched before int() ever sees it: _CURSOR_PATTERN rules out
+        # everything int() would otherwise accept that a `last_sequence`
+        # should not (underscores, a sign, non-ASCII decimal digits), and
+        # its own 19 digit cap keeps int() from parsing an attacker-sized
+        # digit string. What survives the pattern can still exceed
+        # _MAX_CURSOR in value (19 nines is more than 2**63 - 1), so that
+        # check still runs after.
+        if not _CURSOR_PATTERN.fullmatch(stripped_cursor):
             cursor_error = True
         else:
-            if replay_cursor < 0:
+            replay_cursor = int(stripped_cursor)
+            if replay_cursor > _MAX_CURSOR:
                 cursor_error = True
                 replay_cursor = None
 
@@ -158,27 +183,69 @@ async def websocket_endpoint(
     # Starlette's TestClient. Nothing about room state is sent in between.
     await websocket.accept(subprotocol=accepted_protocol)
 
+    # Every close from here through the stale-cursor one below runs before
+    # any subscription or presence row exists, so there is nothing for a
+    # try/finally to release; suppress is the whole fix a peer already gone
+    # by the time the close is attempted needs, matching how the queue-
+    # overflow and reauth closes further down already tolerate the same
+    # WebSocketDisconnect without a traceback (a member can otherwise
+    # produce one on demand by opening a poisoned-cursor socket and
+    # dropping it, or a flaky client can produce it by accident).
     if not room_id:
-        await websocket.close(code=4400, reason="room_id required")
+        with suppress(WebSocketDisconnect):
+            await websocket.close(code=4400, reason="room_id required")
         return
 
     if cursor_error:
-        await websocket.close(code=4400, reason="last_sequence must be a non-negative integer")
+        with suppress(WebSocketDisconnect):
+            await websocket.close(code=4400, reason="last_sequence must be a non-negative integer")
         return
 
     try:
         principal = await authenticator.authenticate(websocket_authorization)
     except AuthenticationError:
-        await websocket.close(code=4401, reason="authentication required")
+        with suppress(WebSocketDisconnect):
+            await websocket.close(code=4401, reason="authentication required")
         return
 
     try:
         await authorization.require(room_id, principal.user_id, RoomCapability.READ)
     except AuthorizationError:
-        await websocket.close(code=4403, reason="room access forbidden")
+        with suppress(WebSocketDisconnect):
+            await websocket.close(code=4403, reason="room access forbidden")
         return
 
     user_id = principal.user_id
+
+    if replay_cursor is not None:
+        # Read before subscribing, the presence join, or the connected
+        # frame, not merely before the backfill: a cursor of exactly head+1
+        # whose own event commits in that window was still swallowed when
+        # this read ran after hub.subscribe (the event was already queued
+        # by the time the head read saw it, so the cursor looked valid and
+        # the live copy got folded into backfilled_through as already
+        # sent). Reading it first, before any of that exists, costs
+        # nothing for a valid cursor: the backfill below still reads the
+        # event log itself, and subscribe still happens before that read
+        # runs, so it sees whatever the head read merely arrived too early
+        # to notice. It also spares a doomed socket the presence join and
+        # leave it would otherwise flap for the whole handshake duration.
+        head = await events.get_latest_sequence(room_id)
+        if replay_cursor > head:
+            # The cursor names a point this room's log never reached: the
+            # client's state came from somewhere this log does not know
+            # about (a stale snapshot, a different backend, a wiped room).
+            # Same 4408 the queue-overflow path below uses, so the client's
+            # gap-resync handler (js/socket.js) takes the one path it
+            # already has: reset the stored cursor, reload the snapshot,
+            # reconnect on the snapshot's own head. Nothing to release yet;
+            # no subscription or presence row exists at this point.
+            with suppress(WebSocketDisconnect):
+                await websocket.close(
+                    code=4408,
+                    reason=f"cursor {replay_cursor} is beyond room head {head}; resync required",
+                )
+            return
 
     sub = await hub.subscribe(room_id, user_id)
     if presence is not None:
@@ -189,130 +256,158 @@ async def websocket_endpoint(
     # subscriptions this socket created without touching anyone else's.
     subs_by_room: dict[str, RealtimeSubscription] = {room_id: sub}
 
-    # Send connection confirmation
-    await websocket.send_json(
-        {
-            "type": "connected",
-            "subscription_id": sub.subscription_id,
-            "room_id": room_id,
-        }
-    )
+    async def release_subscriptions() -> None:
+        for held_room, held_sub in subs_by_room.items():
+            await hub.unsubscribe(held_sub.subscription_id)
+            if presence is not None:
+                # Only the last socket keeping this (user, room) pair
+                # subscribed marks them offline: two tabs, or a primary
+                # room plus an extra `subscribe`, must not flap presence
+                # every time either one alone disconnects.
+                remaining = await hub.get_subscriptions_for_user_room(user_id, held_room)
+                if not remaining:
+                    await presence.user_left(user_id, held_room)
 
-    if replay_cursor is not None:
-        # Subscribed above, before this read: nothing committed from here
-        # on can be missed by both the backfill and live delivery at once,
-        # only double caught by both. `sub.backfilled_through[room_id]`
-        # (a high-water mark, not a per-event record) is what dedupes that:
-        # a room's sequence is strictly increasing, so a live event whose
-        # sequence is at or below the last one this backfill sent is
-        # provably a duplicate, and anything above it is provably live.
-        # This used to be a `set[str]` of every replayed event_id, which
-        # made a socket's own state grow with the room's backlog rather
-        # than the room's fan-out (0.9-12 MB per socket for a 5k-100k event
-        # backlog) — the high-water mark is one int per subscribed room.
-        #
-        # get_room_events itself caps at _ROOM_EVENTS_MAX_LIMIT (5000): a
-        # room with more history than that past the cursor used to have the
-        # remainder silently dropped, with live delivery resuming at head
-        # and no marker of the hole in between. Paging on the repository's
-        # own 500-row page here, past that cap, is what makes the replay
-        # actually gapless for a room of any size: each page's own last
-        # sequence becomes the next page's cursor, and a short page (fewer
-        # rows than asked for) is the only signal that the caller is caught
-        # up, since a room's own event stream never gaps on its own.
-        cursor = replay_cursor
-        while True:
-            page = await events.get_room_events(room_id, cursor, limit=_BACKFILL_PAGE_SIZE)
-            if not page:
-                break
-            for room_event in page:
-                await websocket.send_json(room_event_payload(room_event))
-            cursor = page[-1].sequence
-            if len(page) < _BACKFILL_PAGE_SIZE:
-                break
-        sub.backfilled_through[room_id] = cursor
-
-    async def send_loop() -> None:
-        """Read from subscription queue and send to WebSocket.
-
-        Authentication happened once at the handshake, but a credential can be
-        revoked while the socket lives, from a process this one never hears
-        from. The loop therefore re-authenticates on its own heartbeat: a
-        revoked token closes the connection within about two beats, busy or
-        quiet.
-
-        Membership rides the same heartbeat. The Redis revoke message is
-        lossy by contract (see fanout.py), so a socket on another process
-        must not depend on it ever arriving: after the credential check, this
-        recheck's own room membership for every room it is subscribed to
-        (one read per room via the authorization policy) and revokes locally
-        for any room membership no longer covers. That caps exposure to one
-        reauth period regardless of whether the pub/sub message ever landed.
-        """
-        loop = asyncio.get_running_loop()
-        next_reauth = loop.time() + REAUTH_SECONDS
-        while True:
-            if loop.time() >= next_reauth:
-                try:
-                    await authenticator.authenticate(websocket_authorization)
-                except AuthenticationError:
-                    await websocket.close(code=4401, reason="authentication revoked")
-                    return
-                except Exception:
-                    # Cannot re-check (e.g. shutdown closed the database): close
-                    # rather than leave the client on a silent, pingless socket.
-                    with suppress(Exception):
-                        await websocket.close(code=1011, reason="authentication check failed")
-                    return
-                for subscribed_room in await hub.get_user_rooms(user_id):
-                    try:
-                        await authorization.require(subscribed_room, user_id, RoomCapability.READ)
-                        if presence is not None:
-                            await presence.heartbeat(user_id, subscribed_room)
-                    except AuthorizationError:
-                        await hub.revoke_room_access(user_id, subscribed_room)
-                    except Exception:
-                        log.exception(
-                            "Membership recheck failed for user %s in room %s",
-                            user_id,
-                            subscribed_room,
-                        )
-                next_reauth = loop.time() + REAUTH_SECONDS
-            try:
-                event = await asyncio.wait_for(sub.queue.get(), timeout=REAUTH_SECONDS)
-                if event.get("type") == "access_revoked":
-                    # Membership was removed; the hub already dropped the subscription.
-                    await websocket.close(code=4403, reason="room access revoked")
-                    return
-                if event.get("type") == "resync":
-                    # The hub's queue for this subscription overflowed: this
-                    # socket has a hole it cannot see. Close it so the
-                    # client's existing reconnect and loadState() path
-                    # fetches a fresh snapshot instead of diverging silently.
-                    await websocket.close(code=4408, reason="resync required")
-                    return
-                event_room = event.get("room_id")
-                event_sequence = event.get("sequence")
-                if (
-                    event_room is not None
-                    and event_sequence is not None
-                    and event_sequence <= sub.backfilled_through.get(event_room, -1)
-                ):
-                    # At or below the backfill's own high-water mark for this
-                    # room: already sent during the subscribe backfill above.
-                    continue
-                await websocket.send_json(event)
-            except TimeoutError:
-                try:
-                    await websocket.send_json({"type": "ping"})
-                except Exception:
-                    return
-            except Exception:
-                return
-
-    send_task = asyncio.create_task(send_loop())
-
+    # Everything from here on, through the end of the handler, runs under
+    # one try/finally: a peer already gone by the time the server sends the
+    # connected frame, or gone mid-backfill, used to raise WebSocketDisconnect
+    # straight out of this function before `release_subscriptions()` below
+    # ever ran, leaking the hub subscription (its queue then fills and never
+    # drains) and leaving presence ONLINE until the next stale-presence
+    # sweep. One try spanning the subscription's whole lifetime, not one
+    # around the close call that happened to be the newest addition, is what
+    # makes every exit path release what the two lines above acquired.
+    send_task: asyncio.Task[None] | None = None
     try:
+        # Send connection confirmation
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "subscription_id": sub.subscription_id,
+                "room_id": room_id,
+            }
+        )
+
+        if replay_cursor is not None:
+            # Subscribed above, before any of this: nothing committed from
+            # here on can be missed by both the backfill and live delivery at
+            # once, only double caught by both. sub.backfilled_through[room_id]
+            # (a high-water mark, not a per-event record) is what dedupes that:
+            # a room's sequence is strictly increasing, so a live event whose
+            # sequence is at or below the last one this backfill sent is
+            # provably a duplicate, and anything above it is provably live.
+            # This used to be a set[str] of every replayed event_id, which
+            # made a socket's own state grow with the room's backlog rather
+            # than the room's fan-out (0.9-12 MB per socket for a 5k-100k event
+            # backlog); the high-water mark is one int per subscribed room.
+            #
+            # get_room_events itself caps at _ROOM_EVENTS_MAX_LIMIT (5000): a
+            # room with more history than that past the cursor used to have the
+            # remainder silently dropped, with live delivery resuming at head
+            # and no marker of the hole in between. Paging on the repository's
+            # own 500-row page here, past that cap, is what makes the replay
+            # actually gapless for a room of any size: each page's own last
+            # sequence becomes the next page's cursor, and a short page (fewer
+            # rows than asked for) is the only signal that the caller is caught
+            # up, since a room's own event stream never gaps on its own.
+            #
+            # The cursor was already checked against the head above, before
+            # subscribing, so nothing here re-derives staleness from
+            # whatever this loop happens to read.
+            cursor = replay_cursor
+            while True:
+                page = await events.get_room_events(room_id, cursor, limit=_BACKFILL_PAGE_SIZE)
+                if not page:
+                    break
+                for room_event in page:
+                    await websocket.send_json(room_event_payload(room_event))
+                cursor = page[-1].sequence
+                if len(page) < _BACKFILL_PAGE_SIZE:
+                    break
+            sub.backfilled_through[room_id] = cursor
+
+        async def send_loop() -> None:
+            """Read from subscription queue and send to WebSocket.
+
+            Authentication happened once at the handshake, but a credential can be
+            revoked while the socket lives, from a process this one never hears
+            from. The loop therefore re-authenticates on its own heartbeat: a
+            revoked token closes the connection within about two beats, busy or
+            quiet.
+
+            Membership rides the same heartbeat. The Redis revoke message is
+            lossy by contract (see fanout.py), so a socket on another process
+            must not depend on it ever arriving: after the credential check, this
+            recheck's own room membership for every room it is subscribed to
+            (one read per room via the authorization policy) and revokes locally
+            for any room membership no longer covers. That caps exposure to one
+            reauth period regardless of whether the pub/sub message ever landed.
+            """
+            loop = asyncio.get_running_loop()
+            next_reauth = loop.time() + REAUTH_SECONDS
+            while True:
+                if loop.time() >= next_reauth:
+                    try:
+                        await authenticator.authenticate(websocket_authorization)
+                    except AuthenticationError:
+                        await websocket.close(code=4401, reason="authentication revoked")
+                        return
+                    except Exception:
+                        # Cannot re-check (e.g. shutdown closed the database): close
+                        # rather than leave the client on a silent, pingless socket.
+                        with suppress(Exception):
+                            await websocket.close(code=1011, reason="authentication check failed")
+                        return
+                    for subscribed_room in await hub.get_user_rooms(user_id):
+                        try:
+                            await authorization.require(
+                                subscribed_room, user_id, RoomCapability.READ
+                            )
+                            if presence is not None:
+                                await presence.heartbeat(user_id, subscribed_room)
+                        except AuthorizationError:
+                            await hub.revoke_room_access(user_id, subscribed_room)
+                        except Exception:
+                            log.exception(
+                                "Membership recheck failed for user %s in room %s",
+                                user_id,
+                                subscribed_room,
+                            )
+                    next_reauth = loop.time() + REAUTH_SECONDS
+                try:
+                    event = await asyncio.wait_for(sub.queue.get(), timeout=REAUTH_SECONDS)
+                    if event.get("type") == "access_revoked":
+                        # Membership was removed; the hub already dropped the subscription.
+                        await websocket.close(code=4403, reason="room access revoked")
+                        return
+                    if event.get("type") == "resync":
+                        # The hub's queue for this subscription overflowed: this
+                        # socket has a hole it cannot see. Close it so the
+                        # client's existing reconnect and loadState() path
+                        # fetches a fresh snapshot instead of diverging silently.
+                        await websocket.close(code=4408, reason="resync required")
+                        return
+                    event_room = event.get("room_id")
+                    event_sequence = event.get("sequence")
+                    if (
+                        event_room is not None
+                        and event_sequence is not None
+                        and event_sequence <= sub.backfilled_through.get(event_room, -1)
+                    ):
+                        # At or below the backfill's own high-water mark for this
+                        # room: already sent during the subscribe backfill above.
+                        continue
+                    await websocket.send_json(event)
+                except TimeoutError:
+                    try:
+                        await websocket.send_json({"type": "ping"})
+                    except Exception:
+                        return
+                except Exception:
+                    return
+
+        send_task = asyncio.create_task(send_loop())
+
         while True:
             raw = await websocket.receive_text()
             try:
@@ -391,18 +486,10 @@ async def websocket_endpoint(
         with suppress(Exception):
             await websocket.close(code=1011, reason="internal error")
     finally:
-        send_task.cancel()
-        try:
-            await send_task
-        except asyncio.CancelledError:
-            pass
-        for held_room, held_sub in subs_by_room.items():
-            await hub.unsubscribe(held_sub.subscription_id)
-            if presence is not None:
-                # Only the last socket keeping this (user, room) pair
-                # subscribed marks them offline: two tabs, or a primary
-                # room plus an extra `subscribe`, must not flap presence
-                # every time either one alone disconnects.
-                remaining = await hub.get_subscriptions_for_user_room(user_id, held_room)
-                if not remaining:
-                    await presence.user_left(user_id, held_room)
+        if send_task is not None:
+            send_task.cancel()
+            try:
+                await send_task
+            except asyncio.CancelledError:
+                pass
+        await release_subscriptions()

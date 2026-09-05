@@ -55,6 +55,10 @@ class _AuditMixin(_SharedMixin):
                 break
         return events[:capped_limit]
 
+    async def get_latest_sequence(self, room_id: str) -> int:
+        """The room's own head sequence (0 for a room with no events yet)."""
+        return await self.repos.events.get_latest_sequence(room_id)
+
     async def export_room_audit(self, room_id: str) -> AsyncIterator[str]:
         """Every event this room ever recorded, one JSON line each, then a summary.
 
@@ -158,6 +162,15 @@ class _AuditMixin(_SharedMixin):
         user_id: str = "",
         event_limit: int = _ROOM_EVENTS_DEFAULT_LIMIT,
     ) -> dict[str, Any]:
+        # Read before any other query in this method, including get_room
+        # below: an event whose commit lands between this read and the
+        # events/messages reads that follow would otherwise have a sequence
+        # at or below latest_sequence while being absent from both, so a
+        # socket that subscribes at last_sequence=latest_sequence would
+        # never replay it (nothing after this read can be missed this way,
+        # since anything at or below the number this returns is guaranteed
+        # to already be in every collection read after it).
+        latest_sequence = await self.get_latest_sequence(room_id)
         room = await self.get_room(room_id)
         events = await self.get_room_events(room_id, last_sequence, limit=event_limit)
         members = await self.get_room_members(room_id)
@@ -224,6 +237,13 @@ class _AuditMixin(_SharedMixin):
                 }
             )
         presence = await self.presence.get_room_presence(room_id)
+        # latest_sequence was read first, above; see the comment there.
+        # Kept here as the room's true head, not events_since's own capped
+        # page of it (see events_limit above): a reconnect that only ever
+        # saw a snapshot's events_since watermark undercounts the head on
+        # any room past that cap, and a stale-cursor 4408 close
+        # (realtime/websocket.py) needs the real number to reconnect
+        # without replaying the whole gap.
         return {
             "room": {
                 "room_id": room.room_id,
@@ -235,6 +255,7 @@ class _AuditMixin(_SharedMixin):
                 # reader of a posture. Nothing here is a value spent later.
                 "posture": posture.value,
             },
+            "latest_sequence": latest_sequence,
             "events_since": [
                 {
                     "event_id": e.event_id,

@@ -90,6 +90,43 @@ export function connectWS() {
       handleBearerUnauthorized('Your access token is no longer valid.');
       return;
     }
+    if (event.code === 4408) {
+      // The server closes with 4408 when the cursor this handshake carried
+      // names a point its room log never reached (a wiped or re-seeded
+      // room, a snapshot from somewhere else). state.lastSequence only
+      // ever rises (see the Math.max calls in loadStateImpl and
+      // handleRealtimeEvent below), so leaving it as is would reconnect
+      // with the same poisoned cursor and get the same close forever.
+      // Reconnecting on 0 fixes that but is its own trap on a large room:
+      // it replays the entire history from scratch. The only honest cursor
+      // is the room's real head, which only a fresh snapshot carries (as
+      // `latest_sequence`, not the capped `events_since` watermark this
+      // module already uses for state.lastSequence elsewhere), so this
+      // resets to 0 and never opens a socket again until a snapshot has
+      // actually landed. `loadState()` itself, not the
+      // loadStateOrShowReconnecting() wrapper: that wrapper turns a
+      // rejected fetch into a resolved one (just a status update), which
+      // would send this straight into the same reconnect-on-0 trap on the
+      // very first failed retry. A rejection here instead waits out the
+      // same backoff a plain reconnect uses before trying the snapshot
+      // again, so a flaky network or a rate limit slows the retries down
+      // rather than reconnecting on 0 at the speed of the failing fetch.
+      // `loadState()` dedupes onto the doomed socket's own onopen fetch
+      // when one is already in flight (see loadState's
+      // staleCallDuringLoad handling above), so this does not double it.
+      setWsStatus('Reconnecting', false);
+      state.lastSequence = 0;
+      const awaitSnapshotThenReconnect = () => {
+        loadState().then(connectWS, () => {
+          state.wsReconnectAttempts++;
+          const delay = Math.min(
+            state.wsReconnectDelay * Math.pow(1.5, state.wsReconnectAttempts - 1), WS_MAX_DELAY);
+          state.wsReconnectTimer = setTimeout(awaitSnapshotThenReconnect, delay);
+        });
+      };
+      awaitSnapshotThenReconnect();
+      return;
+    }
     setWsStatus('Reconnecting', false);
     state.wsReconnectAttempts++;
     const delay = Math.min(state.wsReconnectDelay * Math.pow(1.5, state.wsReconnectAttempts - 1), WS_MAX_DELAY);
@@ -149,19 +186,29 @@ export function loadState() {
     return state.loadStatePromise.catch(() => {}).then(loadState);
   }
   state.loadStatePromiseRoom = state.roomId;
-  // The .finally() callback below has to hand its own follow-up loadState()
-  // call back to whoever is chaining onto this promise: returning it from
-  // finally is what makes the returned promise here wait for that follow-up
-  // too, instead of settling right after the first fetch and leaving a
-  // caller's await resolved on data that was already known stale.
-  state.loadStatePromise = loadStateImpl().finally(() => {
+  // Settled explicitly on both branches rather than through .finally():
+  // .finally()'s own callback result is discarded when the promise it is
+  // attached to rejects, so a failed fetch whose staleCallDuringLoad
+  // follow-up then succeeds still rejected the whole chain (a caller
+  // awaiting this, the 4408 handler's own retry loop among them, took the
+  // failure branch and re-armed a redundant backoff even though a fresh
+  // snapshot had just landed). Returning the follow-up's own promise from
+  // a .then() rejection handler instead makes this adopt whatever that
+  // follow-up actually settles as.
+  const settleAndMaybeRetry = (wasRejected) => (outcome) => {
     state.loadStatePromise = null;
     state.loadStatePromiseRoom = null;
     if (state.staleCallDuringLoad) {
       state.staleCallDuringLoad = false;
       return loadState();
     }
-  });
+    if (wasRejected) throw outcome;
+    return outcome;
+  };
+  state.loadStatePromise = loadStateImpl().then(
+    settleAndMaybeRetry(false),
+    settleAndMaybeRetry(true),
+  );
   return state.loadStatePromise;
 }
 export async function loadStateImpl() {
@@ -319,7 +366,12 @@ export async function loadStateImpl() {
   const snapshotSequence = snapshot.events_since.length > 0
     ? Math.max(...snapshot.events_since.map(event => event.sequence))
     : 0;
-  state.lastSequence = Math.max(state.lastSequence, snapshotSequence);
+  // The room's real head, not the events_since page's own capped watermark:
+  // a room past the state route's events_limit (500 by default) has a head
+  // higher than any sequence events_since actually carries, and a 4408
+  // reconnect (see onclose above) needs that real number, not one that
+  // undercounts it and pulls the whole gap back down through the socket.
+  state.lastSequence = Math.max(state.lastSequence, snapshotSequence, snapshot.latest_sequence ?? 0);
   // Anything buffered while this fetch was in flight and not already covered
   // by the snapshot itself gets replayed now, so it lands on the fresh state
   // instead of vanishing into the rebuild above. message.created is a real
