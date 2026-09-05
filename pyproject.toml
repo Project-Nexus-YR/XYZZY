@@ -34,6 +34,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-timeout>=2.4",
     "ruff>=0.6",
     "mypy>=1.11",
     "fakeredis>=2.20",
@@ -58,6 +59,9 @@ multiplayer = ["migrations/*.sql", "web/*", "web/js/*", "web/fonts/*"]
 testpaths = ["tests"]
 addopts = "-ra -q"
 asyncio_mode = "auto"
+# A hung test fails in five minutes instead of holding the gate for hours:
+# the first CI hang took 68 minutes to notice and a cancel to read.
+timeout = 300
 
 [tool.ruff]
 line-length = 100
