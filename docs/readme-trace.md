@@ -6,7 +6,7 @@ re-verified this session; the commands that produced them are below.
 
 | Claim (README.md) | Command | Output |
 | --- | --- | --- |
-| "44 typed repository classes" / "44 typed repos" (lines ~92, ~112) | `grep -cE "^class [A-Za-z]+Repo:" src/multiplayer/db/repositories.py` | `44` |
+| "43 typed repository classes" / "43 typed repos" (lines ~100, ~120) | `grep -cE "^class [A-Za-z]+Repo:" src/multiplayer/db/repositories.py` | `43` |
 | "1283 tests (1282 passing, 1 skipped without OPENAI_API_KEY)" (Current Status) | `PYTHONPATH=src .venv/Scripts/python.exe -m pytest --collect-only -o addopts="" -q`, re-measured 2026-09-05 on this worktree after the round-2 critic pass (one hanging test removed, other tracks' tests landed on the shared worktree) | last line: `1283 tests collected`; full run (`pytest -q`) exit code 0 with `SKIPPED [1] tests/integration/test_live_provider.py:31: live provider test needs OPENAI_API_KEY; the fake-transport suite covers the rest` |
 | Hero screenshot sizes: dark/light 1200x830, @2x 2400x1660; mobile 720x648, @2x 1440x1296 | `python -c "from PIL import Image; import glob; [print(f, Image.open(f).size) for f in sorted(glob.glob('site/assets/*.png'))]"` | `screenshot-hero-dark.png (1200, 830)`, `screenshot-hero-dark@2x.png (2400, 1660)`, `screenshot-hero-light.png (1200, 830)`, `screenshot-hero-light@2x.png (2400, 1660)`, mobile variants (720, 648) and (1440, 1296) |
 | demo.gif: 960x600, 7 frames | `python -c "from PIL import Image; im=Image.open('site/assets/demo.gif'); print(im.size, im.n_frames)"` | `(960, 600) 7` |

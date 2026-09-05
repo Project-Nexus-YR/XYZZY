@@ -72,6 +72,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A page load takes the snapshot before it opens its socket and subscribes
+  at the snapshot's head, the read cursor refresh is coalesced across a
+  burst, and the historical system lines the old full replay used to render
+  come from the snapshot's own events; a first load's event window is the
+  recent room, bounded by the head it read first. A 600-message room used to
+  cost 610 requests and a rate limit on load.
+- The read-only CLI verbs (`db backup`, `token list`, `audit verify`) refuse
+  a database migrated by a newer build, as the server already did, instead
+  of reading a schema they do not know.
 - Migration 051 writes `execution_callers.first_acted_at` in one timestamp
   format from both triggers, and rebuild migrations run a scoped
   `PRAGMA foreign_key_check` on the tables they rebuilt.
@@ -363,8 +372,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Governance is structurally outside the agent surface: while a model-driven
-  turn executes, twenty-two governance methods - policies, postures, capability
-  bounds, membership and roles, approvals, identity, agent and run control -
+  turn executes, twenty-two governance methods (policies, postures, capability
+  bounds, membership and roles, approvals, identity, agent and run control)
   refuse to run at all, whoever called them, through whatever path.
 - Untrusted input is screened before a model reads it: invisible Unicode
   channels stripped, length bounded, member-authored and tool-returned
@@ -407,7 +416,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model-driven turn can mint, extend, or end a person's session.
 
 - An agent may ask another agent for work. The asking is a task with Google's
-  A2A lifecycle - the specification's own eight states, spelled the way it
+  A2A lifecycle, the specification's own eight states, spelled the way it
   spells them, because these strings go on the wire. What a delegate may spend
   is its asker's authority intersected with its own, and it is re-derived from
   durable rows at the moment of spending rather than captured when the task
@@ -424,7 +433,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   eight methods and its named error codes, Server-Sent-Events streaming built
   on the room's existing event log rather than a second delivery path, and an
   Agent Card at `/.well-known/agent-card.json`. The public card advertises the
-  door and no agents at all - a room's membership is the access decision, so a
+  door and no agents at all: a room's membership is the access decision, so a
   public list of agents would publish the shape of a private workspace to
   anyone who fetched a URL. The authenticated card shows each caller only the
   agents that caller could actually address, so no two callers share one
@@ -529,7 +538,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `id(self)`, and `self` is the single hub, so the identifier was a timestamp
   and nothing else. Two sockets opening inside one clock tick took the same
   string, and the second replaced the first in the dictionary
-  `revoke_room_access` searches - leaving the displaced socket unrevokable and
+  `revoke_room_access` searches, leaving the displaced socket unrevokable and
   still receiving a room whose access had been withdrawn.
 - `__version__` looked itself up under the distribution's pre-rename name, so
   it had been reporting `0.0.0+uninstalled` since the rename.

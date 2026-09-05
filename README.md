@@ -97,7 +97,7 @@ Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 lice
 │  OIDC sessions · Untrusted-input screening                │
 ├─────────────────────────────────────────────────────────┤
 │            Repository Layer (repositories.py)           │
-│   44 typed repos · Atomic event sequencing              │
+│   43 typed repos · Atomic event sequencing              │
 ├─────────────────────────────────────────────────────────┤
 │           Database Layer (connection.py)                │
 │         aiosqlite · WAL mode · Transaction support       │
@@ -117,7 +117,7 @@ Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 lice
 src/multiplayer/
 ├── domain/          # models.py, events.py, agent_card.py, agent_tasks.py, meta.py, provenance.py,
 │                  #   synthesis.py: frozen dataclasses, RoomEvent
-├── db/              # connection.py, repositories.py: 44 typed repository classes
+├── db/              # connection.py, repositories.py: 43 typed repository classes
 ├── migrations/      # numbered *.sql, applied in order at startup
 ├── services/        # service.py composes thirteen domain mixins (rooms, conversation, agents, runs, steps,
 │                  #   agent_tasks, branches, ontology, meta, audit, erasure, organizations, records, bootstrap)

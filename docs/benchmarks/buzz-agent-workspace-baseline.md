@@ -211,7 +211,7 @@ supersede the doc-derived claims where they differ.
 - **Search authorization advisory: confirmed.** The relay refetches and re-authorizes every
   FTS candidate (`buzz-search/src/query.rs:103-105`, `buzz-relay/src/handlers/req.rs:778`).
 - **No sequence column: confirmed, nuanced.** Ordering is client-declared `created_at` with a
-  commit-time wall-clock floor and id tiebreak - wall-clock, not monotonic
+  commit-time wall-clock floor and id tiebreak, wall-clock, not monotonic
   (`migrations/0001:190-236`, `0021:1-30`).
 - **No per-user read state: CONTRADICTED.** Kind 30078 stores per-client read-position blobs
   (`buzz-core/src/kind.rs:71-75`). The blobs are NIP-44 encrypted to the user's own key, so
@@ -236,7 +236,7 @@ supersede the doc-derived claims where they differ.
   `require_approval` throws unless pre-authorized (`src/tools/primitives.ts:571-581`). The
   concession holds only as robustness: regex over a normalized string, an org floor of five
   patterns of which four are require_approval, and MCP tool calls carry no command gate.
-- **Browser actions skip approval: reframed.** qm has no browser surface - the harness
+- **Browser actions skip approval: reframed.** qm has no browser surface; the harness
   disables browser and computer use (`src/harness/codex-harness.ts:618-631`). The one
   browser-adjacent path, emoji upload over stored session cookies, takes a capability token
   but no approval (`src/api/routes/emoji.ts:6-42`).
@@ -244,6 +244,6 @@ supersede the doc-derived claims where they differ.
   (`src/security/security-posture.ts:24-39`); `auto`'s LLM inbound screening **fails open**
   with an audit mark (`src/core/orchestrator.ts:2384-2395`). XYZZY's screen is
   deterministic and cannot err open. Run-as resolves the actor at fire time and fails closed
-  (`src/triggers/run-trigger.ts:163-186`) - noted as the part worth respecting.
+  (`src/triggers/run-trigger.ts:163-186`), noted as the part worth respecting.
 
 The bar remains paperwork plus source. Neither project has been run behaviourally.
