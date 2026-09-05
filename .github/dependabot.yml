@@ -13,6 +13,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # pydantic pins pydantic-core to one exact version, so a bump of the
+    # core on its own can never resolve; it moves when pydantic moves.
+    ignore:
+      - dependency-name: "pydantic-core"
+      - dependency-name: "pydantic_core"
   # Bumps the digest pin in Dockerfile's FROM line, so OS-level CVEs in the
   # base image get a PR the same way action and pip pins do.
   - package-ecosystem: "docker"
