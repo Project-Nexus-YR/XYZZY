@@ -3,38 +3,98 @@
 // listeners, then starts the app. Everything the delegated actions call is a
 // plain export from one of the sibling modules, unchanged in behavior.
 import { toggleTheme } from './util.js';
+import { on } from './bus.js';
 import { enterDemoWorkspace, startSsoLogin, setup, signOut, clearTokenError, handleSummaryKey, initAuth } from './auth.js';
 import {
   openContext, closeContext, openCenterView, toggleSidebar, closeSidebarDrawer, toggleAITray,
   setStrategy, handleComposerKey, toggleChannelMenu, closeChannelMenu, openModal, closeModal,
+  currentCenterView, updateRoomHeader,
 } from './shell.js';
 import {
   openCreateChannelModal, openBrowseChannels, switchRoom, submitCreateChannel,
   openLeaveChannelConfirm, submitLeaveChannel, openInvitePeople, inviteMember,
   changeMemberRole, removeMember, refreshRooms,
+  handleAccessRevoked, refreshOtherRoomUnreads, renderRoomsList,
 } from './rooms.js';
 import {
   openNotifications, openNotification, openAgentOutput, toggleReaction,
   markRoomRead, sendMessage,
+  scheduleAutoRead, appendSystemMessage, appendMessage, applyReadCursor, reconcileMessages,
+  refreshNotificationDot, refreshUnread, scrollMessagesToBottom,
 } from './messages.js';
-import { submitThreadReply, runSearch, openSearchHit, openThread, setThreadTarget } from './thread.js';
+import { submitThreadReply, runSearch, openSearchHit, openThread, setThreadTarget, refreshThread } from './thread.js';
 import {
   confirmRemoveAgent, submitRemoveAgent, selectArtifact, openCreateDecisionDialog,
   setDecisionStatus, declarePosture, approveAction, rejectAction,
+  renderAgents, renderSidebarAgents, renderTasks, renderApprovals, renderDecisions,
+  renderArtifacts, renderMembers, renderPosture,
 } from './members.js';
-import { reviewOntologyEntity, reviewOntologyRelationship } from './ontology.js';
+import { reviewOntologyEntity, reviewOntologyRelationship, renderOntology } from './ontology.js';
 import {
   toggleTemplateSelection, updateTemplateSelection, selectBranch, resumePendingRuns,
   cancelCurrentTurn, interruptAgent, openRedirectModal, submitRedirect,
   launchParallelAnalyses, setOutputSelection, updateSelectionSummary, publishSynthesis,
+  branchTitle, renderBranches, renderOutputs, renderResumeRunsBanner, applyPermissions,
 } from './branch.js';
 import { askMeta, askMetaKind, loadProvenance } from './meta.js';
-import { loadState } from './socket.js';
+import { loadState, connectWS, closeSocket } from './socket.js';
 import { state } from './state.js';
 
+// socket.js used to import every renderer below directly, and each renderer
+// imported loadState/connectWS/closeSocket back: a fan-in that only worked
+// because ES modules hoist. app.js sits above all of them, so it wires the
+// two directions here instead: socket.js calls into a panel through `emit`,
+// and a panel calls back into socket.js the same way, both resolved through
+// this registry rather than a direct import. Same functions, same arguments,
+// same order, registered here in the order socket.js used to call them.
+on('loadState', loadState);
+on('connectWS', connectWS);
+on('closeSocket', closeSocket);
+on('renderRoomsList', renderRoomsList);
+on('updateRoomHeader', updateRoomHeader);
+on('applyReadCursor', applyReadCursor);
+on('reconcileMessages', reconcileMessages);
+on('renderAgents', renderAgents);
+on('renderSidebarAgents', renderSidebarAgents);
+on('renderBranches', renderBranches);
+on('renderOutputs', renderOutputs);
+on('renderResumeRunsBanner', renderResumeRunsBanner);
+on('scrollMessagesToBottom', scrollMessagesToBottom);
+on('branchTitle', branchTitle);
+on('applyPermissions', applyPermissions);
+on('renderPosture', renderPosture);
+on('renderOntology', renderOntology);
+on('renderTasks', renderTasks);
+on('renderApprovals', renderApprovals);
+on('renderDecisions', renderDecisions);
+on('renderArtifacts', renderArtifacts);
+on('renderMembers', renderMembers);
+on('refreshThread', refreshThread);
+on('refreshNotificationDot', refreshNotificationDot);
+on('refreshOtherRoomUnreads', refreshOtherRoomUnreads);
+on('handleAccessRevoked', handleAccessRevoked);
+on('refreshRooms', refreshRooms);
+on('appendMessage', appendMessage);
+on('refreshUnread', refreshUnread);
+on('appendSystemMessage', appendSystemMessage);
+// The shell/messages/rooms/branch pairs that cycled with each other the same
+// way, broken the same way.
+on('currentCenterView', currentCenterView);
+on('openCenterView', openCenterView);
+on('openContext', openContext);
+on('closeContext', closeContext);
+on('openModal', openModal);
+on('closeModal', closeModal);
+on('toggleAITray', toggleAITray);
+on('scheduleAutoRead', scheduleAutoRead);
+on('sendMessage', sendMessage);
+on('updateTemplateSelection', updateTemplateSelection);
+on('launchParallelAnalyses', launchParallelAnalyses);
+on('switchRoom', switchRoom);
+
 // The pre-module e2e suite (tests/e2e/test_web_client.py) predates this split
-// and still reaches into a few internals directly through page.evaluate() —
-// the reconnect cursor, the in-flight-load buffer, the current room — to
+// and still reaches into a few internals directly through page.evaluate():
+// the reconnect cursor, the in-flight-load buffer, the current room, to
 // assert on state a click alone cannot observe. `state` and every helper it
 // used to reach as a bare global lived on `window` before round 2 moved them
 // into modules; this bridge is exactly that list, so that white-box coverage
@@ -60,7 +120,7 @@ function closeAiTray() {
 }
 
 function closeSidebar() {
-  // The backdrop click is the drawer's own close path — routed through
+  // The backdrop click is the drawer's own close path, routed through
   // closeSidebarDrawer (not toggleSidebar(false)) so it returns focus to
   // #sidebar-toggle the same way Escape and the Tab-trap's own close do,
   // instead of leaving focus stranded on whatever element inside the
@@ -93,7 +153,7 @@ function clickSetupButton() {
 }
 
 // Click actions. Each receives the element data-action was found on (via
-// closest()) and the triggering event, and reads whatever dataset it needs —
+// closest()) and the triggering event, and reads whatever dataset it needs:
 // the same values the removed onclick attribute used to read off `this`.
 const clickActions = {
   enterDemoWorkspace: () => enterDemoWorkspace(),

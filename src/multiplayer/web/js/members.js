@@ -1,9 +1,9 @@
 import { api } from './api.js';
+import { emit } from './bus.js';
 import { loadProvenance } from './meta.js';
 import { canGovernOntology } from './ontology.js';
 import { changeMemberRole, inviteMember, removeMember } from './rooms.js';
 import { closeModal, openCenterView, openContext, openFieldDialog, openModal } from './shell.js';
-import { loadState } from './socket.js';
 import { errorMessage, escHtml, reconcileList, renderMarkdown, toast } from './util.js';
 import { state } from './state.js';
 
@@ -37,7 +37,7 @@ export async function submitRemoveAgent(agentId) {
     await api('DELETE', `/rooms/${state.roomId}/agents/${encodeURIComponent(agentId)}`);
     closeModal();
     toast('Agent removed.');
-    await loadState();
+    await emit('loadState');
   } catch (err) {
     const errorEl = document.getElementById('remove-agent-error');
     errorEl.textContent = errorMessage(err);
@@ -151,7 +151,7 @@ export async function openCreateDecisionDialog() {
   try {
     await api('POST', `/rooms/${state.roomId}/decisions`, {title: values.title, content: values.content || ''});
     toast('Decision created.');
-    await loadState();
+    await emit('loadState');
   } catch (err) {
     toast(`Decision was not created: ${errorMessage(err)}`, 'error');
   }
@@ -161,7 +161,7 @@ export async function setDecisionStatus(decisionId, status) {
   try {
     await api('POST', `/decisions/${decisionId}/status`, {status});
     toast('Decision updated.');
-    await loadState();
+    await emit('loadState');
   } catch (err) {
     toast(`Could not update the decision: ${errorMessage(err)}`, 'error');
   }
@@ -195,11 +195,11 @@ export function renderPosture(posture) {
 export async function declarePosture(posture) {
   try {
     await api('PATCH', `/rooms/${state.roomId}/posture`, {posture});
-    await loadState();
+    await emit('loadState');
     toast(`Channel posture is now ${posture.toLowerCase()}.`);
   } catch (err) {
     // The select shows a posture nobody declared until the snapshot corrects it.
-    await loadState();
+    await emit('loadState');
     toast(`Posture was not changed: ${errorMessage(err)}`, 'error');
   }
 }
@@ -275,7 +275,7 @@ export function roleLabel(role) {
 export async function approveAction(approvalId) {
   try {
     await api('POST', `/approvals/${approvalId}/approve`, {comment: 'Approved'});
-    await loadState();
+    await emit('loadState');
   } catch (err) {
     toast(`Approval was not recorded: ${errorMessage(err)}`, 'error');
   }
@@ -284,7 +284,7 @@ export async function approveAction(approvalId) {
 export async function rejectAction(approvalId) {
   try {
     await api('POST', `/approvals/${approvalId}/reject`, {comment: 'Rejected'});
-    await loadState();
+    await emit('loadState');
   } catch (err) {
     toast(`Rejection was not recorded: ${errorMessage(err)}`, 'error');
   }

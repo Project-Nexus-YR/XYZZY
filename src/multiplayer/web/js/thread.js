@@ -1,9 +1,9 @@
 import { api } from './api.js';
 import { selectBranch } from './branch.js';
+import { emit } from './bus.js';
 import { attribution, renderMentions, reportUnrecognizedMentions } from './messages.js';
 import { refreshRooms, switchRoom } from './rooms.js';
 import { openContext } from './shell.js';
-import { loadState } from './socket.js';
 import { errorMessage, escHtml, formatTime, highlightExcerpt, idempotencyKey, memberName, shortId, toast } from './util.js';
 import { state } from './state.js';
 
@@ -64,7 +64,7 @@ export async function submitThreadReply(event) {
       {content, invoke_mentioned_agents: invoke},
       {idempotencyKey: idempotencyKey()});
     reportUnrecognizedMentions(sent);
-    await loadState();
+    await emit('loadState');
   } catch (err) {
     input.value = content;
     toast(`Reply was not sent: ${errorMessage(err)}`, 'error');

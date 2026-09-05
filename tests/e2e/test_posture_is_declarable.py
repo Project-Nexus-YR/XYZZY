@@ -130,7 +130,7 @@ def test_the_client_shows_the_posture_and_lets_an_admin_change_it() -> None:
     ui = client_source_text()
 
     assert 'id="posture-panel"' in ui
-    assert "renderPosture(snapshot.room.posture)" in ui
+    assert "emit('renderPosture', snapshot.room.posture)" in ui
     assert 'data-posture="${escHtml(current)}"' in ui
     assert "escHtml(POSTURE_COPY[current])" in ui
     # Both values are nameable in the control, and it is the admin's alone.

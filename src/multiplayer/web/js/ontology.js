@@ -1,6 +1,6 @@
 import { api } from './api.js';
+import { emit } from './bus.js';
 import { openFieldDialog } from './shell.js';
-import { loadState } from './socket.js';
 import { errorMessage, escHtml, shortId, toast } from './util.js';
 import { state } from './state.js';
 
@@ -168,7 +168,7 @@ export async function reviewOntologyEntity(entityId, action) {
   }
   try {
     await api('POST', `/rooms/${state.roomId}/ontology/entities/${entityId}/reviews`, body);
-    await loadState();
+    await emit('loadState');
   } catch (err) {
     toast(`Ontology review was not saved: ${errorMessage(err)}`, 'error');
   }
@@ -211,7 +211,7 @@ export async function reviewOntologyRelationship(relationshipId, action) {
   }
   try {
     await api('POST', `/rooms/${state.roomId}/ontology/relationships/${relationshipId}/reviews`, body);
-    await loadState();
+    await emit('loadState');
   } catch (err) {
     toast(`Ontology relationship review was not saved: ${errorMessage(err)}`, 'error');
   }

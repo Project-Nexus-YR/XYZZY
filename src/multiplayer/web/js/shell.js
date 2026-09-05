@@ -1,9 +1,7 @@
-import { branchTitle, launchParallelAnalyses, updateTemplateSelection } from './branch.js';
-import { scheduleAutoRead, sendMessage } from './messages.js';
+import { emit } from './bus.js';
 import { escHtml } from './util.js';
 import { state } from './state.js';
 
-export const QUICK_REACTIONS = ['👍', '🎯', '⚠️'];
 // 'branch'/'artifacts'/'meta'/'ontology' are center-view calls; every existing call
 // site that used to open the right panel for these keeps working unchanged. Evidence
 // has no view of its own — it lives with the artifact it supports.
@@ -40,7 +38,7 @@ export function openCenterView(view) {
   document.querySelectorAll('#rooms-list .nav-item').forEach(el => el.classList.toggle('active', view === 'conversation' && el.dataset.roomId === state.roomId));
   closeSidebarDrawer();
   updateRoomHeader();
-  if (view === 'conversation') scheduleAutoRead();
+  if (view === 'conversation') emit('scheduleAutoRead');
 }
 
 export function updateRoomHeader() {
@@ -58,7 +56,7 @@ export function updateRoomHeader() {
   hashIcon.classList.add('hidden');
   if (view === 'branch') {
     const branch = state.roomBranches.find(b => b.branch_id === state.currentBranchId);
-    nameEl.textContent = branch ? `⑂ ${branchTitle(branch)}` : '⑂ AI work';
+    nameEl.textContent = branch ? `⑂ ${emit('branchTitle', branch)}` : '⑂ AI work';
   } else if (view === 'artifact') {
     nameEl.textContent = 'Artifacts';
   } else if (view === 'meta') {
@@ -120,10 +118,10 @@ export function setStrategy(strategy) {
   document.querySelectorAll('.template-option').forEach(option => {
     option.querySelector('.template-state').textContent = option.querySelector('input').checked ? 'Selected' : 'Select';
   });
-  updateTemplateSelection();
+  emit('updateTemplateSelection');
 }
 export function handleComposerKey(event) {
-  if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(); }
+  if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); emit('sendMessage'); }
 }
 
 document.addEventListener('keydown', event => {
@@ -138,7 +136,7 @@ document.addEventListener('keydown', event => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.getElementById('msg-input').focus(); }
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && document.getElementById('ai-tray').classList.contains('open')) {
     event.preventDefault();
-    if (!document.getElementById('launch-button').disabled) launchParallelAnalyses();
+    if (!document.getElementById('launch-button').disabled) emit('launchParallelAnalyses');
   }
   // Trap Tab inside whichever of the modal or the (mobile) sidebar drawer is
   // currently the aria-modal surface — each claims the rest of the page is
@@ -161,8 +159,8 @@ document.addEventListener('keydown', event => {
     }
   }
 });
-document.getElementById('messages').addEventListener('scroll', scheduleAutoRead);
-window.addEventListener('focus', scheduleAutoRead);
+document.getElementById('messages').addEventListener('scroll', () => emit('scheduleAutoRead'));
+window.addEventListener('focus', () => emit('scheduleAutoRead'));
 
 // Desktop reveals actions on hover; touch has no hover, so a tap on the message
 // body (not on a button, link, or already-interactive control inside it) toggles

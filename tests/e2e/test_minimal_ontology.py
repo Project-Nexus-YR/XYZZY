@@ -64,7 +64,7 @@ def test_browser_ontology_contract_uses_public_reconnect_state_and_review_routes
     assert 'id="ontology-tree"' in ui
     assert 'id="ontology-history"' in ui
     assert "state.roomOntology = snapshot.ontology" in ui
-    assert "renderOntology(state.roomOntology)" in ui
+    assert "emit('renderOntology', state.roomOntology)" in ui
     assert 'data-ontology-kind="Decision"' in ui
     assert 'data-ontology-kind="Claim"' in ui
     assert 'data-ontology-kind="AgentOutput"' in ui
@@ -276,7 +276,7 @@ def test_decision_publication_materializes_selected_evidence_and_review_history(
         assert 'id="ontology-tree"' in ui
         assert 'id="ontology-history"' in ui
         assert "state.roomOntology = snapshot.ontology" in ui
-        assert "renderOntology(state.roomOntology)" in ui
+        assert "emit('renderOntology', state.roomOntology)" in ui
         assert 'data-ontology-kind="Decision"' in ui
         assert 'data-ontology-kind="Claim"' in ui
         assert 'data-ontology-kind="AgentOutput"' in ui

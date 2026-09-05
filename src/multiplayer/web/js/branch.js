@@ -1,6 +1,5 @@
 import { api } from './api.js';
-import { closeModal, currentCenterView, openCenterView, openContext, openModal, toggleAITray } from './shell.js';
-import { loadState } from './socket.js';
+import { emit } from './bus.js';
 import { errorMessage, escHtml, htmlToElement, idempotencyKey, memberName, morphElement, reconcileList, renderMarkdown, shortId, toast } from './util.js';
 import { state } from './state.js';
 
@@ -111,7 +110,7 @@ export function renderBranches(branches, runs) {
     const related = runs.filter(run => run.branch_id === branch.branch_id);
     const status = branchStatus(branch, runs);
     const count = branchAgentCount(branch, related);
-    return `<button class="nav-item branch-nav ${branch.branch_id === state.currentBranchId && currentCenterView() === 'branch' ? 'active' : ''}" data-branch-id="${escHtml(branch.branch_id)}" data-action="selectBranch" aria-label="${escHtml(branchTitle(branch))} — ${escHtml(status)}, ${count} ${count === 1 ? 'agent' : 'agents'}"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span><span class="nav-name"><span>${escHtml(branchTitle(branch))}</span><span class="branch-summary">${escHtml(status)} · ${count} ${count === 1 ? 'agent' : 'agents'}</span></span></button>`;
+    return `<button class="nav-item branch-nav ${branch.branch_id === state.currentBranchId && emit('currentCenterView') === 'branch' ? 'active' : ''}" data-branch-id="${escHtml(branch.branch_id)}" data-action="selectBranch" aria-label="${escHtml(branchTitle(branch))} — ${escHtml(status)}, ${count} ${count === 1 ? 'agent' : 'agents'}"><span class="nav-icon"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span><span class="nav-name"><span>${escHtml(branchTitle(branch))}</span><span class="branch-summary">${escHtml(status)} · ${count} ${count === 1 ? 'agent' : 'agents'}</span></span></button>`;
   });
   const branch = branches.find(item => item.branch_id === state.currentBranchId) || branches[branches.length - 1];
   const related = runs.filter(run => run.branch_id === branch.branch_id);
@@ -216,14 +215,14 @@ export async function resumePendingRuns() {
       : Promise.reject(new Error('no branch for run'));
   }));
   const failed = results.filter(r => r.status === 'rejected').length;
-  await loadState();
+  await emit('loadState');
   toast(failed ? `${pending.length - failed} resumed; ${failed} failed.` : `${pending.length} run${pending.length === 1 ? '' : 's'} resumed.`, failed ? 'error' : 'success');
 }
 
 export async function selectBranch(branchId) {
   state.currentBranchId = branchId;
-  openCenterView('branch');
-  await loadState();
+  emit('openCenterView', 'branch');
+  await emit('loadState');
 }
 
 // A boolean or string DOM property still queues a mutation record when set
@@ -280,7 +279,7 @@ export async function cancelCurrentTurn() {
   if (!state.currentTurnLock || !state.currentBranchId) return;
   const run = state.roomRuns.find(item => item.branch_id === state.currentBranchId && ['PENDING','RUNNING'].includes(item.status));
   if (!run) return toast('No active run is available to cancel.');
-  try { await api('POST', `/executions/${run.execution_id}/cancel`, {}); toast('Cancellation requested.'); await loadState(); }
+  try { await api('POST', `/executions/${run.execution_id}/cancel`, {}); toast('Cancellation requested.'); await emit('loadState'); }
   catch (err) { toast(`Could not cancel the run: ${errorMessage(err)}`, 'error'); }
 }
 
@@ -288,12 +287,12 @@ export async function interruptAgent(agentId) {
   try {
     await api('POST', `/agents/${agentId}/interrupt`, {reason: ''});
     toast('Agent interrupted.');
-    await loadState();
+    await emit('loadState');
   } catch (err) { toast(`Could not interrupt the agent: ${errorMessage(err)}`, 'error'); }
 }
 
 export function openRedirectModal(agentId) {
-  openModal(`
+  emit('openModal', `
     <h3>Redirect agent</h3>
     <form data-submit-action="submitRedirect" data-agent-id="${escHtml(agentId)}">
       <label for="redirect-instruction">New instruction</label>
@@ -313,9 +312,9 @@ export async function submitRedirect(event, agentId) {
   if (!instruction) return;
   try {
     await api('POST', `/agents/${agentId}/redirect`, {instruction});
-    closeModal();
+    emit('closeModal');
     toast('Agent redirected.');
-    await loadState();
+    await emit('loadState');
   } catch (err) {
     const errorEl = document.getElementById('redirect-error');
     errorEl.textContent = errorMessage(err);
@@ -390,7 +389,7 @@ export async function launchParallelAnalyses() {
   const failed = results.length - succeeded;
   button.removeAttribute('aria-busy');
   updateTemplateSelection();
-  await loadState();
+  await emit('loadState');
   if (failed) {
     setLaunchNote(`${succeeded} completed; ${failed} failed. Successful outputs remain persisted.`, 'error');
   } else {
@@ -398,7 +397,7 @@ export async function launchParallelAnalyses() {
     // A successful launch is done — leaving the tray open only invites a second,
     // duplicate launch of the same question. A validation failure above returns
     // before this point, so the tray stays open for the person to fix the input.
-    toggleAITray(false);
+    emit('toggleAITray', false);
   }
 }
 
@@ -446,7 +445,7 @@ export async function setOutputSelection(outputId, selection) {
     await api('PUT', `/branches/${state.currentBranchId}/output-selections/${outputId}`, {
       disposition: selection.toUpperCase()
     });
-    await loadState();
+    await emit('loadState');
   } catch (err) {
     toast(`Selection was not saved: ${errorMessage(err)}`, 'error');
   }
@@ -509,8 +508,8 @@ export async function publishSynthesis() {
     await api('POST', `/branches/${state.currentBranchId}/syntheses`, {
       title, synthesis_type: type
     }, { idempotencyKey: idempotencyKey() });
-    await loadState();
-    openContext('artifacts');
+    await emit('loadState');
+    emit('openContext', 'artifacts');
     toast(`${chosen.name} published.`);
   } catch (err) {
     toast(`${chosen.name} was not published: ${errorMessage(err)}`, 'error');

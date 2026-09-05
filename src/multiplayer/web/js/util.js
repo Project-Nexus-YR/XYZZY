@@ -1,5 +1,9 @@
 import { state } from './state.js';
 
+// Shared data, not behavior — lives here (not shell.js, its former home) so
+// messages.js can read it without importing shell.js back.
+export const QUICK_REACTIONS = ['👍', '🎯', '⚠️'];
+
 export const THEME_STORAGE_KEY = 'xyzzy.theme';
 export function currentTheme() {
   return document.documentElement.dataset.theme

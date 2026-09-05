@@ -1,9 +1,6 @@
 import { api } from './api.js';
-import { refreshRooms, switchRoom } from './rooms.js';
-import { QUICK_REACTIONS, closeContext, currentCenterView, openContext } from './shell.js';
-import { loadState } from './socket.js';
-import { openThread } from './thread.js';
-import { errorMessage, escHtml, formatTime, htmlToElement, idempotencyKey, memberName, morphChildren, renderMarkdown, shortId, toast } from './util.js';
+import { emit } from './bus.js';
+import { errorMessage, escHtml, formatTime, htmlToElement, idempotencyKey, memberName, morphChildren, QUICK_REACTIONS, renderMarkdown, shortId, toast } from './util.js';
 import { state } from './state.js';
 
 export const NOTIF_SEEN_KEY = 'xyzzy.notificationsSeenAt';
@@ -17,7 +14,7 @@ export async function refreshNotificationDot() {
 }
 
 export async function openNotifications() {
-  openContext('notifications');
+  emit('openContext', 'notifications');
   const list = document.getElementById('notifications-list');
   try {
     state.lastNotifications = await api('GET', '/notifications');
@@ -43,9 +40,9 @@ export async function openNotifications() {
 
 export async function openNotification(targetRoomId) {
   if (!targetRoomId) return;
-  closeContext();
-  if (!state.myRooms.some(item => item.room_id === targetRoomId)) await refreshRooms();
-  if (state.myRooms.some(item => item.room_id === targetRoomId)) await switchRoom(targetRoomId);
+  emit('closeContext');
+  if (!state.myRooms.some(item => item.room_id === targetRoomId)) await emit('refreshRooms');
+  if (state.myRooms.some(item => item.room_id === targetRoomId)) await emit('switchRoom', targetRoomId);
 }
 
 // A second message from the same person inside five minutes continues the
@@ -335,7 +332,7 @@ export function scrollMessagesToBottom() {
 // — debounced so a fast scroll-past does not count as having read it.
 export function scheduleAutoRead() {
   clearTimeout(state.autoReadTimer);
-  if (currentCenterView() !== 'conversation' || !document.hasFocus()) return;
+  if (emit('currentCenterView') !== 'conversation' || !document.hasFocus()) return;
   if (state.readCursor >= state.lastSequence) return;
   const div = document.getElementById('messages');
   if (!div || div.scrollHeight - div.scrollTop - div.clientHeight > 24) return;
@@ -509,7 +506,7 @@ export async function toggleReaction(data) {
     } else {
       await api('POST', `/messages/${messageId}/reactions`, {emoji});
     }
-    await loadState();
+    await emit('loadState');
   } catch (err) {
     toast(`Reaction was not saved: ${errorMessage(err)}`, 'error');
   }

@@ -1,11 +1,5 @@
 import { api, handleBearerUnauthorized, persistSession } from './api.js';
-import { applyPermissions, branchTitle, renderBranches, renderOutputs, renderResumeRunsBanner } from './branch.js';
-import { renderAgents, renderApprovals, renderArtifacts, renderDecisions, renderMembers, renderPosture, renderSidebarAgents, renderTasks } from './members.js';
-import { appendMessage, appendSystemMessage, applyReadCursor, reconcileMessages, refreshNotificationDot, refreshUnread, scrollMessagesToBottom } from './messages.js';
-import { renderOntology } from './ontology.js';
-import { handleAccessRevoked, refreshOtherRoomUnreads, refreshRooms, renderRoomsList } from './rooms.js';
-import { updateRoomHeader } from './shell.js';
-import { refreshThread } from './thread.js';
+import { emit } from './bus.js';
 import { bytesToBase64Url, logEvent, setWsStatus, toast, updateActivityLogSummary } from './util.js';
 import { state } from './state.js';
 
@@ -77,7 +71,7 @@ export function connectWS() {
   socket.onclose = (event) => {
     // A socket replaced by a channel switch must neither reconnect nor repaint.
     if (socket !== state.ws) return;
-    if (event.code === 4403) { handleAccessRevoked(); return; }
+    if (event.code === 4403) { emit('handleAccessRevoked'); return; }
     // 4401 is the server closing on a token it no longer accepts (a revoke, a
     // rotation) — see websocket.py:259 and tests/security/test_token_auth.py.
     // Reconnecting into the same rejected credential forever is not a
@@ -238,12 +232,12 @@ export async function loadStateImpl() {
   const listedRoom = state.myRooms.find(room => room.room_id === state.roomId);
   if (listedRoom) listedRoom.name = snapshot.room.name;
   else state.myRooms.push({room_id: state.roomId, workspace_id: state.workspaceId, name: snapshot.room.name});
-  renderRoomsList();
-  updateRoomHeader();
+  emit('renderRoomsList');
+  emit('updateRoomHeader');
 
   // Messages. A reply lives in its thread unless it was explicitly broadcast, and
   // the server applies that rule to the listing, so this renders what it sends.
-  applyReadCursor(snapshot.read_cursor);
+  emit('applyReadCursor', snapshot.read_cursor);
   // A message.created that arrived live while this exact fetch was in
   // flight is already in pendingEventsDuringLoad (pushed synchronously by
   // the socket handler below, well before this await resolves) and already
@@ -261,15 +255,15 @@ export async function loadStateImpl() {
       .map(event => event.payload?.message_id)
       .filter(Boolean)
   );
-  reconcileMessages(
+  emit('reconcileMessages',
     snapshot.messages,
     new Set(Array.from(liveDuringFetchMessageIds, id => `m:${id}`))
   );
 
   // Agents
   state.roomAgents = snapshot.agents || [];
-  renderAgents(snapshot.agents);
-  renderSidebarAgents(snapshot.agents);
+  emit('renderAgents', snapshot.agents);
+  emit('renderSidebarAgents', snapshot.agents);
 
   // Durable specialist runs and authored outputs
   const durableBranches = (snapshot.branches || []).filter(branch => branch.lifecycle_managed !== false);
@@ -292,14 +286,14 @@ export async function loadStateImpl() {
       state.outputSelections.set(selection.output_id, selection.disposition.toLowerCase());
     }
   });
-  renderBranches(durableBranches, snapshot.runs || []);
-  renderOutputs(state.roomOutputs, snapshot.runs || []);
-  renderResumeRunsBanner(snapshot.runs || []);
+  emit('renderBranches', durableBranches, snapshot.runs || []);
+  emit('renderOutputs', state.roomOutputs, snapshot.runs || []);
+  emit('renderResumeRunsBanner', snapshot.runs || []);
   // renderBranches() just appended branch-activity cards below the last chat message,
   // after reconcileMessages()'s own auto-scroll already ran — so the newest item in
   // the transcript was landing half behind the composer until a manual scroll.
   // Re-settle once this frame's layout is final.
-  scrollMessagesToBottom();
+  emit('scrollMessagesToBottom');
   state.currentTurnLock = snapshot.turn_lock || null;
   const messageInput = document.getElementById('msg-input');
   const messageButton = document.getElementById('send-message-button');
@@ -313,7 +307,7 @@ export async function loadStateImpl() {
   lockBanner.classList.toggle('visible', locked);
   if (locked) {
     const lockBranch = durableBranches.find(branch => branch.branch_id === state.currentTurnLock.branch_id);
-    document.getElementById('turn-lock-title').textContent = `${lockBranch ? branchTitle(lockBranch) : 'A specialist'} is working on this turn`;
+    document.getElementById('turn-lock-title').textContent = `${lockBranch ? emit('branchTitle', lockBranch) : 'A specialist'} is working on this turn`;
   }
 
   // Evidence graph and governance state are part of the reconnect snapshot.
@@ -335,27 +329,27 @@ export async function loadStateImpl() {
   document.getElementById('identity-name').textContent = state.userName || state.userId;
   document.getElementById('identity-role').textContent = state.currentRoomRole;
   document.getElementById('identity-avatar').textContent = (state.userName || state.userId || '?').slice(0,1).toUpperCase();
-  applyPermissions();
-  renderPosture(snapshot.room.posture);
+  emit('applyPermissions');
+  emit('renderPosture', snapshot.room.posture);
   state.roomOntology = snapshot.ontology || {entities: [], relationships: [], reviews: []};
-  renderOntology(state.roomOntology);
+  emit('renderOntology', state.roomOntology);
 
   // Tasks
-  renderTasks(snapshot.tasks);
+  emit('renderTasks', snapshot.tasks);
 
   // Approvals
-  renderApprovals(snapshot.pending_approvals);
+  emit('renderApprovals', snapshot.pending_approvals);
 
   // Decisions render first: the artifact reader below embeds the same cards,
   // so lastDecisions must already be current when renderArtifacts reads it.
-  renderDecisions(snapshot.decisions);
+  emit('renderDecisions', snapshot.decisions);
 
   // Artifacts
-  renderArtifacts(snapshot.artifacts);
+  emit('renderArtifacts', snapshot.artifacts);
   document.getElementById('artifact-nav-count').textContent = snapshot.artifacts.length;
 
   // Members
-  renderMembers(snapshot.members);
+  emit('renderMembers', snapshot.members);
 
   // Rebuild the canonical audit trail rather than leaving the event panel
   // empty after a page reload. Repeated WS onopen hydration cannot duplicate it.
@@ -406,11 +400,11 @@ export async function loadStateImpl() {
   state.pendingEventsDuringLoad = [];
   replayEvents.forEach(event => handleRealtimeEvent(event));
 
-  if (state.openThreadRootId) await refreshThread();
-  updateRoomHeader();
-  refreshNotificationDot();
+  if (state.openThreadRootId) await emit('refreshThread');
+  emit('updateRoomHeader');
+  emit('refreshNotificationDot');
   state.roomUnreadCounts.delete(state.roomId);
-  refreshOtherRoomUnreads();
+  emit('refreshOtherRoomUnreads');
 }
 
 // Every loadState() call in this file from here down is triggered by the
@@ -433,12 +427,12 @@ export function handleRealtimeEvent(msg) {
     if (msg.room_id === state.roomId) return;
     const removedRoom = state.myRooms.find(room => room.room_id === msg.room_id);
     state.myRooms = state.myRooms.filter(room => room.room_id !== msg.room_id);
-    renderRoomsList();
+    emit('renderRoomsList');
     toast(`You were removed from #${removedRoom ? removedRoom.name : msg.room_id}.`, 'error');
     return;
   }
   if (msg.type === 'room_invited') {
-    refreshRooms().then(() => toast(`You were invited to #${msg.room_name} as ${msg.role}.`));
+    emit('refreshRooms').then(() => toast(`You were invited to #${msg.room_name} as ${msg.role}.`));
     return;
   }
   if (msg.type === 'room_event') {
@@ -470,7 +464,7 @@ export function handleRealtimeEvent(msg) {
           loadStateOrShowReconnecting();
           break;
         }
-        appendMessage({message_id: msg.payload.message_id, role: msg.payload.role,
+        emit('appendMessage', {message_id: msg.payload.message_id, role: msg.payload.role,
                        sender_id: msg.payload.sender_id, content: msg.payload.content,
                        // The event says why an agent spoke, so a message that
                        // arrives live is as readable as one that arrives on reload.
@@ -495,28 +489,28 @@ export function handleRealtimeEvent(msg) {
                        // server payload gains that field, with no further
                        // client change needed.
                        created_at: msg.payload.created_at || msg.timestamp});
-        refreshUnread();
+        emit('refreshUnread');
         break;
       case 'message.reaction_added': case 'message.reaction_removed':
         loadStateOrShowReconnecting();
         break;
       case 'user.joined_room':
-        appendSystemMessage(`${msg.payload.user_id} joined the room`);
+        emit('appendSystemMessage', `${msg.payload.user_id} joined the room`);
         break;
       case 'user.left_room':
-        appendSystemMessage(`${msg.payload.user_id} left the room`);
+        emit('appendSystemMessage', `${msg.payload.user_id} left the room`);
         break;
       case 'user.invited_room':
-        loadStateOrShowReconnecting(() => appendSystemMessage(`${msg.payload.user_id} was invited as ${msg.payload.role}`));
+        loadStateOrShowReconnecting(() => emit('appendSystemMessage', `${msg.payload.user_id} was invited as ${msg.payload.role}`));
         break;
       case 'user.role_changed':
-        loadStateOrShowReconnecting(() => appendSystemMessage(`${msg.payload.user_id} is now ${msg.payload.role}`));
+        loadStateOrShowReconnecting(() => emit('appendSystemMessage', `${msg.payload.user_id} is now ${msg.payload.role}`));
         break;
       case 'user.removed_room':
-        loadStateOrShowReconnecting(() => appendSystemMessage(`${msg.payload.user_id} was removed from the channel`));
+        loadStateOrShowReconnecting(() => emit('appendSystemMessage', `${msg.payload.user_id} was removed from the channel`));
         break;
       case 'agent.joined_room':
-        appendSystemMessage(`Agent ${msg.payload.name} (${msg.payload.role}) joined`);
+        emit('appendSystemMessage', `Agent ${msg.payload.name} (${msg.payload.role}) joined`);
         loadStateOrShowReconnecting();
         break;
       case 'agent.status_changed':
@@ -544,7 +538,7 @@ export function handleRealtimeEvent(msg) {
         loadStateOrShowReconnecting();
         break;
       case 'room.posture_declared':
-        loadStateOrShowReconnecting(() => appendSystemMessage(`Channel posture is now ${String(msg.payload.posture || '').toLowerCase()}`));
+        loadStateOrShowReconnecting(() => emit('appendSystemMessage', `Channel posture is now ${String(msg.payload.posture || '').toLowerCase()}`));
         break;
       case 'artifact.created': case 'artifact.version_created':
         loadStateOrShowReconnecting();
@@ -553,10 +547,10 @@ export function handleRealtimeEvent(msg) {
         loadStateOrShowReconnecting();
         break;
       case 'human.interrupted_agent':
-        appendSystemMessage(`Agent interrupted by human`);
+        emit('appendSystemMessage', `Agent interrupted by human`);
         break;
       case 'human.redirected_agent':
-        appendSystemMessage(`Agent redirected: ${msg.payload.instruction || ''}`);
+        emit('appendSystemMessage', `Agent redirected: ${msg.payload.instruction || ''}`);
         break;
       default:
         break;

@@ -1,7 +1,6 @@
 import { api, rememberRoomId } from './api.js';
-import { appendSystemMessage } from './messages.js';
+import { emit } from './bus.js';
 import { closeModal, closeSidebarDrawer, currentCenterView, openCenterView, openContext, openModal } from './shell.js';
-import { closeSocket, connectWS, loadState } from './socket.js';
 import { errorMessage, escHtml, setWsStatus, toast } from './util.js';
 import { state } from './state.js';
 
@@ -67,14 +66,14 @@ export async function switchRoom(targetRoomId) {
   closeSidebarDrawer();
   openCenterView('conversation');
   renderRoomsList();
-  closeSocket(state.ws);
+  emit('closeSocket', state.ws);
   // The snapshot has to settle, and this tab's own lastSequence has to reach
   // its final value from that snapshot, before the socket subscribes: opening
   // both at once (the old order here) left a gap an event could land in and
   // reach neither the snapshot nor the not-yet-subscribed socket. Fetching
   // first means connectWS's own last_sequence cursor names exactly where this
   // snapshot ended, matching the field the /state fetch already sends.
-  try { await loadState(); }
+  try { await emit('loadState'); }
   catch (err) { toast(`Could not open #${room.name}: ${errorMessage(err)}`, 'error'); }
   // A second switchRoom called before this one's own await settled moved
   // roomId on again; loadState() above resolved on this call's own (by then
@@ -83,7 +82,7 @@ export async function switchRoom(targetRoomId) {
   // for that room, and connect once it does — this one connecting instead
   // would open the socket before that snapshot exists.
   if (state.roomId !== targetRoomId) return;
-  connectWS();
+  emit('connectWS');
 }
 
 export function openCreateChannelModal() {
@@ -200,7 +199,7 @@ export function handleAccessRevoked() {
   rememberRoomId('');
   renderRoomsList();
   document.getElementById('messages').innerHTML = '';
-  appendSystemMessage(`You no longer have access to #${removedName}. Ask an admin for a new invitation.`);
+  emit('appendSystemMessage', `You no longer have access to #${removedName}. Ask an admin for a new invitation.`);
   document.getElementById('msg-input').disabled = true;
   document.getElementById('send-message-button').disabled = true;
 }
@@ -215,7 +214,7 @@ export async function inviteMember(event) {
     await api('POST', `/rooms/${state.roomId}/members/invitations`, {user_id: invitedUserId, role});
     input.value = '';
     toast(`Invited ${invitedUserId} as ${role}.`);
-    await loadState();
+    await emit('loadState');
   } catch (err) { toast(`Could not invite ${invitedUserId}: ${errorMessage(err)}`, 'error'); }
 }
 
@@ -224,13 +223,13 @@ export async function changeMemberRole(memberUserId, role) {
     await api('PATCH', `/rooms/${state.roomId}/members/${encodeURIComponent(memberUserId)}`, {role});
     toast(`${memberUserId} is now ${role}.`);
   } catch (err) { toast(`Could not change access for ${memberUserId}: ${errorMessage(err)}`, 'error'); }
-  await loadState();
+  await emit('loadState');
 }
 
 export async function removeMember(memberUserId) {
   try {
     await api('DELETE', `/rooms/${state.roomId}/members/${encodeURIComponent(memberUserId)}`);
     toast(`Removed ${memberUserId} from the channel.`);
-    await loadState();
+    await emit('loadState');
   } catch (err) { toast(`Could not remove ${memberUserId}: ${errorMessage(err)}`, 'error'); }
 }
