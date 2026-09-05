@@ -36,15 +36,16 @@ def _bootstrap(client: TestClient, headers: dict[str, str], room_name: str) -> s
     return str(response.json()["room"]["room_id"])
 
 
-def _post_message(room_id: str, content: str) -> None:
-    async def _run() -> None:
-        svc = routes_mod._svc
-        assert svc is not None
-        from multiplayer.domain.models import MessageRole
+def _post_message(client: TestClient, room_id: str, content: str) -> None:
+    """Send through the app's own loop. `asyncio.run` from the test thread
+    would drive the service on a second loop, and the wake-up it queues for
+    the socket's subscription never reaches the app loop on Linux: the
+    socket then waits forever for a frame that was already published."""
+    from multiplayer.domain.models import MessageRole
 
-        await svc.send_message(room_id, MessageRole.HUMAN, "owner", content)
-
-    asyncio.run(_run())
+    svc = routes_mod._svc
+    assert svc is not None
+    client.portal.call(svc.send_message, room_id, MessageRole.HUMAN, "owner", content)
 
 
 def test_cursor_beyond_head_gets_4408_naming_cursor_and_head() -> None:
@@ -52,7 +53,7 @@ def test_cursor_beyond_head_gets_4408_naming_cursor_and_head() -> None:
     with TestClient(app) as client:
         room_id = _bootstrap(client, OWNER, "Room")
         head = routes_mod._svc.repos.events.get_latest_sequence  # type: ignore[union-attr]
-        current_head = asyncio.run(head(room_id))
+        current_head = client.portal.call(head, room_id)
         stale_cursor = current_head + 1000
 
         with client.websocket_connect(
@@ -74,13 +75,13 @@ def test_cursor_equal_to_head_stays_connected_and_gets_the_next_live_event() -> 
     app = create_app(":memory:", auth_tokens=TOKENS)
     with TestClient(app) as client:
         room_id = _bootstrap(client, OWNER, "Room")
-        head = asyncio.run(routes_mod._svc.repos.events.get_latest_sequence(room_id))
+        head = client.portal.call(routes_mod._svc.repos.events.get_latest_sequence, room_id)
 
         with client.websocket_connect(
             f"/ws?room_id={room_id}&last_sequence={head}", headers=OWNER
         ) as websocket:
             assert websocket.receive_json()["type"] == "connected"
-            _post_message(room_id, "hello")
+            _post_message(client, room_id, "hello")
             frame = websocket.receive_json()
             assert frame["type"] == "room_event"
             assert frame["sequence"] == head + 1
@@ -99,7 +100,7 @@ def test_oversized_cursor_gets_4400_and_leaves_no_subscription_behind() -> None:
     app = create_app(":memory:", auth_tokens=TOKENS)
     with TestClient(app) as client:
         room_id = _bootstrap(client, OWNER, "Room")
-        baseline = asyncio.run(routes_mod._svc.hub.subscriber_count())
+        baseline = client.portal.call(routes_mod._svc.hub.subscriber_count)
 
         huge_cursor = "9" * 100
         with client.websocket_connect(
@@ -109,7 +110,7 @@ def test_oversized_cursor_gets_4400_and_leaves_no_subscription_behind() -> None:
                 websocket.receive_json()
 
         assert excinfo.value.code == 4400
-        assert asyncio.run(routes_mod._svc.hub.subscriber_count()) == baseline
+        assert client.portal.call(routes_mod._svc.hub.subscriber_count) == baseline
 
 
 class _Principal:
@@ -371,9 +372,9 @@ def test_cursor_zero_on_a_populated_room_still_replays_gapless() -> None:
     app = create_app(":memory:", auth_tokens=TOKENS)
     with TestClient(app) as client:
         room_id = _bootstrap(client, OWNER, "Room")
-        _post_message(room_id, "msg1")
-        _post_message(room_id, "msg2")
-        head = asyncio.run(routes_mod._svc.repos.events.get_latest_sequence(room_id))
+        _post_message(client, room_id, "msg1")
+        _post_message(client, room_id, "msg2")
+        head = client.portal.call(routes_mod._svc.repos.events.get_latest_sequence, room_id)
         assert head == 3  # room_created + 2 messages
 
         with client.websocket_connect(
@@ -540,7 +541,7 @@ def test_latest_sequence_is_read_before_events_so_a_mid_snapshot_commit_is_inclu
 
         svc.repos.events.list_since = hooked_list_since
         try:
-            state = asyncio.run(svc.get_room_state(room_id, last_sequence=0))
+            state = client.portal.call(lambda: svc.get_room_state(room_id, last_sequence=0))
         finally:
             svc.repos.events.list_since = original_list_since
 
@@ -549,7 +550,7 @@ def test_latest_sequence_is_read_before_events_so_a_mid_snapshot_commit_is_inclu
         # the returned cursor must be strictly behind the injected event: a
         # cursor equal to or past it would mean the race this test drives
         # was not actually hit.
-        injected_sequence = asyncio.run(svc.repos.events.get_latest_sequence(room_id))
+        injected_sequence = client.portal.call(svc.repos.events.get_latest_sequence, room_id)
         assert cursor < injected_sequence
 
         with client.websocket_connect(
