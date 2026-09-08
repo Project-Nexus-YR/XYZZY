@@ -380,6 +380,14 @@ class NexusAgentBridge:
         }
 
     @staticmethod
+    def build_specialist_prompt(prompt: str, agent: AgentInstance) -> str:
+        """Assemble the same bounded context for a harness that skips this bridge."""
+        return NexusAgentBridge._build_specialist_prompt(
+            prompt,
+            _SpecialistContext(name=agent.name, role=agent.role, instructions=agent.system_prompt),
+        )
+
+    @staticmethod
     def _build_specialist_prompt(prompt: str, context: _SpecialistContext | None) -> str:
         """Send only the requested task and this specialist's configured context."""
         if context is None:

@@ -283,6 +283,11 @@ async def _settle_agent_run_in_transaction(
                 actor_type="system",
             )
         )
+    events.extend(
+        await AgentTaskRepo(db).settle_for_execution_in_transaction(
+            execution_id, settlement, decided_by
+        )
+    )
     return events
 
 
@@ -3119,18 +3124,36 @@ class BranchSynthesisRepo:
         )
         await self.db.commit()
 
-    async def mark_failed(self, synthesis_id: str, error: str) -> None:
-        await self.db.execute(
-            "UPDATE branch_syntheses SET status = ?, error = ?, completed_at = ? "
-            "WHERE synthesis_id = ?",
-            (
-                BranchSynthesisStatus.FAILED.value,
-                error,
-                serialize_datetime(utcnow()),
-                synthesis_id,
-            ),
+    async def list_expired_running(
+        self, created_before: datetime, limit: int = 25
+    ) -> list[BranchSynthesis]:
+        rows = await self.db.fetch_all(
+            "SELECT * FROM branch_syntheses WHERE status = ? AND created_at <= ? "
+            "ORDER BY created_at, synthesis_id LIMIT ?",
+            (BranchSynthesisStatus.RUNNING.value, serialize_datetime(created_before), limit),
         )
+        return [self._from_row(row) for row in rows]
+
+    async def mark_failed(
+        self, synthesis_id: str, error: str, *, created_before: datetime | None = None
+    ) -> bool:
+        sql = (
+            "UPDATE branch_syntheses SET status = ?, error = ?, completed_at = ? "
+            "WHERE synthesis_id = ? AND status = ?"
+        )
+        params: list[Any] = [
+            BranchSynthesisStatus.FAILED.value,
+            error,
+            serialize_datetime(utcnow()),
+            synthesis_id,
+            BranchSynthesisStatus.RUNNING.value,
+        ]
+        if created_before is not None:
+            sql += " AND created_at <= ?"
+            params.append(serialize_datetime(created_before))
+        cursor = await self.db.execute(sql, tuple(params))
         await self.db.commit()
+        return cursor.rowcount == 1
 
     async def list_ids_by_initiator(self, user_id: str) -> list[str]:
         rows = await self.db.fetch_all(
@@ -3427,6 +3450,87 @@ class AgentTaskRepo:
     async def get(self, task_id: str) -> AgentTask | None:
         row = await self.db.fetch_one("SELECT * FROM agent_tasks WHERE task_id = ?", (task_id,))
         return None if row is None else self._from_row(row)
+
+    async def for_execution(self, execution_id: str) -> AgentTask | None:
+        """Only the task still driven by this execution, never a newer attempt."""
+        row = await self.db.fetch_one(
+            "SELECT t.* FROM agent_tasks t JOIN executions e "
+            "ON e.agent_task_id = t.task_id AND e.execution_id = t.execution_id "
+            "WHERE e.execution_id = ?",
+            (execution_id,),
+        )
+        return None if row is None else self._from_row(row)
+
+    @staticmethod
+    def lifecycle_event(task: AgentTask, actor_id: str, actor_type: str, **extra: Any) -> RoomEvent:
+        return RoomEvent(
+            room_id=task.room_id,
+            sequence=0,
+            event_type=EventType.TASK_DELEGATED,
+            payload={
+                "task_id": task.task_id,
+                "context_id": task.context_id,
+                "state": task.state.value,
+                "target_agent_id": task.target_agent_id,
+                "delegating_agent_id": task.delegating_agent_id,
+                "updated_at": task.updated_at.isoformat(),
+                **extra,
+            },
+            actor_id=actor_id,
+            actor_type=actor_type,
+        )
+
+    async def settle_for_execution_in_transaction(
+        self, execution_id: str, settlement: RunSettlement, decided_by: str
+    ) -> list[RoomEvent]:
+        """Commit the task's answer or refusal beside its run's settlement.
+
+        Returning unsequenced events lets the owning transaction commit the run,
+        output, task message and canonical events together. A replaced execution
+        or a task already ended by its asker cannot settle the task again.
+        """
+        if not self.db.owns_current_transaction:
+            raise RuntimeError("agent task settlement requires transaction ownership")
+        task = await self.for_execution(execution_id)
+        if task is None or task.is_terminal:
+            return []
+        output = None
+        if settlement is RunSettlement.END_TURN:
+            output = await self.db.fetch_one(
+                "SELECT content FROM agent_outputs WHERE execution_id = ?", (execution_id,)
+            )
+        if output is not None:
+            target = AgentTaskState.COMPLETED
+        elif settlement in {RunSettlement.CANCELLED, RunSettlement.AGENT_REMOVED}:
+            target = AgentTaskState.CANCELED
+        elif (
+            settlement is RunSettlement.APPROVAL_REFUSED
+            and task.state is AgentTaskState.AUTH_REQUIRED
+        ):
+            target = AgentTaskState.REJECTED
+        else:
+            target = AgentTaskState.FAILED
+        events: list[RoomEvent] = []
+        if target is AgentTaskState.COMPLETED:
+            assert output is not None
+            if task.state is not AgentTaskState.WORKING:
+                task = await self.transition_in_transaction(
+                    task.task_id, task.state, AgentTaskState.WORKING
+                )
+                events.append(self.lifecycle_event(task, decided_by or "system", "system"))
+            await self.append_message_with_next_sequence_in_transaction(
+                task.task_id,
+                TaskMessageRole.DELEGATE,
+                (Part(kind=PartKind.TEXT, content=str(output["content"])),),
+            )
+        task = await self.transition_in_transaction(
+            task.task_id,
+            task.state,
+            target,
+            refusal_reason="" if output is not None else f"run settled ({settlement.value})",
+        )
+        events.append(self.lifecycle_event(task, decided_by or "system", "system"))
+        return events
 
     async def ancestry(self, task_id: str) -> tuple[str, ...]:
         """Every agent already in this task's chain, root first.
@@ -4906,11 +5010,12 @@ class ArtifactRepo:
         )
         await self._index_version_in_transaction(version)
         if synthesis is not None:
-            await self.db.execute(
+            cursor = await self.db.execute(
                 "UPDATE branch_syntheses SET status = ?, provider_input = ?, "
                 "provider_name = ?, provider_model = ?, provider_response_id = ?, "
                 "provider_evidence = ?, simulated = ?, content = ?, "
-                "artifact_version_id = ?, completed_at = ?, token_usage = ? WHERE synthesis_id = ?",
+                "artifact_version_id = ?, completed_at = ?, token_usage = ? "
+                "WHERE synthesis_id = ? AND status = ?",
                 (
                     BranchSynthesisStatus.COMPLETED.value,
                     synthesis.provider_input,
@@ -4924,8 +5029,11 @@ class ArtifactRepo:
                     serialize_datetime(synthesis.completed_at or utcnow()),
                     synthesis.token_usage,
                     synthesis.synthesis_id,
+                    BranchSynthesisStatus.RUNNING.value,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise DomainError("synthesis is no longer running; publication refused")
         for event in events:
             persisted = await EventRepo(self.db).append_with_next_sequence_in_transaction(event)
             persisted_events.append(persisted)

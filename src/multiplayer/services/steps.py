@@ -8,6 +8,7 @@ import os
 from dataclasses import replace
 from typing import Any
 
+from ..domain.agent_tasks import AgentTaskState
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
     TERMINAL_EXECUTION_STATUSES,
@@ -26,6 +27,7 @@ from ..domain.models import (
 )
 from ..harness import (
     KNOWN_HARNESS_IDS,
+    MODEL_PROVIDER_HARNESS_ID,
     HarnessError,
     PromptRequest,
     RunContext,
@@ -332,6 +334,7 @@ class _StepsMixin(_SharedMixin):
             # NULL settlement, and a lease held by nobody. They are one transaction
             # now. Either the reviewer has a question and the turn is parked behind
             # it, or neither exists.
+            approval_events: list[RoomEvent] = []
             async with self.db.transaction():
                 approval, approval_event = await self._request_approval_in_transaction(
                     session.room_id,
@@ -344,12 +347,14 @@ class _StepsMixin(_SharedMixin):
                 await self.repos.tool_requests.create(request)
                 # No harness work is in flight while a reviewer thinks, so the lease is
                 # a long one. It is still a lease: an exemption is no deadline at all.
-                await self._advance_run_for_execution(
+                advanced = await self._advance_run_for_execution(
                     execution.execution_id,
                     HarnessState.AWAITING_APPROVAL,
                     execution.authorized_by,
                     _APPROVAL_LEASE,
                 )
+                if not advanced:
+                    raise DomainError("a settled run cannot wait for approval")
                 # Durably rather than in this process's memory: the decision that
                 # releases it can be made on any process.
                 await self.repos.suspended_turns.save(
@@ -358,8 +363,19 @@ class _StepsMixin(_SharedMixin):
                     continuation.acting_as,
                     continuation.observations,
                 )
+                approval_events.append(approval_event)
+                task = await self.repos.agent_tasks.for_execution(execution.execution_id)
+                if task is not None and task.state is AgentTaskState.WORKING:
+                    task = await self.repos.agent_tasks.transition_in_transaction(
+                        task.task_id, task.state, AgentTaskState.AUTH_REQUIRED
+                    )
+                    approval_events.append(
+                        await self.repos.events.append_with_next_sequence_in_transaction(
+                            self.repos.agent_tasks.lifecycle_event(task, agent.agent_id, "agent")
+                        )
+                    )
             await self._set_agent_status_safe(agent.agent_id, AgentStatus.WAITING_APPROVAL)
-            await self._broadcast_persisted_events([approval_event])
+            await self._broadcast_persisted_events(approval_events)
             return self._tool_response(request)
         await self.repos.tool_requests.create(request)
         return self._tool_response(await self._execute_tool_request(request))
@@ -809,13 +825,26 @@ class _StepsMixin(_SharedMixin):
         # streaming or already parked at a reviewer refuses instead of being
         # prompted again on top of a turn already in flight.
         require_idle = _require_idle_entrance.get()
-        claimed = await self._advance_run_for_execution(
-            execution_id,
-            HarnessState.STREAMING,
-            acting_as,
-            _STREAMING_LEASE,
-            expected=HarnessState.STARTING if require_idle else None,
-        )
+        resumed_events: list[RoomEvent] = []
+        async with self.db.transaction():
+            claimed = await self._advance_run_for_execution(
+                execution_id,
+                HarnessState.STREAMING,
+                acting_as,
+                _STREAMING_LEASE,
+                expected=HarnessState.STARTING if require_idle else None,
+            )
+            task = await self.repos.agent_tasks.for_execution(execution_id)
+            if claimed and task is not None and task.state is AgentTaskState.AUTH_REQUIRED:
+                task = await self.repos.agent_tasks.transition_in_transaction(
+                    task.task_id, task.state, AgentTaskState.WORKING
+                )
+                resumed_events.append(
+                    await self.repos.events.append_with_next_sequence_in_transaction(
+                        self.repos.agent_tasks.lifecycle_event(task, agent.agent_id, "agent")
+                    )
+                )
+        await self._broadcast_persisted_events(resumed_events)
         if require_idle and not claimed:
             raise DomainError(
                 f"execution {execution_id} is not awaiting a fresh turn, so this step is refused"
@@ -867,6 +896,11 @@ class _StepsMixin(_SharedMixin):
             )
 
         effective = terms.effective
+        if agent.harness_id == MODEL_PROVIDER_HARNESS_ID:
+            # The default harness adds this inside the bridge. The direct
+            # provider harness needs the same specialist context assembled here,
+            # after the bounded branch context, tool results and steers are known.
+            provider_prompt = self.nexus.build_specialist_prompt(provider_prompt, agent)
         # Carries the true, cumulative spend of every step of this run so far,
         # updated the moment this step's own usage is known; a step that raised
         # before the harness answered spent nothing beyond what was already there.
