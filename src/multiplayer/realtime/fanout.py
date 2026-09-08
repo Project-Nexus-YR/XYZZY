@@ -104,7 +104,7 @@ class RedisFanout:
         continuity check catches the resulting gap on its next live event
         and asks to resync, same as any other dropped publish.
         """
-        attempt = 0
+        delay = _MIN_BACKOFF_SECONDS
         while True:
             pubsub = None
             try:
@@ -112,12 +112,12 @@ class RedisFanout:
                 await pubsub.subscribe(self._channel)
                 async for raw in pubsub.listen():
                     # A subscribe that is ACKed and then dropped must still
-                    # escalate the backoff, so the attempt counter resets only
+                    # escalate the backoff, so the delay resets only
                     # once the stream has actually yielded a real message, not
                     # on the subscribe ACK itself.
                     if raw.get("type") != "message":
                         continue
-                    attempt = 0
+                    delay = _MIN_BACKOFF_SECONDS
                     await self._handle_message(raw.get("data"))
             except asyncio.CancelledError:
                 raise
@@ -127,8 +127,10 @@ class RedisFanout:
                 if pubsub is not None:
                     with suppress(Exception):
                         await pubsub.aclose()
-            attempt += 1
-            delay = min(_MAX_BACKOFF_SECONDS, _MIN_BACKOFF_SECONDS * (2**attempt))
+            # Keep the delay itself bounded. Computing an unbounded 2**attempt
+            # before applying min() overflows after 1024 failures and kills
+            # the reconnect loop during a prolonged outage.
+            delay = min(_MAX_BACKOFF_SECONDS, delay * 2)
             await asyncio.sleep(random.uniform(0, delay))
 
     async def _handle_message(self, raw: bytes | str | None) -> None:

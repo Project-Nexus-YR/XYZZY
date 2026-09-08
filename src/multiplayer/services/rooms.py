@@ -67,6 +67,10 @@ class _RoomsMixin(_SharedMixin):
             if room_template.workspace_id != workspace_id:
                 raise DomainError(f"room template not found in workspace: {room_template_id}")
         async with self.db.transaction():
+            # Workspace removal can commit after the route authorizes this
+            # request. Fence creation with the membership read and writes in
+            # one transaction so a removed member cannot regain a room here.
+            await self.authorization.require_workspace_member(workspace_id, creator_id)
             # Serializing the duplicate check and the insert turns a concurrent
             # duplicate create into a clean rejection rather than two identical
             # sidebar entries.
@@ -267,8 +271,11 @@ class _RoomsMixin(_SharedMixin):
                 )
             )
         await self.hub.revoke_room_access(user_id, room_id)
-        await self.presence.user_left(user_id, room_id)
         await self._broadcast_persisted_events([event])
+        try:
+            await self.presence.user_left(user_id, room_id)
+        except Exception:
+            log.exception("Failed to clear presence for user %s in room %s", user_id, room_id)
 
     async def get_room_members(self, room_id: str) -> list[RoomMember]:
         return await self.repos.room_members.list(room_id)
@@ -469,5 +476,8 @@ class _RoomsMixin(_SharedMixin):
         await self.hub.revoke_room_access(user_id, room_id)
         # Their subscriptions to this room are gone; reach their other open sockets.
         await self.hub.send_to_user(user_id, {"type": "room_removed", "room_id": room_id})
-        await self.presence.user_left(user_id, room_id)
         await self._broadcast_persisted_events([event])
+        try:
+            await self.presence.user_left(user_id, room_id)
+        except Exception:
+            log.exception("Failed to clear presence for user %s in room %s", user_id, room_id)

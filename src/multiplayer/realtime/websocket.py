@@ -248,25 +248,54 @@ async def websocket_endpoint(
             return
 
     sub = await hub.subscribe(room_id, user_id)
-    if presence is not None:
-        await presence.user_joined(user_id, room_id)
     # Every subscription this socket holds, keyed by room. The primary and
     # every extra room share `sub.queue`, so one send_loop below delivers
     # events from all of them, and every exit path can release exactly the
     # subscriptions this socket created without touching anyone else's.
     subs_by_room: dict[str, RealtimeSubscription] = {room_id: sub}
 
+    async def still_authorized(subscribed_room: str) -> bool:
+        """Check durable membership at delivery, including during backfill.
+
+        Revocation can precede subscription registration, or arrive while a
+        replay page is being read. A queued revocation marker alone cannot
+        fence either case, because replay does not drain the live queue.
+        """
+        try:
+            await authorization.require(subscribed_room, user_id, RoomCapability.READ)
+        except AuthorizationError:
+            with suppress(WebSocketDisconnect):
+                await websocket.close(code=4403, reason="room access revoked")
+            return False
+        except Exception:
+            log.exception(
+                "Membership check failed for user %s in room %s", user_id, subscribed_room
+            )
+            with suppress(Exception):
+                await websocket.close(code=1011, reason="membership check failed")
+            return False
+        return True
+
     async def release_subscriptions() -> None:
-        for held_room, held_sub in subs_by_room.items():
+        # Release every durable delivery boundary before advisory presence
+        # cleanup, whose Redis dependency can be unavailable on disconnect.
+        for held_sub in subs_by_room.values():
             await hub.unsubscribe(held_sub.subscription_id)
-            if presence is not None:
-                # Only the last socket keeping this (user, room) pair
-                # subscribed marks them offline: two tabs, or a primary
-                # room plus an extra `subscribe`, must not flap presence
-                # every time either one alone disconnects.
-                remaining = await hub.get_subscriptions_for_user_room(user_id, held_room)
-                if not remaining:
+        if presence is None:
+            return
+        for held_room in subs_by_room:
+            # Only the last socket keeping this (user, room) pair
+            # subscribed marks them offline: two tabs, or a primary
+            # room plus an extra `subscribe`, must not flap presence
+            # every time either one alone disconnects.
+            remaining = await hub.get_subscriptions_for_user_room(user_id, held_room)
+            if not remaining:
+                try:
                     await presence.user_left(user_id, held_room)
+                except Exception:
+                    log.exception(
+                        "Failed to clear presence for user %s in room %s", user_id, held_room
+                    )
 
     # Everything from here on, through the end of the handler, runs under
     # one try/finally: a peer already gone by the time the server sends the
@@ -279,6 +308,13 @@ async def websocket_endpoint(
     # makes every exit path release what the two lines above acquired.
     send_task: asyncio.Task[None] | None = None
     try:
+        # Registration must happen before this recheck: a removal that raced
+        # the first authorization either reaches this subscription or is
+        # visible to this read. Failed checks release it in the finally below.
+        if not await still_authorized(room_id):
+            return
+        if presence is not None:
+            await presence.user_joined(user_id, room_id)
         # Send connection confirmation
         await websocket.send_json(
             {
@@ -320,6 +356,8 @@ async def websocket_endpoint(
                 if not page:
                     break
                 for room_event in page:
+                    if not await still_authorized(room_id):
+                        return
                     await websocket.send_json(room_event_payload(room_event))
                 cursor = page[-1].sequence
                 if len(page) < _BACKFILL_PAGE_SIZE:
@@ -397,6 +435,9 @@ async def websocket_endpoint(
                         # At or below the backfill's own high-water mark for this
                         # room: already sent during the subscribe backfill above.
                         continue
+                    if event.get("type") == "room_event" and event_room is not None:
+                        if not await still_authorized(event_room):
+                            return
                     await websocket.send_json(event)
                 except TimeoutError:
                     try:
@@ -409,7 +450,21 @@ async def websocket_endpoint(
         send_task = asyncio.create_task(send_loop())
 
         while True:
-            raw = await websocket.receive_text()
+            # A sender can close after revocation or a failed authority read
+            # while the peer never sends another frame. Observe its completion
+            # so this handler still releases every subscription immediately.
+            receive_task = asyncio.create_task(websocket.receive_text())
+            try:
+                completed, _pending = await asyncio.wait(
+                    (receive_task, send_task), return_when=asyncio.FIRST_COMPLETED
+                )
+                if send_task in completed:
+                    break
+                raw = receive_task.result()
+            finally:
+                receive_task.cancel()
+                with suppress(asyncio.CancelledError, WebSocketDisconnect):
+                    await receive_task
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -440,6 +495,8 @@ async def websocket_endpoint(
                             subs_by_room[extra_room] = await hub.subscribe(
                                 extra_room, user_id, queue=sub.queue
                             )
+                        if not await still_authorized(extra_room):
+                            return
                         await websocket.send_json(
                             {
                                 "type": "subscribed",
