@@ -2,8 +2,13 @@
 
 This walks a team lead through the core loop end to end, with no backend
 reading required beyond this page. It uses the web UI at
-`http://localhost:8000`; every step also has a raw API call underneath if you
-want to script it instead.
+`http://localhost:8000`; API routes and request bodies are included for
+scripting. API requests need the caller's `Authorization: Bearer <token>`
+header and JSON bodies need `Content-Type: application/json`.
+
+Reconciled against the source on 2026-09-08. This is a workflow walkthrough;
+it does not establish the still-pending live 3–5 human comparison against
+ChatGPT shared Projects.
 
 ## Setup (5 minutes)
 
@@ -21,9 +26,9 @@ simulator mode: every AI output is clearly labeled
 whole workflow below still works. Set `OPENAI_API_KEY` in
 `docker-compose.yml` first if you want live model output.
 
-You'll need a second signed-in user for the invite step. XYZZY has no
-self-serve signup or user directory: every account is created by an
-operator. From another terminal, against the same container:
+You'll need a second signed-in user for the invite step. This token-based
+walkthrough uses operator-created accounts. From another terminal, against
+the same container:
 
 ```bash
 docker compose exec xyzzy python -m multiplayer.manage /data/multiplayer.db user add bob --email bob@example.com
@@ -42,31 +47,50 @@ Open a second browser (or a private window) and sign in as `bob` with it.
 2. **Invite.** Invite `bob` into the room. This is where you need his user
    id, not his email: the invite call is
    `POST /api/v1/rooms/{room_id}/members/invitations` with body
-   `{"user_id": "bob", "role": "viewer"}`. Have bob join from his own
-   session so both of you are members with a live cursor in the room.
-3. **Branch two specialists.** Spawn two agents from the agent-template
-   list (`GET /api/v1/agent-templates`), then start a branch in `PARALLEL`
-   mode naming both: `POST /api/v1/rooms/{room_id}/branches`, body
-   `{"mode": "PARALLEL", "prompt": "...", "agent_ids": ["agent-1", "agent-2"]}`.
-   Execute each run from the branch view; watch both stream into the room
-   in real time.
-4. **Compare and publish a brief.** Once both runs finish, include or
+   `{"user_id": "bob", "role": "editor"}`. Have bob open the invited
+   channel from his session; both of you can now contribute and see presence.
+   `POST /api/v1/rooms/{room_id}/join` marks an existing member present;
+   the invitation is what grants membership. Use `viewer` for read-only access.
+3. **Branch two or three specialists.** Open Start AI work, enter a question,
+   select two or three specialists, and launch. The UI spawns agents, creates
+   the branch, and executes its runs. To script this, list templates with
+   `GET /api/v1/agent-templates`, then spawn each with
+   `POST /api/v1/rooms/{room_id}/agents`, body `{"template_id": "..."}`.
+   Pass the returned agent IDs to `POST /api/v1/rooms/{room_id}/branches`,
+   body `{"mode": "PARALLEL", "prompt": "...", "agent_ids": ["...", "..."]}`,
+   and execute each returned run with
+   `POST /api/v1/branches/{branch_id}/runs/{execution_id}/execute`.
+   Run state and completed outputs arrive through room events; provider
+   responses do not stream token by token.
+4. **Compare and publish a brief.** Once all runs finish, include or
    exclude each output for synthesis (`PUT /api/v1/branches/{branch_id}/output-selections/{output_id}`,
-   body `{"disposition": "INCLUDE"}` or `"EXCLUDE"`), then publish:
+   body `{"disposition": "INCLUDED"}` or `{"disposition": "EXCLUDED"}`).
+   Every output needs a selection and parallel mode needs at least two
+   included outputs, so use three specialists to exercise exclusion.
+   After all runs are terminal, publish:
    `POST /api/v1/branches/{branch_id}/syntheses/decision-brief`, body
-   `{"title": "..."}`. The resulting artifact version is immutable: a new
-   synthesis always creates a new version.
-5. **Accept the decision.** Create a decision tied to the brief
-   (`POST /api/v1/rooms/{room_id}/decisions`), then move it to `ACTIVE`:
-   `POST /api/v1/decisions/{decision_id}/status`, body
-   `{"status": "ACTIVE"}`.
+   `{"title": "..."}`. The first successful publication creates a Decision
+   Brief artifact; later publications extend that room's synthesis lineage
+   with immutable versions. Send an `Idempotency-Key` header on branch
+   creation and synthesis requests when scripting retries. Reusing a completed
+   synthesis key replays its original version.
+5. **Review the evidence.** Open the published artifact and inspect its
+   claim provenance and Decision → Claim → AgentOutput tree. Publication
+   materializes a version-backed ontology Decision; its AI-derived assertions
+   remain unconfirmed until reviewed. Confirm an assertion only after checking
+   its evidence (`POST /api/v1/rooms/{room_id}/ontology/entities/{entity_id}/reviews`,
+   body `{"action": "CONFIRM", "reason": "Checked against source evidence"}`),
+   or correct it through the tree's correction controls.
 6. **Ask Meta why.** From the room's Meta panel, ask why the decision was
-   made. Under the hood this is `GET /api/v1/rooms/{room_id}/meta?kind=WHY_DECISION`:
+   made. Under the hood this is
+   `GET /api/v1/rooms/{room_id}/meta?kind=WHY_DECISION&version_id={version_id}`;
+   omit `version_id` to use the latest Decision Brief, as the UI does.
    `kind` is a closed set (`STATUS`, `BLOCKERS`, `CHANGES`,
    `DECISIONS_OPEN`, `DECISIONS_MADE`, `DISAGREEMENT`, `WHY_DECISION`,
-   `DECISION_EVIDENCE`); free-text `question` works too and is recorded
-   rather than parsed when a `kind` is also given. Meta answers only from
-   what the asking user can already read in the room: it doesn't leak
+   `DECISION_EVIDENCE`). A free-text `question` alone accepts a bounded set of
+   recognized phrases; when `kind` is given, the text is recorded without
+   being parsed. Meta answers only from what the asking user can already
+   read in the room: it doesn't leak
    evidence bob can't see, and bob's own Meta question won't surface
    anything scoped to a room he isn't in.
 
@@ -76,22 +100,30 @@ Open a second browser (or a private window) and sign in as `bob` with it.
 It returns:
 
 - `content_hash` and `provenance_hash`, plus `provenance_hash_verified`:
-  whether the stored hash still matches the content, checked server-side on
-  every read, not just trusted from the stored row.
+  whether recomputing the content and provenance hashes matches the stored
+  values, checked server-side by this endpoint.
 - `branch_synthesis`: which synthesis produced this version, which model
   and provider ran it, whether it was `simulated`, and `selected_output_ids`,
   the exact agent outputs that fed it, in order.
-- `claims`: the Decision → Claim → AgentOutput chain: each claim in the
-  brief traced back to the specific output it came from, not just the
-  branch it came from.
+- `claims`: frozen claim/source rows tracing each claim to its exact
+  AgentOutput and provider evidence. The ontology and Meta views add the
+  Decision → Claim → AgentOutput relationships.
 
-This is the artifact's whole paper trail: what went in, who ran it, and
-whether the record has been altered since.
+This is the artifact's persisted provenance snapshot. Hash verification
+detects inconsistency with that snapshot; it is not an external signature or
+proof against someone able to rewrite the entire database.
 
 ## Local models
 
-Point specialists at any OpenAI-compatible chat-completions server
-(Ollama, LM Studio, vLLM, llama.cpp) instead of the OpenAI API:
+For the Docker walkthrough, uncomment `XYZZY_LOCAL_MODEL_BASE_URL` under
+`xyzzy.environment` in `docker-compose.yml`, set it to your runtime's URL
+(for example `http://host.docker.internal:11434/v1` on Docker Desktop), and
+add `XYZZY_OPENAI_MODEL: "llama3"`. Recreate the service with
+`docker compose up -d --build`. Host-shell exports alone do not configure
+this Compose service.
+
+When starting the Python server directly, set these in its shell to use an
+OpenAI-compatible chat-completions server:
 
 ```bash
 export XYZZY_LOCAL_MODEL_BASE_URL="http://localhost:11434/v1"
@@ -113,11 +145,16 @@ walkthrough.
   still needs a shared local filesystem for that one database file, so this
   is not yet a multi-node deployment story. See the README's "Scaling out"
   section for what running more than one process actually requires.
-- **No tasks UI yet.** The task API is complete server-side
-  (`POST/GET /rooms/{room_id}/tasks`, `/assign`, `/delegate`, `/complete`,
-  `/cancel`) but has no client surface: see `docs/BACKLOG.md`. Reachable
-  only by calling the API directly today.
-- **Invitation needs the user id, not an email or username.** There's no
-  user directory or lookup endpoint; the only way to learn another user's id
-  today is for them to tell you, or for you to have created their account
-  yourself with `manage.py user add`.
+- **Tasks are read-only in the UI.** The People panel lists task titles,
+  status, priority, and assigned agents. Creation and lifecycle operations
+  (`POST /rooms/{room_id}/tasks`, `/assign`, `/delegate`, `/complete`,
+  `/cancel`) require API calls; see [the client backlog](BACKLOG.md#client-backlog).
+- **Invitation uses a user id.** The picker suggests existing workspace
+  members from `GET /api/v1/workspaces/{workspace_id}/members`. For an account
+  outside that workspace, obtain the id from its owner or the operator who
+  created it; there is no global email lookup in this flow.
+- **Manual decisions have no explicit artifact link.** The New decision
+  dialog creates a separate decision record and supports Accept/Supersede.
+  Its API accepts `title`, `content`, and `reason`, with no artifact-version
+  field. The brief's provenance-backed ontology Decision is created by
+  synthesis itself. Hand-authored artifact creation and editing remain API-only.
