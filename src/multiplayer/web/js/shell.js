@@ -202,6 +202,12 @@ document.addEventListener('click', event => {
   }
 });
 
+function visibleChannelMenuItems() {
+  return [...document.querySelectorAll('#channel-menu [role="menuitem"]')]
+    .filter(item => item.getClientRects().length > 0 && !item.disabled
+      && item.getAttribute('aria-disabled') !== 'true');
+}
+
 export function toggleChannelMenu(event) {
   event.stopPropagation();
   const menu = document.getElementById('channel-menu');
@@ -219,7 +225,7 @@ export function toggleChannelMenu(event) {
   menu.classList.remove('hidden');
   // role="menu" promises arrow-key navigation between its menuitems; opening
   // it with focus left on the trigger button broke that promise entirely.
-  menu.querySelector('[role="menuitem"]')?.focus();
+  visibleChannelMenuItems()[0]?.focus();
 }
 export function closeChannelMenu() {
   const menu = document.getElementById('channel-menu');
@@ -233,7 +239,8 @@ export function closeChannelMenu() {
 // Escape/outside-click closing it is already handled elsewhere — this only
 // ever runs while the menu is open, since it is unreachable otherwise.
 document.getElementById('channel-menu').addEventListener('keydown', event => {
-  const items = [...document.querySelectorAll('#channel-menu [role="menuitem"]')];
+  const items = visibleChannelMenuItems();
+  if (!items.length) return;
   const index = items.indexOf(document.activeElement);
   if (event.key === 'ArrowDown') { event.preventDefault(); items[(index + 1) % items.length]?.focus(); }
   else if (event.key === 'ArrowUp') { event.preventDefault(); items[(index - 1 + items.length) % items.length]?.focus(); }

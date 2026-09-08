@@ -18,6 +18,7 @@ export const state = {
   // repopulates it on every snapshot and branch.js reads it for rendering —
   // neither side should have to import the other just to reach a Map.
   outputSelections: new Map(),
+  allOutputSelections: new Map(),
   currentBranchId: '',
   currentBranchMode: '',
   currentTurnLock: null,
@@ -58,6 +59,8 @@ export const state = {
   lastArtifacts: [],
   lastDecisions: [],
   synthesisTitleAuto: '',
+  synthesisTitleBranch: '',
+  synthesisTitleDrafts: new Map(),
   // messageId -> outputId: which message's "Full output" record is
   // currently open, so a message re-render (a reaction, any snapshot
   // reconcile) can re-include the same record from data instead of the

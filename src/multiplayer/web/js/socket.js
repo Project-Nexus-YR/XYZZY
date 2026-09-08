@@ -260,6 +260,8 @@ export async function loadStateImpl() {
   // Members are read early: message attribution below needs the name lookup, not
   // just the room-header title.
   state.roomMembers = snapshot.members || [];
+  const currentMember = state.roomMembers.find(member => member.user_id === state.userId);
+  state.currentRoomRole = currentMember ? currentMember.role : 'viewer';
   state.currentRoomName = snapshot.room.name;
   document.getElementById('room-meta').textContent = snapshot.room.description || 'No description';
   const listedRoom = state.myRooms.find(room => room.room_id === state.roomId);
@@ -346,7 +348,9 @@ export async function loadStateImpl() {
     !state.currentBranchId || output.branch_id === state.currentBranchId
   );
   state.outputSelections.clear();
+  state.allOutputSelections.clear();
   (snapshot.output_selections || []).forEach(selection => {
+    state.allOutputSelections.set(selection.output_id, selection.disposition.toLowerCase());
     if (!state.currentBranchId || selection.branch_id === state.currentBranchId) {
       state.outputSelections.set(selection.output_id, selection.disposition.toLowerCase());
     }
@@ -376,8 +380,6 @@ export async function loadStateImpl() {
   }
 
   // Evidence graph and governance state are part of the reconnect snapshot.
-  const currentMember = (snapshot.members || []).find(member => member.user_id === state.userId);
-  state.currentRoomRole = currentMember ? currentMember.role : 'viewer';
   // The typed name at setup only matters for first-time bootstrap. Once the server
   // has a member row, its display_name is the identity everyone else sees too —
   // showing anything else here would disagree with the People panel for no reason.

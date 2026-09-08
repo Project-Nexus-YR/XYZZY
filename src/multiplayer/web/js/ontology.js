@@ -75,7 +75,7 @@ export function renderOntology(ontology) {
         );
         const output = sourceLink ? entitiesById.get(sourceLink.to_entity_id) : null;
         const persistedOutput = output
-          ? state.roomOutputs.find(candidate => candidate.output_id === output.source_object_id)
+          ? state.allRoomOutputs.find(candidate => candidate.output_id === output.source_object_id)
           : null;
         const provider = persistedOutput
           ? `${persistedOutput.provider_name || 'simulated'} / ${persistedOutput.provider_model || 'simulated'}`

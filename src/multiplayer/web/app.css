@@ -511,7 +511,7 @@ a,.output-link{text-underline-offset:2px}
 .msg-actions{
   grid-row:4;grid-column:2/4;display:flex;gap:var(--s-half);margin-top:0;
   max-height:0;overflow:hidden;opacity:0;
-  transition:opacity var(--t-fast),max-height var(--t-fast),margin-top var(--t-fast);
+  transition:opacity var(--t-fast);
 }
 /* Hidden means zero height, not just invisible — a hover strip nobody is
    hovering must not hold a bubble away from its own group. The thread pane
@@ -542,7 +542,7 @@ a,.output-link{text-underline-offset:2px}
   padding:var(--s-half) var(--s-2);border-radius:var(--r-2);min-height:24px;
   display:inline-flex;align-items:center;
   max-height:0;overflow:hidden;opacity:0;
-  transition:opacity var(--t-fast),max-height var(--t-fast),margin-top var(--t-fast),
+  transition:opacity var(--t-fast),
     background var(--t-fast),color var(--t-fast);
 }
 .msg:hover .thread-action,.msg:focus-within .thread-action,.msg.actions-open .thread-action{
@@ -762,9 +762,9 @@ a,.output-link{text-underline-offset:2px}
   border:1px solid var(--line);border-radius:var(--r-3);background:var(--raised);
   padding:var(--s-3);display:flex;flex-direction:column;min-height:0;
 }
-.output-card.excluded{opacity:.72}
-.output-card.excluded .output-content{color:var(--text-3)}
-.output-card.excluded .output-author{text-decoration:line-through;text-decoration-thickness:1px;text-underline-offset:2px}
+.output-card.excluded .review-state{color:var(--danger)}
+.output-card.included .review-state{color:var(--ok)}
+.output-card .review-state{margin-inline-start:auto;flex-shrink:0}
 .output-card-head{display:flex;align-items:center;gap:var(--s-2)}
 .output-author{font-size:var(--t-ui);font-weight:var(--w-strong);letter-spacing:var(--k-ui)}
 .output-role{font-size:var(--t-meta);color:var(--accent);margin-top:var(--s-half)}
@@ -825,6 +825,15 @@ a,.output-link{text-underline-offset:2px}
   padding:var(--s-1) var(--s-2);font-size:var(--t-small);
 }
 .synthesis-actions input{width:min(220px,40vw)}
+.synthesis-field{display:flex;flex-direction:column;gap:var(--s-1);font-size:var(--t-small);color:var(--text-2)}
+.synthesis-actions{align-items:flex-end}
+#synthesis-guidance{color:var(--text-2)}
+#branch-panel-title{white-space:pre-wrap;overflow-wrap:anywhere;max-width:70ch}
+.view-head > div{min-width:0}
+.view-head > button{flex-shrink:0}
+.popover-menu .mobile-menu-action{display:none}
+.notif-row{display:block;width:100%;text-align:start}
+.notif-row > span{display:block}
 
 /* meta */
 .meta-head{padding:var(--s-4) max(var(--s-5),3vw)}
@@ -970,6 +979,18 @@ a,.output-link{text-underline-offset:2px}
   .main{grid-template-columns:minmax(0,1fr)}
   .room-header{padding-inline-start:var(--s-2);gap:var(--s-1)}
   .room-header .meta{display:none}
+  .room-header > div:not(.header-actions){flex:1}
+  .room-header .icon-button{width:44px;height:44px}
+  .header-actions{gap:0}
+  .header-actions > button[data-action="markRoomRead"],
+  .header-actions > button[data-action="openContext"]{display:none}
+  .popover-menu .mobile-menu-action{display:block}
+  .sidebar-footer .icon-button,.context-head .icon-button{width:44px;height:44px}
+  .nav-item,.popover-menu button,.review-actions button,.btn-sm,.btn-primary,
+  .ontology-actions button,.meta-presets button,.search-form button{min-height:44px}
+  .modal-card{max-height:calc(100dvh - 32px);overflow-y:auto}
+  .synthesis-actions input,.synthesis-actions select,
+  .meta-query input,.thread-reply input:not([type="checkbox"]),.search-form input:not([type="checkbox"]){font-size:16px;min-height:44px}
   /* The dot alone carries the state at this width; the word stays for screen
      readers via aria-label instead of clipping mid-letter. */
   .header-actions .status{
@@ -1010,6 +1031,8 @@ a,.output-link{text-underline-offset:2px}
   .synthesis-actions{margin-inline-start:0;width:100%}
   .synthesis-actions input{width:100%}
   .synthesis-actions select,.synthesis-actions button{flex:1}
+  .synthesis-field{width:100%}
+  .synthesis-actions button{width:100%;white-space:normal}
 }
 
 /* Motion is an affordance, not decoration: switch it off when asked. */

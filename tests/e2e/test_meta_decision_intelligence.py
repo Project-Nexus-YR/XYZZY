@@ -1040,7 +1040,11 @@ def test_browser_meta_contract_exposes_scope_freshness_and_drilldown() -> None:
     # Every kind offered as a choice, so no supported question needs a phrasing.
     for kind in MetaQuestionKind:
         assert f'data-action="askMetaKind" data-action-arg="{kind.value}"' in ui
-    assert "rooms/${state.roomId}/meta" in ui
+    # Requests freeze their originating room before awaiting the response.
+    # The executing cross-channel regression lives in test_operation_context.py.
+    assert "const roomId = state.roomId;" in ui
+    assert "rooms/${roomId}/meta" in ui
+    assert "roomId === state.roomId" in ui
     assert "authorized_head" in ui
     assert "retrieval_counts" in ui
     assert "exact_source_evidence" in ui

@@ -3,6 +3,7 @@ import { emit } from './bus.js';
 import { closeModal, closeSidebarDrawer, currentCenterView, openCenterView, openContext, openModal } from './shell.js';
 import { errorMessage, escHtml, setWsStatus, toast } from './util.js';
 import { state } from './state.js';
+import { resetMeta } from './meta.js';
 
 export function renderRoomsList() {
   const list = document.getElementById('rooms-list');
@@ -55,6 +56,7 @@ export async function switchRoom(targetRoomId) {
     return;
   }
   state.roomId = room.room_id;
+  resetMeta();
   state.workspaceId = room.workspace_id;
   rememberRoomId(state.roomId);
   state.currentBranchId = '';
@@ -185,6 +187,7 @@ export function openInvitePeople() {
 }
 
 export function handleAccessRevoked() {
+  resetMeta();
   const removedRoom = state.myRooms.find(item => item.room_id === state.roomId);
   const removedName = removedRoom ? removedRoom.name : 'this channel';
   state.myRooms = state.myRooms.filter(item => item.room_id !== state.roomId);

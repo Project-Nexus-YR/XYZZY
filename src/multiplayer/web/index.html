@@ -120,6 +120,10 @@
   </div>
 
   <div class="popover-menu hidden" id="channel-menu" role="menu" aria-label="Channel options">
+    <button class="mobile-menu-action" role="menuitem" data-action="markRoomRead">Mark channel read</button>
+    <button class="mobile-menu-action" role="menuitem" data-action="openContext" data-action-arg="search">Search channel</button>
+    <button class="mobile-menu-action" role="menuitem" data-action="openContext" data-action-arg="members">People and permissions</button>
+    <button class="mobile-menu-action" role="menuitem" data-action="openContext" data-action-arg="branch">AI work</button>
     <button role="menuitem" data-action="invitePeopleFromMenu">Invite people</button>
     <button role="menuitem" data-action="channelDetailsFromMenu">Channel details</button>
     <button role="menuitem" class="danger" data-action="leaveChannelFromMenu">Leave channel</button>
@@ -172,14 +176,18 @@
           <div>
             <div class="synthesis-title" id="selection-summary">No outputs selected</div>
             <div class="synthesis-meta">Selections are shared with the channel. Every published claim links to its source.</div>
+            <div class="synthesis-meta" id="synthesis-guidance" role="status"></div>
           </div>
           <div class="synthesis-actions">
-            <input id="synthesis-title" aria-label="Synthesis title" placeholder="Title" required data-input-action="updateSelectionSummary">
+            <label class="synthesis-field" for="synthesis-title"><span>Artifact title</span>
+            <input id="synthesis-title" aria-label="Synthesis title" placeholder="Title" required data-input-action="updateSelectionSummary"></label>
+            <label class="synthesis-field" for="synthesis-type"><span>Format</span>
             <select id="synthesis-type" aria-label="Synthesis type" data-change-action="updateSelectionSummary">
               <option value="GENERAL_SYNTHESIS">General Synthesis</option>
               <option value="DECISION_BRIEF" selected>Decision Brief</option>
               <option value="PROGRESS_REPORT">Progress Report</option>
             </select>
+            </label>
             <button class="btn-primary" id="synthesize-button" data-action="publishSynthesis" disabled>Publish</button>
           </div>
         </div>

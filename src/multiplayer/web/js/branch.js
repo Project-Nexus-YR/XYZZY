@@ -3,6 +3,9 @@ import { emit } from './bus.js';
 import { errorMessage, escHtml, htmlToElement, idempotencyKey, memberName, morphElement, reconcileList, renderMarkdown, shortId, toast } from './util.js';
 import { state } from './state.js';
 
+let launchInFlight = false;
+const publishingBranches = new Set();
+
 export async function loadTemplates() {
   try {
     state.agentTemplates = await api('GET', '/agent-templates');
@@ -65,6 +68,10 @@ export function updateTemplateSelection() {
   document.getElementById('launch-button').textContent = turnLocked
     ? 'Start turn-locked run'
     : 'Run selected in parallel';
+  if (launchInFlight) {
+    document.getElementById('launch-button').disabled = true;
+    document.getElementById('launch-button').textContent = 'Running specialists…';
+  }
 }
 
 export function branchTitle(branch) {
@@ -116,12 +123,10 @@ export function renderBranches(branches, runs) {
   const related = runs.filter(run => run.branch_id === branch.branch_id);
   const status = branchStatus(branch, runs);
   const count = branchAgentCount(branch, related);
-  // The room header already carries this branch's title (⑂ + truncated
-  // prompt) whenever this view is open — repeating it in the card beneath
-  // said the same thing twice. The card now carries only what the header
-  // doesn't: mode, status, and how many agents.
-  document.getElementById('branch-panel-title').textContent = '';
-  document.getElementById('branch-panel-title').classList.add('hidden');
+  // The compact navigation title truncates; the review surface must retain
+  // the full question so reviewers can inspect every constraint.
+  document.getElementById('branch-panel-title').textContent = branch.initiating_prompt || branch.prompt || 'AI branch';
+  document.getElementById('branch-panel-title').classList.remove('hidden');
   document.getElementById('branch-panel-copy').textContent = `${branch.mode === 'TURN_LOCKED_SINGLE' ? 'Single agent' : 'Parallel'} · ${status} · ${count} ${count === 1 ? 'agent' : 'agents'}`;
   document.getElementById('branch-runs').innerHTML = related.map(run => {
     const agent = state.roomAgents.find(item => item.agent_id === run.agent_id);
@@ -163,9 +168,9 @@ export function renderBranchActivity(branches, runs) {
     const status = branchStatus(branch, runs);
     // One vocabulary everywhere selections are summarized: included/excluded/
     // unreviewed, never a bare "reviewed" that says nothing about the outcome.
-    const branchOutputs = state.roomOutputs.filter(output => output.branch_id === branch.branch_id);
-    const included = branchOutputs.filter(output => state.outputSelections.get(output.output_id) === 'included').length;
-    const excluded = branchOutputs.filter(output => state.outputSelections.get(output.output_id) === 'excluded').length;
+    const branchOutputs = state.allRoomOutputs.filter(output => output.branch_id === branch.branch_id);
+    const included = branchOutputs.filter(output => state.allOutputSelections.get(output.output_id) === 'included').length;
+    const excluded = branchOutputs.filter(output => state.allOutputSelections.get(output.output_id) === 'excluded').length;
     const count = branchAgentCount(branch, related);
     const key = `branch-activity:${branch.branch_id}`;
     const html = `<article class="branch-activity" data-reconcile-key="${escHtml(key)}"><button data-action="selectBranch" data-branch-id="${branch.branch_id}" aria-label="${escHtml(branchTitle(branch))} — ${escHtml(status)}, ${included} included, ${excluded} excluded"><span class="branch-symbol"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.6v4.6a3 3 0 0 0 3 3h5.4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12.8" cy="10.2" r="1.5"/></svg></span><span><span class="branch-title">${escHtml(branchTitle(branch))}</span><span class="branch-detail">${escHtml(branchStarterClause(branch))}${count} ${count === 1 ? 'agent' : 'agents'}</span></span><span class="branch-progress"><span class="status-text ${status}">${escHtml(status)}</span><br>${included} included · ${excluded} excluded</span></button></article>`;
@@ -323,6 +328,7 @@ export async function submitRedirect(event, agentId) {
 }
 
 export async function launchParallelAnalyses() {
+  if (launchInFlight) return;
   const question = document.getElementById('analysis-question').value.trim();
   const templates = selectedTemplates();
   const turnLocked = document.getElementById('turn-locked-mode').checked;
@@ -335,69 +341,81 @@ export async function launchParallelAnalyses() {
     return;
   }
 
+  const roomId = state.roomId;
+  const roomName = state.currentRoomName;
+  const userId = state.userId;
+  const accessToken = state.accessToken;
+  const sameSession = () => state.userId === userId && state.accessToken === accessToken;
+  const inOriginalRoom = () => sameSession() && state.roomId === roomId;
   const button = document.getElementById('launch-button');
+  launchInFlight = true;
   button.disabled = true;
   button.setAttribute('aria-busy', 'true');
   button.innerHTML = '<span class="spinner"></span> Launching branches';
   setLaunchNote(`Starting ${templates.length} independent runs…`);
 
-  const spawned = await Promise.allSettled(templates.map(template =>
-    api('POST', `/rooms/${state.roomId}/agents`, {
-      template_id: template.template_id,
-      name: template.name
-    })
-  ));
-  const agents = spawned.filter(result => result.status === 'fulfilled').map(result => result.value);
-  if (agents.length !== templates.length) {
-    // A partial spawn is not a usable roster: unwind the agents this flow just
-    // created before surfacing the error, so a retry does not pile up orphans.
-    const unwound = await Promise.allSettled(agents.map(agent =>
-      api('DELETE', `/rooms/${state.roomId}/agents/${agent.agent_id}`)
-    ));
-    const stillPresent = unwound.filter(result => result.status === 'rejected').length;
-    button.removeAttribute('aria-busy');
-    button.textContent = 'Run selected in parallel';
-    updateTemplateSelection();
-    setLaunchNote(
-      stillPresent
-        ? `Spawn failed, and ${stillPresent} agent${stillPresent === 1 ? '' : 's'} from this launch could not be removed and may still be in the room.`
-        : 'Spawn failed; the room was left as it was.',
-      'error'
-    );
-    return;
-  }
-  let branchLaunch;
   try {
-    branchLaunch = await api('POST', `/rooms/${state.roomId}/branches`, {
-      mode: turnLocked ? 'TURN_LOCKED_SINGLE' : 'PARALLEL',
-      prompt: question,
-      agent_ids: agents.map(agent => agent.agent_id)
-    }, { idempotencyKey: idempotencyKey() });
-    state.currentBranchId = branchLaunch.branch.branch_id;
-  } catch (err) {
-    button.removeAttribute('aria-busy');
-    button.textContent = 'Run selected in parallel';
-    updateTemplateSelection();
-    setLaunchNote(`Branch was not started: ${errorMessage(err)}`, 'error');
-    return;
-  }
-  const results = await Promise.allSettled(branchLaunch.runs.map(run =>
-    api('POST', `/branches/${state.currentBranchId}/runs/${run.execution_id}/execute`)
-  ));
+    const spawned = await Promise.allSettled(templates.map(template =>
+      api('POST', `/rooms/${roomId}/agents`, {
+        template_id: template.template_id,
+        name: template.name
+      })
+    ));
+    if (!sameSession()) return;
+    const agents = spawned.filter(result => result.status === 'fulfilled').map(result => result.value);
+    if (agents.length !== templates.length) {
+      // Unwind only this launch's roster, always in the room that created it.
+      const unwound = await Promise.allSettled(agents.map(agent =>
+        api('DELETE', `/rooms/${roomId}/agents/${agent.agent_id}`)
+      ));
+      if (!sameSession()) return;
+      const stillPresent = unwound.filter(result => result.status === 'rejected').length;
+      const note = stillPresent
+        ? `Spawn failed, and ${stillPresent} agent${stillPresent === 1 ? '' : 's'} from this launch could not be removed and may still be in #${roomName}.`
+        : `Spawn failed; #${roomName} was left as it was.`;
+      if (inOriginalRoom()) setLaunchNote(note, 'error');
+      else toast(note, 'error');
+      return;
+    }
+    let branchLaunch;
+    try {
+      branchLaunch = await api('POST', `/rooms/${roomId}/branches`, {
+        mode: turnLocked ? 'TURN_LOCKED_SINGLE' : 'PARALLEL',
+        prompt: question,
+        agent_ids: agents.map(agent => agent.agent_id)
+      }, { idempotencyKey: idempotencyKey() });
+      if (!sameSession()) return;
+      if (inOriginalRoom()) state.currentBranchId = branchLaunch.branch.branch_id;
+    } catch (err) {
+      if (!sameSession()) return;
+      const note = `Branch in #${roomName} could not be confirmed: ${errorMessage(err)}. Check AI work before retrying.`;
+      if (inOriginalRoom()) setLaunchNote(note, 'error');
+      else toast(note, 'error');
+      return;
+    }
+    const results = await Promise.allSettled(branchLaunch.runs.map(run =>
+      api('POST', `/branches/${branchLaunch.branch.branch_id}/runs/${run.execution_id}/execute`)
+    ));
+    if (!sameSession()) return;
 
-  const succeeded = results.filter(r => r.status === 'fulfilled').length;
-  const failed = results.length - succeeded;
-  button.removeAttribute('aria-busy');
-  updateTemplateSelection();
-  await emit('loadState');
-  if (failed) {
-    setLaunchNote(`${succeeded} completed; ${failed} failed. Successful outputs remain persisted.`, 'error');
-  } else {
-    setLaunchNote(`${succeeded} authored outputs completed and persisted.`, 'success');
-    // A successful launch is done — leaving the tray open only invites a second,
-    // duplicate launch of the same question. A validation failure above returns
-    // before this point, so the tray stays open for the person to fix the input.
-    emit('toggleAITray', false);
+    const succeeded = results.filter(r => r.status === 'fulfilled').length;
+    const failed = results.length - succeeded;
+    if (!inOriginalRoom()) {
+      toast(`AI work in #${roomName}: ${succeeded} completed${failed ? `, ${failed} failed` : ''}.`, failed ? 'error' : 'success');
+      return;
+    }
+    await emit('loadState');
+    if (!inOriginalRoom()) return;
+    if (failed) {
+      setLaunchNote(`${succeeded} completed; ${failed} failed. Successful outputs remain persisted.`, 'error');
+    } else {
+      setLaunchNote(`${succeeded} authored outputs completed and persisted.`, 'success');
+      emit('toggleAITray', false);
+    }
+  } finally {
+    launchInFlight = false;
+    button.removeAttribute('aria-busy');
+    updateTemplateSelection();
   }
 }
 
@@ -414,7 +432,7 @@ export function renderOutputs(outputs, runs) {
     return;
   }
 
-  panel.innerHTML = outputs.map(output => {
+  reconcileList(panel, outputs, output => output.output_id, output => {
     const agent = state.roomAgents.find(a => a.agent_id === output.agent_id);
     const selection = state.outputSelections.get(output.output_id) || '';
     const cardClass = selection ? ` ${selection}` : '';
@@ -423,6 +441,7 @@ export function renderOutputs(outputs, runs) {
         <div class="output-card-head">
           <div><div class="output-author">${escHtml(agent ? agent.name : 'Specialist')}</div>
           ${agent && agent.role && agent.role !== agent.name ? `<div class="output-role">${escHtml(agent.role)}</div>` : ''}</div>
+          <span class="review-state">${selection === 'included' ? 'Included' : selection === 'excluded' ? 'Excluded' : 'Needs review'}</span>
         </div>
         <div class="output-content">${renderMarkdown(output.content || 'No readable content returned.')}</div>
         <div class="output-provenance">
@@ -436,7 +455,7 @@ export function renderOutputs(outputs, runs) {
           <button class="exclude ${selection === 'excluded' ? 'active' : ''}" aria-pressed="${selection === 'excluded'}" data-action="setOutputSelection" data-output-id="${output.output_id}" data-selection="excluded">Exclude</button>
         </div>
       </article>`;
-  }).join('');
+  });
   updateSelectionSummary();
 }
 
@@ -459,8 +478,8 @@ export function firstClause(prompt) {
   return clause || trimmed;
 }
 
-// The title input tracks the branch's derived title until the person edits it;
-// once edited, their wording wins even if the branch selection changes under it.
+// Keep human-authored drafts with their branch instead of carrying one branch's
+// title into the next branch's artifact.
 export function updateSelectionSummary() {
   const available = new Set(state.roomOutputs.map(o => o.output_id));
   const included = [...state.outputSelections].filter(([id, disposition]) => available.has(id) && disposition === 'included').length;
@@ -471,6 +490,15 @@ export function updateSelectionSummary() {
     : 'No outputs selected';
   const minimumIncluded = state.currentBranchMode === 'TURN_LOCKED_SINGLE' ? 1 : 2;
   const titleInput = document.getElementById('synthesis-title');
+  const branchKey = `${state.roomId}:${state.currentBranchId}`;
+  if (state.synthesisTitleBranch !== branchKey) {
+    if (state.synthesisTitleBranch) {
+      state.synthesisTitleDrafts.set(state.synthesisTitleBranch, titleInput.value);
+    }
+    titleInput.value = state.synthesisTitleDrafts.get(branchKey) || '';
+    state.synthesisTitleBranch = branchKey;
+    state.synthesisTitleAuto = '';
+  }
   const branch = state.roomBranches.find(b => b.branch_id === state.currentBranchId);
   const derived = firstClause(branch ? (branch.initiating_prompt || branch.prompt || '') : '');
   if (!titleInput.value.trim() || titleInput.value === state.synthesisTitleAuto) {
@@ -484,11 +512,24 @@ export function updateSelectionSummary() {
     && Boolean(title);
   const synthesize = document.getElementById('synthesize-button');
   const chosen = SYNTHESIS_TYPES[document.getElementById('synthesis-type').value];
-  synthesize.disabled = !valid;
-  synthesize.textContent = included
+  const publishing = publishingBranches.has(state.currentBranchId);
+  synthesize.disabled = !valid || publishing || !['admin', 'editor', 'member'].includes(state.currentRoomRole);
+  if (publishing) synthesize.setAttribute('aria-busy', 'true');
+  else synthesize.removeAttribute('aria-busy');
+  synthesize.textContent = publishing ? 'Publishing…' : included
     ? `Publish ${chosen.name} from ${included}`
     : `Publish ${chosen.name}`;
   synthesize.title = valid ? '' : `Review every output, include at least ${minimumIncluded}, and give the synthesis a title`;
+  const guidance = document.getElementById('synthesis-guidance');
+  if (guidance) {
+    const unreviewed = state.roomOutputs.length - reviewed;
+    guidance.textContent = publishing ? 'Publishing the selected outputs…'
+      : !['admin', 'editor', 'member'].includes(state.currentRoomRole) ? 'Your viewer role can inspect this branch. A contributor can select outputs and publish.'
+      : unreviewed ? `Review ${unreviewed} remaining ${unreviewed === 1 ? 'output' : 'outputs'} before publishing.`
+      : included < minimumIncluded ? `Include at least ${minimumIncluded} specialist ${minimumIncluded === 1 ? 'output' : 'outputs'} to publish.`
+      : !title ? 'Give this artifact a title before publishing.'
+      : `Ready to publish from ${included} selected ${included === 1 ? 'output' : 'outputs'}.`;
+  }
 }
 
 export const SYNTHESIS_TYPES = {
@@ -498,21 +539,35 @@ export const SYNTHESIS_TYPES = {
 };
 
 export async function publishSynthesis() {
-  const button = document.getElementById('synthesize-button');
+  const branchId = state.currentBranchId;
+  const roomId = state.roomId;
+  const userId = state.userId;
+  const accessToken = state.accessToken;
+  const sameSession = () => state.userId === userId && state.accessToken === accessToken;
+  if (!branchId || publishingBranches.has(branchId)) return;
   const type = document.getElementById('synthesis-type').value;
   const chosen = SYNTHESIS_TYPES[type];
   const title = document.getElementById('synthesis-title').value.trim();
   if (!title) return;
-  button.disabled = true;
+  publishingBranches.add(branchId);
+  updateSelectionSummary();
   try {
-    await api('POST', `/branches/${state.currentBranchId}/syntheses`, {
+    const result = await api('POST', `/branches/${branchId}/syntheses`, {
       title, synthesis_type: type
     }, { idempotencyKey: idempotencyKey() });
+    if (!sameSession()) return;
+    if (state.roomId !== roomId || state.currentBranchId !== branchId) {
+      toast(`${chosen.name} “${title}” published in its original branch.`);
+      return;
+    }
+    state.selectedArtifactId = result.artifact_id;
     await emit('loadState');
-    emit('openContext', 'artifacts');
+    if (state.roomId === roomId && state.currentBranchId === branchId) emit('openContext', 'artifacts');
     toast(`${chosen.name} published.`);
   } catch (err) {
-    toast(`${chosen.name} was not published: ${errorMessage(err)}`, 'error');
+    if (sameSession()) toast(`${chosen.name} was not published: ${errorMessage(err)}`, 'error');
+  } finally {
+    publishingBranches.delete(branchId);
     updateSelectionSummary();
   }
 }

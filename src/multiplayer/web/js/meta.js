@@ -2,6 +2,17 @@ import { api } from './api.js';
 import { errorMessage, escHtml, humanizeToken, renderMarkdown, shortId } from './util.js';
 import { state } from './state.js';
 
+let metaRequest = 0;
+
+export function resetMeta() {
+  metaRequest += 1;
+  const answer = document.getElementById('meta-answer');
+  answer.className = 'meta-answer';
+  answer.textContent = 'Ask about this channel to retrieve its authorized evidence.';
+  document.getElementById('meta-evidence').replaceChildren();
+  document.getElementById('meta-scope').textContent = 'Scope: current channel';
+}
+
 export function metaDerivationLabel(record) {
   if (record.review_status === 'CORRECTED') return 'human-corrected';
   if (record.review_status === 'CONFIRMED') return 'human-confirmed';
@@ -26,13 +37,20 @@ export async function askMetaKind(kind) {
 }
 
 export async function renderMeta(query) {
+  const request = ++metaRequest;
+  const roomId = state.roomId;
+  const userId = state.userId;
+  const accessToken = state.accessToken;
+  const isCurrent = () => request === metaRequest && roomId === state.roomId
+    && userId === state.userId && accessToken === state.accessToken;
   const answer = document.getElementById('meta-answer');
   const evidence = document.getElementById('meta-evidence');
   answer.className = 'meta-answer';
   answer.textContent = 'Retrieving bounded room evidence…';
   evidence.innerHTML = '';
   try {
-    const result = await api('GET', `/rooms/${state.roomId}/meta?${query}&limit=10`);
+    const result = await api('GET', `/rooms/${roomId}/meta?${query}&limit=10`);
+    if (!isCurrent()) return;
     const scopeRoom = (state.myRooms.find(item => item.room_id === result.scope.room_id) || {}).name || 'this channel';
     if (!result.decision) {
       // The kinds answered from assertions rather than one decision brief. The
@@ -86,6 +104,7 @@ export async function renderMeta(query) {
       </article>`;
     }).join('');
   } catch (err) {
+    if (!isCurrent()) return;
     answer.className = 'meta-answer meta-error';
     answer.textContent = errorMessage(err);
   }
