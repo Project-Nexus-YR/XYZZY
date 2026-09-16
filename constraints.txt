@@ -59,7 +59,7 @@ python-dotenv==1.2.3
 python-multipart==0.0.32
 PyYAML==6.0.3
 redis==8.1.0
-ruff==0.16.5
+ruff==0.16.7
 sortedcontainers==2.4.0
 starlette==1.6.0
 typing-inspection==0.4.4
