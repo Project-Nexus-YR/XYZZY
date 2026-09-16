@@ -4,6 +4,11 @@ WORKDIR /app
 COPY pyproject.toml README.md constraints.txt ./
 COPY src ./src
 
+# The pinned base image lags Debian's own security releases, so the digest
+# above can carry known-fixed CVEs until upstream rebuilds it. Upgrading here
+# takes the fixed perl, gzip, pcre2 and sqlite packages before Trivy counts them.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
+
 # Non-editable: the web client is package data under src/multiplayer/web (see
 # pyproject's package-data), and the server resolves it with
 # importlib.resources, which works the same whether the package is an
