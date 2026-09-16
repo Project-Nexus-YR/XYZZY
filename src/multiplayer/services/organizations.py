@@ -241,4 +241,20 @@ class _OrganizationsMixin(_SharedMixin):
                     )
                 )
             await self.repos.workspaces.remove_member(workspace_id, user_id)
+        # Membership is already durably gone. Revoke every affected room's
+        # subscriptions, including those held only by another process, before
+        # broadcasting anything else to the remaining members.
+        for event in events:
+            await self.hub.revoke_room_access(user_id, event.room_id)
+        for event in events:
+            await self.hub.send_to_user(user_id, {"type": "room_removed", "room_id": event.room_id})
         await self._broadcast_persisted_events(events)
+        # Presence is advisory and may depend on an unavailable Redis. Its
+        # cleanup must not interrupt revocation or delivery of durable events.
+        for event in events:
+            try:
+                await self.presence.user_left(user_id, event.room_id)
+            except Exception:
+                log.exception(
+                    "Failed to clear presence for user %s in room %s", user_id, event.room_id
+                )

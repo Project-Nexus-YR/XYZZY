@@ -14,7 +14,6 @@ from ..domain.agent_tasks import (
     AgentTaskMessage,
     AgentTaskState,
     Part,
-    PartKind,
     TaskMessageRole,
     TaskNotCancelableError,
     TaskNotFoundError,
@@ -25,9 +24,13 @@ from ..domain.agent_tasks import (
 )
 from ..domain.events import EventType, RoomEvent
 from ..domain.models import (
+    TERMINAL_EXECUTION_STATUSES,
     AgentTrigger,
     DomainError,
     Execution,
+    ExecutionStatus,
+    HarnessState,
+    RunSettlement,
     Session,
     SessionStatus,
     new_id,
@@ -432,7 +435,7 @@ class _AgentTasksMixin(_SharedMixin):
                 drained += 1
 
     async def sweep_stranded_working_agent_tasks(self) -> int:
-        """Fail every task WORKING behind a run that has already settled.
+        """Recover tasks left behind a settled run by an older process.
 
         ``_dispatch_agent_task_run`` fails a task itself when its own turn
         ends badly or is cancelled, but a harder kill (SIGKILL, an OOM, the
@@ -446,24 +449,25 @@ class _AgentTasksMixin(_SharedMixin):
         exists to prevent; this is what makes that true after a restart too,
         not only while the same process is still running.
         """
-        failed = 0
+        recovered = 0
         for task in await self.repos.agent_tasks.list_working_with_settled_run():
-            run = await self.repos.agent_runs.get_by_execution(task.execution_id or "")
-            settlement = run.settlement.value if run is not None and run.settlement else "unknown"
-            try:
-                await self.fail_agent_task(
-                    task.task_id,
-                    f"the run driving this task settled ({settlement}) with nothing "
-                    "left to carry it further",
-                    by_agent_id=task.target_agent_id,
-                )
-                failed += 1
-            except DomainError:
-                # Something else moved the task on since the list was read; the
-                # sweep's own compare-and-swap (inside transition()) is what
-                # makes that race land on whoever actually won it, not on this.
-                log.info("Agent task %s moved before the stranded sweep reached it", task.task_id)
-        return failed
+            events: list[RoomEvent] = []
+            async with self.db.transaction():
+                run = await self.repos.agent_runs.get_by_execution(task.execution_id or "")
+                if run is None or run.settlement is None:
+                    continue
+                # Reuse an already committed answer when there is one. A crash
+                # after output publication did not turn that answer into a failure.
+                for event in await self.repos.agent_tasks.settle_for_execution_in_transaction(
+                    run.execution_id, run.settlement, "system"
+                ):
+                    events.append(
+                        await self.repos.events.append_with_next_sequence_in_transaction(event)
+                    )
+            if events:
+                recovered += 1
+                await self._broadcast_persisted_events(events)
+        return recovered
 
     async def _dispatch_agent_task_run(self, task: AgentTask) -> None:
         """Drive a submitted task to a terminal state, or say on the row why not.
@@ -490,22 +494,14 @@ class _AgentTasksMixin(_SharedMixin):
             result = await self.execute_agent_step(
                 execution_id, fenced(screen(asked, "agent task"))
             )
-            output_id = str(result.get("output_id", ""))
-            output = await self.repos.agent_outputs.get(output_id) if output_id else None
-            if output is None:
-                # A turn that ended without an answer is not a completed task. The
-                # run's own settlement already says what happened to it.
-                await self.fail_agent_task(
-                    task.task_id,
-                    "the turn ended without an answer",
-                    by_agent_id=task.target_agent_id,
-                )
+            request = result.get("tool_request")
+            if isinstance(request, dict) and request.get("status") == "PENDING_APPROVAL":
+                # The approval owns the continuation. Its eventual run settlement
+                # also settles the task, even on another process after a restart.
                 return
-            await self.complete_agent_task(
-                task.task_id,
-                (Part(kind=PartKind.TEXT, content=output.content),),
-                by_agent_id=task.target_agent_id,
-            )
+            # Ordinary completion/failure already moved the task in the run's
+            # transaction. Only an unexpected nonterminal exit needs settlement.
+            await self._end_agent_task_dispatch(execution_id, "the turn ended without an answer")
         except asyncio.CancelledError:
             # A shutdown cancels every fire-and-forget dispatch (server.py), and
             # CancelledError derives from BaseException, so it would otherwise
@@ -514,24 +510,16 @@ class _AgentTasksMixin(_SharedMixin):
             # it. Failed here instead, then re-raised, so the cancellation still
             # propagates the way the rest of this process's shutdown expects.
             log.info("Agent task %s dispatch was cancelled", task.task_id)
-            try:
-                await self.fail_agent_task(
-                    task.task_id, "dispatch was cancelled", by_agent_id=task.target_agent_id
-                )
-            except Exception:
-                log.exception("Failed to fail agent task %s after cancellation", task.task_id)
+            await self._end_agent_task_dispatch(execution_id, "dispatch was cancelled")
             raise
         except Exception as exc:
             log.exception("Agent task %s did not complete", task.task_id)
-            try:
-                await self.fail_agent_task(
-                    task.task_id, f"dispatch failed: {exc}", by_agent_id=task.target_agent_id
-                )
-            except Exception:
-                # The task and its ask are already committed. Failing this write
-                # would leave the row claiming to be working; the sweep is what
-                # catches that, and it is told by logs rather than by a raise here.
-                log.exception("Failed to fail agent task %s", task.task_id)
+            await self._end_agent_task_dispatch(execution_id, f"dispatch failed: {exc}")
+
+    async def _end_agent_task_dispatch(self, execution_id: str, reason: str) -> None:
+        run = await self.repos.agent_runs.get_by_execution(execution_id)
+        if run is not None and run.harness_state is not HarnessState.SETTLED:
+            await self._settle_run(run, RunSettlement.FAILED, "system", reason)
 
     async def _asker_parts(self, task_id: str) -> tuple[Part, ...]:
         """What the asker last said, which is the prompt the delegate answers."""
@@ -602,10 +590,13 @@ class _AgentTasksMixin(_SharedMixin):
             await self.repos.executions.record_caller_in_transaction(
                 execution.execution_id, task.requested_by
             )
-        started = await self._require_agent_task(task_id)
-        await self._append_agent_task_event(
-            started, started.target_agent_id, "agent", execution_id=execution.execution_id
-        )
+            started = await self._require_agent_task(task_id)
+            event = await self.repos.events.append_with_next_sequence_in_transaction(
+                self.repos.agent_tasks.lifecycle_event(
+                    started, started.target_agent_id, "agent", execution_id=execution.execution_id
+                )
+            )
+        await self._broadcast_persisted_events([event])
         return started
 
     async def continue_agent_task(
@@ -744,18 +735,50 @@ class _AgentTasksMixin(_SharedMixin):
         something that completed a second earlier is owed the difference between "too
         late" and "that was never allowed".
         """
-        task = await self._asker_task(task_id, requested_by)
-        if task.is_terminal:
-            raise TaskNotCancelableError(
-                f"task {task_id} is already {task.state.value} and cannot be canceled"
-            )
+        events: list[RoomEvent] = []
         try:
-            moved = await self.repos.agent_tasks.transition(
-                task_id,
-                task.state,
-                AgentTaskState.CANCELED,
-                refusal_reason=f"canceled by {requested_by}",
-            )
+            async with self.db.transaction():
+                task = await self._asker_task(task_id, requested_by)
+                if task.is_terminal:
+                    raise TaskNotCancelableError(
+                        f"task {task_id} is already {task.state.value} and cannot be canceled"
+                    )
+                execution = (
+                    await self.repos.executions.get(task.execution_id)
+                    if task.execution_id
+                    else None
+                )
+                if execution is not None and execution.status not in TERMINAL_EXECUTION_STATUSES:
+                    events.extend(
+                        await self.repos.executions.terminalize_without_output_in_transaction(
+                            execution,
+                            ExecutionStatus.CANCELLED,
+                            f"task canceled by {requested_by}",
+                            [],
+                            RunSettlement.CANCELLED,
+                            requested_by,
+                        )
+                    )
+                moved = await self._require_agent_task(task_id)
+                if not moved.is_terminal:
+                    moved = await self.repos.agent_tasks.transition_in_transaction(
+                        task_id,
+                        moved.state,
+                        AgentTaskState.CANCELED,
+                        refusal_reason=f"canceled by {requested_by}",
+                    )
+                    events.append(
+                        await self.repos.events.append_with_next_sequence_in_transaction(
+                            self.repos.agent_tasks.lifecycle_event(
+                                moved,
+                                requested_by,
+                                "agent" if requested_by == task.delegating_agent_id else "user",
+                            )
+                        )
+                    )
+        except TaskNotFoundError:
+            # Preserve the indistinguishable missing/unauthorized-task refusal.
+            raise
         except DomainError:
             # It ended between the read above and the write. The caller is owed the
             # same name they would have got a moment earlier, not a description of
@@ -766,11 +789,11 @@ class _AgentTasksMixin(_SharedMixin):
                     f"task {task_id} is already {settled.state.value} and cannot be canceled"
                 ) from None
             raise
-        await self._append_agent_task_event(
-            moved,
-            requested_by,
-            "agent" if requested_by == task.delegating_agent_id else "user",
-        )
+        if moved.execution_id:
+            await self.repos.suspended_turns.discard(moved.execution_id)
+            await self._expire_undecided_approvals(moved.execution_id, "task canceled by asker")
+            await self.nexus.cancel_execution(moved.execution_id)
+        await self._broadcast_persisted_events(events)
         return moved
 
     async def get_agent_task(self, task_id: str, *, viewer_id: str) -> AgentTask:

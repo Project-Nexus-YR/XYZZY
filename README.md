@@ -73,11 +73,16 @@ Studio, or any OpenAI-compatible server instead of a hosted API. Apache-2.0 lice
 - **Real-time collaboration:** WebSocket broadcasting of all room events
 - **Reconnect support:** full state snapshot + incremental event replay on reconnect
 
+Synthesis records its start before calling the provider and has a five-minute deadline.
+Cancellation records a failure; startup and periodic recovery fail expired requests while
+preserving other workers' live requests. A completed idempotency key replays the same artifact.
+If a synthesis fails, retry with a new key; the original key retains its failed outcome.
+
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Browser (web/index.html)              │
+│        Browser (src/multiplayer/web/index.html)           │
 │                    WebSocket + REST API                  │
 └──────────────────────────┬──────────────────────────────┘
                            │
@@ -119,7 +124,7 @@ src/multiplayer/
 │                  #   synthesis.py: frozen dataclasses, RoomEvent
 ├── db/              # connection.py, repositories.py: 43 typed repository classes
 ├── migrations/      # numbered *.sql, applied in order at startup
-├── services/        # service.py composes thirteen domain mixins (rooms, conversation, agents, runs, steps,
+├── services/        # service.py composes fourteen domain mixins (rooms, conversation, agents, runs, steps,
 │                  #   agent_tasks, branches, ontology, meta, audit, erasure, organizations, records, bootstrap)
 │                  #   over _shared.py; presence.py tracks who is online
 ├── security/        # capabilities.py, authorization.py, boundary.py, audit.py, oidc.py, sessions.py, auth.py,
@@ -130,11 +135,10 @@ src/multiplayer/
 ├── nexus_bridge/    # agent_bridge.py: NEXUS runtime adapter
 ├── realtime/        # hub.py, websocket.py, fanout.py: pub/sub, WebSocket endpoint, cross-process fan-out
 ├── api/             # routes.py, a2a.py, share_page.py: REST endpoints, A2A wire surface, public share pages
+├── web/             # packaged single-page workspace: index.html, app.css, js/ modules, local fonts/
 ├── manage.py        # operator CLI: user/token management, user erase, db backup, audit verify
 ├── metrics.py       # process counters and gauges served at GET /metrics
 └── server.py        # Uvicorn entry point with lifespan
-web/
-└── index.html       # Single-page workspace UI
 tests/               # unit, integration, concurrency, security, failure, regression, e2e, model_providers, performance
 scripts/             # producer scripts CI and the landing page depend on: check_anchors.py, capture_hero.py,
                      #   capture_scenes.py, build_demo_gif.py, build_og.py, dev_idp.py
@@ -282,7 +286,7 @@ deployment that terminates TLS in front of the server needs the first three.
 | `XYZZY_CORS_ORIGINS` | the two loopback origins | Comma-separated browser origins allowed to call the API. `*` is refused: paired with credentials it would let any site spend a signed-in session. |
 | `XYZZY_RATE_LIMIT_PER_MINUTE` | `120` | Requests per minute per bearer token, or per peer address when there is no token. `/api/v1/health` is exempt so a monitor cannot spend a client's budget. |
 | `XYZZY_MODEL_MAX_OUTPUT_TOKENS` | `4096` | Cap on the tokens one model call may generate (`max_output_tokens` on the Responses API, `max_tokens` on Chat Completions). |
-| `XYZZY_RUN_TOKEN_BUDGET` | `500000` | Ceiling on the tokens one run may spend across all of its steps; the run settles `MAX_TOKENS` before the step that would exceed it. `0` or a negative value disables the ceiling. |
+| `XYZZY_RUN_TOKEN_BUDGET` | `500000` | Stops further steps once recorded run usage reaches the threshold, settling `MAX_TOKENS`. An in-flight step can overshoot it; this is not a hard spend cap. `0` or a negative value disables the check. |
 | `XYZZY_SHUTDOWN_GRACE_SECONDS` | `10` | How long a stop waits for open requests and streams before the process exits; a stream on a task that never finishes cannot hold a deploy past this. |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Proxies whose `X-Forwarded-For` uvicorn trusts. Set it to your reverse proxy's address so rate limiting and logs see the client, not the proxy. |
 | `XYZZY_MAX_BODY_BYTES` | `1048576` | Largest request body, counted on the bytes received: a chunked request with no declared length is refused with 413 at the cap, before any route runs. |

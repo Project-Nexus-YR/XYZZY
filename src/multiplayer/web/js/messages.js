@@ -30,11 +30,11 @@ export async function openNotifications() {
   }
   const sorted = [...state.lastNotifications].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
   list.innerHTML = sorted.map(n => `
-    <div class="notif-row" data-room-id="${escHtml(n.room_id || '')}" data-action="openNotification">
-      <div class="title">${escHtml(n.title)}</div>
-      <div class="body">${escHtml(n.body)}</div>
-      <div class="time">${formatTime(n.created_at)}</div>
-    </div>
+    <button type="button" class="notif-row" data-room-id="${escHtml(n.room_id || '')}" data-action="openNotification">
+      <span class="title">${escHtml(n.title)}</span>
+      <span class="body">${escHtml(n.body)}</span>
+      <span class="time">${formatTime(n.created_at)}</span>
+    </button>
   `).join('');
 }
 

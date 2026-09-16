@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from http.client import HTTPConnection
 from pathlib import Path
 
 import pytest
@@ -27,10 +28,23 @@ SRC_ROOT = str(Path(__file__).resolve().parents[2] / "src")
 
 _SERVER_SCRIPT = """
 import os
+import sys
 import uvicorn
 from multiplayer.server import create_app
 
 app = create_app(":memory:", auth_tokens={"owner-token": "user_1"})
+
+@app.get("/__test__/peak-working-set")
+async def peak_working_set() -> int:
+    import resource
+
+    # Ask the child for its lifetime high-water RSS, including allocations
+    # already freed after rejecting the body. macOS reports bytes; other
+    # Unix platforms report KiB. resource is unavailable on Windows, where
+    # the parent uses GetProcessMemoryInfo instead.
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(peak) if sys.platform == "darwin" else int(peak) * 1024
+
 uvicorn.run(app, host="127.0.0.1", port=int(os.environ["FIX_API_TEST_PORT"]), log_level="warning")
 """
 
@@ -53,7 +67,7 @@ def _wait_until_ready(port: int, deadline: float) -> None:
     raise TimeoutError("server never became ready")
 
 
-def _peak_working_set_bytes(pid: int) -> int:
+def _peak_working_set_bytes(pid: int, port: int) -> int:
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
@@ -90,11 +104,15 @@ def _peak_working_set_bytes(pid: int) -> int:
             return int(counters.PeakWorkingSetSize)
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)
-    with open(f"/proc/{pid}/status", encoding="ascii") as status:
-        for line in status:
-            if line.startswith("VmHWM:"):
-                return int(line.split()[1]) * 1024
-    raise OSError("VmHWM not found")
+    connection = HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request("GET", "/__test__/peak-working-set")
+        response = connection.getresponse()
+        if response.status != 200:
+            raise OSError(f"server memory probe returned HTTP {response.status}")
+        return int(response.read())
+    finally:
+        connection.close()
 
 
 def _send_chunked_body(port: int, total_bytes: int, chunk_size: int = 8_192) -> bytes:
@@ -199,7 +217,7 @@ def live_server() -> Iterator[tuple[subprocess.Popen[bytes], int]]:
 
 def test_a_chunked_64mib_body_is_capped_at_the_asgi_layer_with_flat_rss(live_server) -> None:
     proc, port = live_server
-    baseline = _peak_working_set_bytes(proc.pid)
+    baseline = _peak_working_set_bytes(proc.pid, port)
 
     started = time.monotonic()
     response = _send_chunked_body(port, total_bytes=64 * 1024 * 1024)
@@ -211,7 +229,7 @@ def test_a_chunked_64mib_body_is_capped_at_the_asgi_layer_with_flat_rss(live_ser
     # streaming all 64 MiB before answering would take.
     assert elapsed < 15, f"the 413 took {elapsed:.1f}s — the body was read in full first"
 
-    peak = _peak_working_set_bytes(proc.pid)
+    peak = _peak_working_set_bytes(proc.pid, port)
     grew_by = peak - baseline
     # Nowhere near the 64 MiB sent, or even the default 1 MiB cap read once:
     # a process that buffered the request would grow by tens of megabytes.

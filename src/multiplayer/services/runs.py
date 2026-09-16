@@ -127,6 +127,7 @@ class _RunsMixin(_SharedMixin):
         # it is also the thing that has to notice a task stranded WORKING
         # behind one of the runs just settled above, or by anything else.
         await self.sweep_stranded_working_agent_tasks()
+        await self.sweep_expired_branch_syntheses()
         return settled
 
     async def record_session_update(

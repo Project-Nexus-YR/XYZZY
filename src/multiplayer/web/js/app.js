@@ -253,7 +253,10 @@ function dispatch(table, name, el, event) {
 function initDelegatedEvents() {
   document.addEventListener('click', (event) => {
     const el = event.target.closest('[data-action]');
-    if (el) dispatch(clickActions, el.dataset.action, el, event);
+    if (el) {
+      if (el.closest('#channel-menu')) closeChannelMenu();
+      dispatch(clickActions, el.dataset.action, el, event);
+    }
   });
   document.addEventListener('submit', (event) => {
     const el = event.target.closest('[data-submit-action]');

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 from dataclasses import replace
+from datetime import datetime, timedelta
 from typing import Any
 
 from ..domain.events import EventType, RoomEvent
@@ -53,11 +55,6 @@ from ..domain.synthesis import (
     render as render_synthesis,
 )
 from ..model_providers import ModelProviderError
-from ..security.authorization import (
-    AuthorizationError,
-    RoomCapability,
-    capabilities_for_role,
-)
 from ..security.screening import fenced, screen
 from ._shared import (
     AgentLaunchRefused,
@@ -65,6 +62,11 @@ from ._shared import (
 )
 
 log = logging.getLogger(__name__)
+
+# A synthesis is one bounded provider request. Its immutable creation timestamp
+# is the durable start of this deadline, shared by all workers and startup sweeps.
+# Publication checks the same deadline, so an expired worker cannot publish late.
+_SYNTHESIS_MAX_DURATION = timedelta(minutes=5)
 
 
 class _BranchesMixin(_SharedMixin):
@@ -484,6 +486,21 @@ class _BranchesMixin(_SharedMixin):
                 if prior is not None:
                     return await self._replay_branch_synthesis(prior.result_ref)
             await self.repos.branch_syntheses.create_with_inputs(synthesis, inputs)
+            started_event = await self.repos.events.append_with_next_sequence_in_transaction(
+                RoomEvent(
+                    room_id=branch.room_id,
+                    sequence=0,
+                    event_type=EventType.BRANCH_SYNTHESIS_STARTED,
+                    payload={
+                        "branch_id": branch_id,
+                        "synthesis_id": synthesis.synthesis_id,
+                        "selected_output_ids": [item.output_id for item in inputs],
+                    },
+                    actor_id=created_by,
+                    actor_type="user",
+                    timestamp=synthesis.created_at,
+                )
+            )
             if idempotency_key is not None:
                 await self._record_idempotency(
                     branch_id,
@@ -494,71 +511,87 @@ class _BranchesMixin(_SharedMixin):
                     synthesis.synthesis_id,
                 )
         try:
-            model_result = await self.nexus.synthesize_selected_outputs(
-                title=title,
-                prompt=branch.initiating_prompt,
-                outputs=selected_records,
-                synthesis_type=spec.type.value,
+            await self._broadcast_persisted_events([started_event])
+            remaining = (synthesis.created_at + _SYNTHESIS_MAX_DURATION - utcnow()).total_seconds()
+            model_result = await asyncio.wait_for(
+                self.nexus.synthesize_selected_outputs(
+                    title=title,
+                    prompt=branch.initiating_prompt,
+                    outputs=selected_records,
+                    synthesis_type=spec.type.value,
+                ),
+                timeout=max(0, remaining),
             )
             return await self._complete_branch_synthesis(
                 branch, synthesis, inputs, included, title, created_by, model_result, spec
             )
+        except asyncio.CancelledError:
+            # A cancelled request still owes the room a terminal record. Shield
+            # cleanup from repeated shutdown cancellation and keep its task alive
+            # until the transaction commits before propagating the cancellation.
+            cleanup = asyncio.create_task(
+                self._fail_branch_synthesis(synthesis, "synthesis request was cancelled")
+            )
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
+            raise
+        except TimeoutError as exc:
+            reason = "synthesis exceeded its five-minute deadline"
+            await self._fail_branch_synthesis(synthesis, reason)
+            raise DomainError(reason) from exc
         except Exception as exc:
             # The key was claimed before the model call. Any failure after that
             # point must leave a terminal FAILED row, so a replay says "retry with
             # a new key" instead of reporting the synthesis as running forever.
-            await self._fail_branch_synthesis(branch, synthesis, inputs, created_by, str(exc))
+            await self._fail_branch_synthesis(synthesis, str(exc))
             if isinstance(exc, ModelProviderError):
                 raise DomainError(str(exc)) from exc
             raise
 
     async def _fail_branch_synthesis(
         self,
-        branch: Branch,
         synthesis: BranchSynthesis,
-        inputs: list[BranchSynthesisInput],
-        created_by: str,
         error: str,
-    ) -> None:
+        *,
+        created_before: datetime | None = None,
+    ) -> bool:
         async with self.db.transaction():
-            current = await self.repos.branch_syntheses.get(synthesis.synthesis_id)
-            if current is None or current.status is not BranchSynthesisStatus.RUNNING:
-                return
-            await self.repos.branch_syntheses.mark_failed(synthesis.synthesis_id, error)
-            member = await self.repos.room_members.get(branch.room_id, created_by)
-            if RoomCapability.MUTATE not in capabilities_for_role(member.role if member else None):
-                # Initiator lost write access during the model call: the RUNNING row
-                # is now terminal, but attribute no ordered event to a non-member.
-                return
-            started_event = await self.repos.events.append_with_next_sequence_in_transaction(
-                RoomEvent(
-                    room_id=branch.room_id,
-                    sequence=0,
-                    event_type=EventType.BRANCH_SYNTHESIS_STARTED,
-                    payload={
-                        "branch_id": branch.branch_id,
-                        "synthesis_id": synthesis.synthesis_id,
-                        "selected_output_ids": [item.output_id for item in inputs],
-                    },
-                    actor_id=created_by,
-                    actor_type="user",
-                    timestamp=synthesis.created_at,
-                )
+            changed = await self.repos.branch_syntheses.mark_failed(
+                synthesis.synthesis_id, error, created_before=created_before
             )
+            if not changed:
+                return False
             failed_event = await self.repos.events.append_with_next_sequence_in_transaction(
                 RoomEvent(
-                    room_id=branch.room_id,
+                    room_id=synthesis.room_id,
                     sequence=0,
                     event_type=EventType.BRANCH_SYNTHESIS_FAILED,
                     payload={
-                        "branch_id": branch.branch_id,
+                        "branch_id": synthesis.branch_id,
                         "synthesis_id": synthesis.synthesis_id,
                     },
-                    actor_id=created_by,
-                    actor_type="user",
+                    actor_id="system",
+                    actor_type="system",
                 )
             )
-        await self._broadcast_persisted_events([started_event, failed_event])
+        await self._broadcast_persisted_events([failed_event])
+        return True
+
+    async def sweep_expired_branch_syntheses(self) -> int:
+        """Fail only expired syntheses; another worker's live request stays live."""
+        cutoff = utcnow() - _SYNTHESIS_MAX_DURATION
+        settled = 0
+        while expired := await self.repos.branch_syntheses.list_expired_running(cutoff):
+            for synthesis in expired:
+                if await self._fail_branch_synthesis(
+                    synthesis, "synthesis exceeded its five-minute deadline", created_before=cutoff
+                ):
+                    settled += 1
+        return settled
 
     async def _complete_branch_synthesis(
         self,
@@ -667,19 +700,6 @@ class _BranchesMixin(_SharedMixin):
                 RoomEvent(
                     room_id=branch.room_id,
                     sequence=0,
-                    event_type=EventType.BRANCH_SYNTHESIS_STARTED,
-                    payload={
-                        "branch_id": branch_id,
-                        "synthesis_id": synthesis.synthesis_id,
-                        "selected_output_ids": [item.output_id for item in inputs],
-                    },
-                    actor_id=created_by,
-                    actor_type="user",
-                    timestamp=synthesis.created_at,
-                ),
-                RoomEvent(
-                    room_id=branch.room_id,
-                    sequence=0,
                     event_type=(
                         EventType.DECISION_BRIEF_SYNTHESIZED
                         if spec.type is SynthesisType.DECISION_BRIEF
@@ -746,30 +766,24 @@ class _BranchesMixin(_SharedMixin):
                     actor_type="user",
                 )
             )
-        aborted = False
         persisted_events: list[RoomEvent] = []
         async with self.db.transaction():
-            member = await self.repos.room_members.get(branch.room_id, created_by)
-            if RoomCapability.MUTATE not in capabilities_for_role(member.role if member else None):
-                # Demoted during the model call: terminate the RUNNING row without
-                # attributing any ordered event to a member who lost write access.
-                await self.repos.branch_syntheses.mark_failed(
-                    synthesis.synthesis_id, "initiator lost write access during synthesis"
-                )
-                aborted = True
-            else:
-                persisted_events = await self.repos.artifacts.create_synthesis_in_transaction(
-                    artifact,
-                    version,
-                    claims_and_sources,
-                    ontology_entities,
-                    ontology_relationships,
-                    event_types,
-                    create_artifact=create_artifact,
-                    synthesis=terminal_synthesis,
-                )
-        if aborted:
-            raise AuthorizationError("room access forbidden")
+            await self._require_mutate_in_transaction(branch.room_id, created_by)
+            current = await self.repos.branch_syntheses.get(synthesis.synthesis_id)
+            if current is None or current.status is not BranchSynthesisStatus.RUNNING:
+                raise DomainError("synthesis is no longer running; publication refused")
+            if current.created_at + _SYNTHESIS_MAX_DURATION <= utcnow():
+                raise DomainError("synthesis exceeded its five-minute deadline")
+            persisted_events = await self.repos.artifacts.create_synthesis_in_transaction(
+                artifact,
+                version,
+                claims_and_sources,
+                ontology_entities,
+                ontology_relationships,
+                event_types,
+                create_artifact=create_artifact,
+                synthesis=terminal_synthesis,
+            )
         await self._broadcast_persisted_events(persisted_events)
         return replace(artifact, current_version=version.version_number), version
 
